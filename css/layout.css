@@ -1,0 +1,354 @@
+/* -----------------------------------------------------------------------
+ * PesaGuard Status Site — Layout (header, shell)
+ * -----------------------------------------------------------------------
+ * Adapted from the docs layout.css for the standalone status site.
+ * ------------------------------------------------------------------------- */
+
+/* --- Header --------------------------------------------------------------- */
+
+.status-header {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  height: var(--header-h);
+  background: var(--header-bg, rgba(255, 255, 255, 0.92));
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--line);
+  transition: background-color 0.2s var(--ease-out), border-color 0.2s var(--ease-out), box-shadow 0.28s var(--ease-out);
+}
+
+.status-header-inner {
+  max-width: var(--site-max);
+  margin-inline: auto;
+  height: 100%;
+  padding-inline: clamp(20px, 4vw, 44px);
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.status-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+  color: var(--text);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  font-size: 1.05rem;
+}
+
+.status-brand img { width: 26px; height: 26px; display: block; }
+
+.status-brand small {
+  font: 500 11px / 1 var(--font-mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  border-left: 1px solid var(--line);
+  padding-left: 10px;
+}
+
+.status-header-links {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px 18px;
+  font-size: 13px;
+}
+
+.status-header-links a {
+  color: var(--text-muted);
+  text-decoration: none;
+  padding: 6px 8px;
+  border-radius: 6px;
+}
+
+.status-header-links a:hover {
+  color: var(--text);
+  background: var(--paper-sunken);
+}
+
+.status-header-links a[aria-current="page"] {
+  color: var(--text);
+  font-weight: 700;
+  background: var(--paper-sunken);
+}
+
+.status-header.is-scrolled {
+  border-bottom-color: var(--line-strong);
+  box-shadow: var(--shadow-sm);
+}
+
+.status-header-links .status-subscribe-link {
+  color: var(--text);
+  font-weight: 700;
+  border: 1px solid var(--line);
+  background: var(--paper-raised);
+  white-space: nowrap;
+}
+
+.status-header-links .status-subscribe-link:hover {
+  border-color: var(--line-strong);
+  background: var(--paper-sunken);
+  color: var(--text);
+}
+
+/* --- Mobile nav toggle ----------------------------------------------------- */
+
+.status-nav-toggle {
+  display: none;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 4px;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line);
+  background: var(--paper-raised);
+  cursor: pointer;
+  flex: none;
+}
+
+.status-nav-toggle span {
+  display: block;
+  width: 16px;
+  height: 2px;
+  background: var(--text-muted);
+  border-radius: 2px;
+  transition: transform 0.2s var(--ease-out), opacity 0.2s var(--ease-out);
+}
+
+.status-nav-toggle[aria-expanded="true"] span:nth-child(1) {
+  transform: translateY(6px) rotate(45deg);
+}
+
+.status-nav-toggle[aria-expanded="true"] span:nth-child(2) {
+  opacity: 0;
+}
+
+.status-nav-toggle[aria-expanded="true"] span:nth-child(3) {
+  transform: translateY(-6px) rotate(-45deg);
+}
+
+/* --- Shell ---------------------------------------------------------------- */
+
+.status-shell {
+  max-width: var(--site-max);
+  margin-inline: auto;
+  padding-inline: clamp(20px, 4vw, 44px);
+}
+
+.status-container {
+  max-width: var(--site-max);
+  margin-inline: auto;
+  padding-inline: clamp(20px, 4vw, 44px);
+}
+
+/* --- Footer ------------------------------------------------------------------ */
+
+.status-footer {
+  border-top: 1px solid var(--line);
+  background: var(--paper-sunken);
+}
+
+.status-footer-inner {
+  max-width: var(--site-max);
+  margin-inline: auto;
+  padding: 44px clamp(20px, 4vw, 44px) 28px;
+}
+
+.status-footer-top {
+  display: flex;
+  flex-direction: column;
+  gap: 36px;
+}
+
+/* Exactly three link columns: Status | PesaGuard | Legal.
+   The brand block above the grid is a full-width intro row. */
+.status-footer-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 32px 28px;
+}
+
+.status-footer-brand .status-footer-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+  color: var(--text);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  font-size: 1.02rem;
+}
+
+.status-footer-brand .status-footer-logo img { width: 28px; height: 28px; display: block; }
+
+.status-footer-brand .status-footer-logo:focus-visible {
+  outline: 2px solid var(--lime-deep);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
+.status-footer-wordmark { display: inline-flex; align-items: baseline; gap: 9px; }
+
+.status-footer-wordmark small {
+  font: 500 10px / 1 var(--font-mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  border-left: 1px solid var(--line);
+  padding-left: 9px;
+}
+
+.status-footer-brand p {
+  margin: 14px 0 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-muted);
+  max-width: 36ch;
+}
+
+.status-footer-grid h3 {
+  margin: 0 0 12px;
+  font: 600 10.5px / 1.4 var(--font-mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.status-footer-grid ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.status-footer-grid a {
+  color: var(--text-muted);
+  text-decoration: none;
+  font-size: 13px;
+}
+
+.status-footer-grid a:hover {
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.status-footer-grid a:focus-visible {
+  outline: 2px solid var(--lime-deep);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+.status-footer-utility {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-top: 36px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.status-last-updated {
+  margin: 0;
+  font: 500 11.5px / 1.5 var(--font-mono);
+  color: var(--text-faint);
+}
+
+.status-last-updated .js-last-updated { color: var(--text-muted); }
+
+.status-footer-top-link {
+  flex: none;
+  padding: 7px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-full);
+  background: var(--paper-raised);
+  color: var(--text-muted);
+  font: 600 11px / 1 var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-decoration: none;
+  transition: border-color 140ms var(--ease-out), color 140ms var(--ease-out), background 140ms var(--ease-out);
+}
+
+.status-footer-top-link:hover {
+  border-color: var(--line-strong);
+  color: var(--text);
+  background: var(--paper);
+}
+
+.status-footer-top-link:focus-visible {
+  outline: 2px solid var(--lime-deep);
+  outline-offset: 2px;
+}
+
+.status-footer-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line-soft);
+  font: 500 11px / 1.5 var(--font-mono);
+  color: var(--text-faint);
+}
+
+/* --- Responsive layout (header) -------------------------------------------- */
+
+@media (max-width: 700px) {
+  .status-header-links {
+    display: none;
+  }
+
+  .status-nav-toggle {
+    display: flex;
+  }
+
+  .status-header-links.is-open {
+    display: flex;
+    position: absolute;
+    top: var(--header-h);
+    left: 0;
+    right: 0;
+    flex-direction: column;
+    gap: 2px;
+    margin: 0;
+    padding: 10px clamp(20px, 4vw, 44px) 16px;
+    background: var(--paper);
+    border-bottom: 1px solid var(--line);
+    box-shadow: var(--shadow-md);
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(-8px);
+    pointer-events: none;
+    transition: opacity 200ms var(--ease-out), transform 200ms var(--ease-out), visibility 0s linear 200ms;
+  }
+
+  .status-header-links.is-open {
+    opacity: 1;
+    visibility: visible;
+    transform: none;
+    pointer-events: auto;
+    transition: opacity 200ms var(--ease-out), transform 200ms var(--ease-out), visibility 0s;
+  }
+
+  .status-header-links.is-open a {
+    opacity: 1;
+    transform: none;
+  }
+
+  .status-header-links.is-open a:nth-child(1) { transition-delay: 30ms; }
+  .status-header-links.is-open a:nth-child(2) { transition-delay: 60ms; }
+  .status-header-links.is-open a:nth-child(3) { transition-delay: 90ms; }
+  .status-header-links.is-open a:nth-child(4) { transition-delay: 120ms; }
+}

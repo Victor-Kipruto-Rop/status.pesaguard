@@ -1,0 +1,137 @@
+/* -----------------------------------------------------------------------
+ * PesaGuard Status Site — Incidents page
+ * ------------------------------------------------------------------------- */
+
+.incidents-header {
+  padding: clamp(36px, 5vw, 64px) 0;
+}
+
+.incidents-header .status-pill {
+  font-size: 13px;
+  padding: 6px 18px;
+}
+
+/* --- Active incidents ------------------------------------------------------ */
+
+.active-incidents {
+  margin: 26px 0;
+}
+
+.active-incidents .section-label {
+  display: inline-block;
+  font: 600 10px / 1.4 var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-bottom: 12px;
+}
+
+.active-incidents .section-label[data-tone="outage"] { color: var(--signal-red); }
+
+/* --- Incident list --------------------------------------------------------- */
+
+.incident-list {
+  margin: 14px 0 30px;
+}
+
+/* --- Filters --------------------------------------------------------------- */
+
+.incident-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--paper-raised);
+  margin-bottom: 20px;
+  font-size: 13px;
+}
+
+.incident-filters label {
+  font: 500 10px / 1.4 var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-right: 6px;
+}
+
+.incident-filters select {
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--paper);
+  font-size: 12.5px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.incident-filters select:focus {
+  outline: 2px solid var(--lime-deep);
+  outline-offset: 2px;
+}
+
+/* --- Past incidents -------------------------------------------------------- */
+
+.past-incidents {
+  margin: 34px 0;
+}
+
+.past-incidents .incident-year {
+  font: 600 11px / 1.4 var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin: 26px 0 14px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+/* --- Empty state ----------------------------------------------------------- */
+
+.incident-empty {
+  text-align: center;
+  padding: 56px 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--paper-raised);
+}
+
+.incident-empty .empty-icon {
+  width: 48px;
+  height: 48px;
+  margin: 0 auto 18px;
+  opacity: 0.4;
+}
+
+.incident-empty h2 {
+  font-size: 1.3rem;
+  margin: 0 0 8px;
+}
+
+.incident-empty p {
+  color: var(--text-muted);
+  max-width: 48ch;
+  margin: 0 auto 20px;
+}
+
+/* --- Back to status -------------------------------------------------------- */
+
+.status-back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: 600 11px / 1.4 var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.status-back-link:hover {
+  color: var(--text);
+}
+
+.status-back-link .arrow {
+  font-size: 14px;
+  color: var(--lime-deep);
+}

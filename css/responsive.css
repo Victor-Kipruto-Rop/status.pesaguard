@@ -1,0 +1,111 @@
+/* -----------------------------------------------------------------------
+ * PesaGuard Status Site — Responsive overrides
+ * -----------------------------------------------------------------------
+ * Extends the layout.css mobile rules with status-specific tweaks.
+ * ------------------------------------------------------------------------- */
+
+@media (max-width: 700px) {
+  .status-card-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .service-list {
+    grid-template-columns: 1fr;
+  }
+
+  .uptime-charts {
+    grid-template-columns: 1fr;
+  }
+
+  .status-hero-grid {
+    grid-template-columns: 1fr;
+    gap: 18px;
+  }
+
+  .status-uptime-summary,
+  .uptime-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .incident-card-header,
+  .maintenance-card-header {
+    flex-direction: column;
+    align-items: flex-start;
+    text-align: left;
+  }
+
+  .section-head { align-items: flex-start; }
+  .status-freshness { gap: 10px 14px; }
+
+  .support-panel,
+  .status-support .support-panel {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .subscribe-row { flex-direction: column; }
+  .status-subscription-form button[type="submit"] { width: 100%; }
+
+  .status-footer-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 24px 18px;
+  }
+
+  .status-footer-top {
+    gap: 28px;
+  }
+}
+
+@media (max-width: 460px) {
+  .status-uptime-summary,
+  .uptime-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .service-list { grid-template-columns: 1fr; }
+
+  .uptime-chart-bar-group {
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  .status-footer-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .status-footer-utility,
+  .status-footer-bottom {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+}
+
+/* --- Print styles ----------------------------------------------------------- */
+
+@media print {
+  .status-header,
+  .status-nav-toggle,
+  .status-footer-utility,
+  .status-footer-bottom {
+    display: none !important;
+  }
+
+  body {
+    background: #fff;
+    color: #000;
+  }
+
+  .status-header-inner,
+  .status-footer-inner,
+  .status-container,
+  .status-shell {
+    max-width: 100%;
+    padding: 0;
+  }
+
+  .status-card {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+}

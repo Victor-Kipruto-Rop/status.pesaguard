@@ -1,0 +1,154 @@
+/* -----------------------------------------------------------------------
+ * PesaGuard Status Site — Design Tokens
+ * -----------------------------------------------------------------------
+ * Exact mirror of the PesaGuard docs palette and typography. Every value is
+ * shared one-to-one so the status site is visually indistinguishable from the
+ * rest of the PesaGuard surface.
+ * ------------------------------------------------------------------------- */
+
+:root {
+  --ink: #12352a;
+  --ink-soft: #0b422f;
+  --paper: #ffffff;
+  --paper-raised: #ffffff;
+  --paper-sunken: #f5f9f6;
+  --paper-deep: #eaf3ed;
+  --lime: #22c55e;
+  --lime-strong: #07875d;
+  --lime-deep: #0b5d3b;
+  --lime-ink: #0b5d3b;
+  --lime-wash: rgba(34, 197, 94, 0.12);
+  --lime-veil: rgba(34, 197, 94, 0.05);
+  --button-accent-text: #ffffff;
+  --forest: #0b5d3b;
+  --forest-soft: #07875d;
+  --signal-green: #168253;
+  --signal-amber: #a96413;
+  --signal-red: #b04444;
+  --text: #12352a;
+  --text-muted: #52665d;
+  --text-faint: #809187;
+  --line: #dce9e1;
+  --line-soft: #edf4ef;
+  --line-strong: #bfd3c5;
+
+  /* Status-specific signal colours (extended from the shared palette). */
+  --status-operational: var(--signal-green);
+  --status-degraded: var(--signal-amber);
+  --status-outage: var(--signal-red);
+  --status-maintenance: var(--lime-deep);
+
+  /* Radii. */
+  --r-sm: 7px;
+  --r-md: 12px;
+  --r-lg: 20px;
+  --r-full: 999px;
+
+  /* Shadows. */
+  --shadow-xs: 0 1px 2px rgba(11, 61, 39, 0.06);
+  --shadow-sm: 0 6px 18px -10px rgba(11, 61, 39, 0.18);
+  --shadow-md: 0 18px 40px -24px rgba(11, 61, 39, 0.2);
+
+  /* Typography. */
+  --font-sans: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Layout. */
+  --site-max: 1340px;
+  --header-h: 64px;
+  --ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
+
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --ink: #eff8f1;
+    --ink-soft: #0b2d1c;
+    --paper: #061a12;
+    --paper-raised: #0b2419;
+    --paper-sunken: #091f14;
+    --paper-deep: #103321;
+    --lime-strong: #55d98b;
+    --lime-deep: #83e9ac;
+    --lime-ink: #b8f0ca;
+    --lime-wash: rgba(34, 197, 94, 0.16);
+    --lime-veil: rgba(34, 197, 94, 0.07);
+    --button-accent-text: #061a12;
+    --forest: #55d98b;
+    --forest-soft: #83e9ac;
+    --signal-green: #55d98b;
+    --signal-amber: #f0b452;
+    --signal-red: #f29d91;
+    --text: #eff8f1;
+    --text-muted: #b5cbbc;
+    --text-faint: #91aa98;
+    --line: #28513a;
+    --line-soft: #1b3a27;
+    --line-strong: #376146;
+    --header-bg: rgba(6, 26, 18, 0.96);
+    --status-maintenance: var(--lime-deep);
+    --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-sm: 0 6px 18px -10px rgba(0, 0, 0, 0.55);
+    --shadow-md: 0 18px 40px -24px rgba(0, 0, 0, 0.6);
+  }
+}
+
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: calc(var(--header-h) + 20px);
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 0.95rem;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--forest); }
+a:hover { color: var(--lime-ink); }
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Keyboard focus is always visible. */
+:focus-visible {
+  outline: 2px solid var(--lime-deep);
+  outline-offset: 2px;
+}
+
+.visually-hidden:focus-visible {
+  position: fixed;
+  top: 14px;
+  left: 14px;
+  z-index: 50;
+  width: auto;
+  height: auto;
+  margin: 0;
+  padding: 10px 16px;
+  overflow: visible;
+  clip: auto;
+  white-space: normal;
+  background: var(--paper-raised);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-md);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+::selection { background: var(--lime); color: var(--ink); }

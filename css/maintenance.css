@@ -1,0 +1,224 @@
+/* -----------------------------------------------------------------------
+ * PesaGuard Status Site — Maintenance page
+ * ------------------------------------------------------------------------- */
+
+/* --- Page hero -------------------------------------------------------------- */
+
+.maintenance-header {
+  padding: clamp(36px, 5vw, 64px) 0 clamp(10px, 1.5vw, 18px);
+}
+
+.maintenance-header h1 {
+  margin-bottom: 14px;
+}
+
+/* The shared subtitle lives in status.css, which this page does not load. */
+.maintenance-header .status-hero-subtitle {
+  max-width: 58ch;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 15px;
+  line-height: 1.65;
+}
+
+/* --- Maintenance sections -------------------------------------------------- */
+
+.maintenance-section {
+  margin-bottom: 42px;
+}
+
+.maintenance-section-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font: 700 12px / 1.4 var(--font-mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin: 0 0 16px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.maintenance-section-title::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--text-muted);
+}
+
+.maintenance-section-title[data-tone="scheduled"] {
+  color: var(--signal-amber);
+}
+
+.maintenance-section-title[data-tone="scheduled"]::before {
+  background: var(--signal-amber);
+}
+
+.maintenance-section-title[data-tone="in-progress"] {
+  color: var(--signal-red);
+}
+
+.maintenance-section-title[data-tone="in-progress"]::before {
+  background: var(--signal-red);
+}
+
+.maintenance-section-title[data-tone="completed"] {
+  color: var(--signal-green);
+}
+
+.maintenance-section-title[data-tone="completed"]::before {
+  background: var(--signal-green);
+}
+
+/* --- Back link ---------------------------------------------------------------
+ * The shared .status-back-link lives in incidents.css, which this page does
+ * not load, so the maintenance page carries its own scoped copy. */
+
+.maintenance-back {
+  margin-top: 34px;
+}
+
+.status-back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-decoration: none;
+  padding: 8px 0;
+}
+
+.status-back-link:hover { color: var(--text); }
+
+.status-back-link .arrow {
+  transition: transform 160ms var(--ease-out);
+}
+
+.status-back-link:hover .arrow { transform: translateX(-3px); }
+
+.status-back-link:focus-visible {
+  outline: 2px solid var(--lime-deep);
+  outline-offset: 2px;
+}
+
+/* --- Maintenance timeline -------------------------------------------------- */
+
+.maintenance-timeline {
+  margin-top: 16px;
+  padding: 0 0 0 22px;
+  border-left: 2px solid var(--line-soft);
+  list-style: none;
+}
+
+.maintenance-timeline li {
+  position: relative;
+  padding: 10px 0 10px 14px;
+  margin-bottom: 0;
+  border-bottom: 0;
+  font-size: 13px;
+}
+
+.maintenance-timeline li::before {
+  content: "";
+  position: absolute;
+  left: -7px;
+  top: 4px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--line);
+  background: var(--paper);
+}
+
+.maintenance-timeline li.maintenance-in-progress::before {
+  border-color: var(--signal-red);
+  background: var(--signal-red);
+}
+
+.maintenance-timeline li.maintenance-completed::before {
+  border-color: var(--signal-green);
+  background: var(--signal-green);
+}
+
+.maintenance-timeline .timeline-timestamp {
+  font: 500 10.5px / 1.4 var(--font-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.maintenance-timeline .timeline-desc {
+  color: var(--text-muted);
+  margin: 2px 0 0;
+}
+
+/* --- Maintenance empty state ------------------------------------------------ */
+
+.maintenance-empty {
+  text-align: center;
+  padding: 56px 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--paper-raised);
+}
+
+.maintenance-empty .empty-icon {
+  width: 48px;
+  height: 48px;
+  margin: 0 auto 18px;
+  opacity: 0.4;
+}
+
+.maintenance-empty strong {
+  display: block;
+  font-size: 1.1rem;
+  margin-bottom: 6px;
+}
+
+.maintenance-empty p {
+  color: var(--text-muted);
+  max-width: 48ch;
+  margin: 0 auto 20px;
+}
+
+.maintenance-empty p:last-child {
+  margin-bottom: 0;
+}
+
+/* --- Maintenance history table --------------------------------------------- */
+
+.maintenance-history-table {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  background: var(--paper-raised);
+  font-size: 13px;
+}
+
+.maintenance-history-table th {
+  font: 600 10.5px / 1.4 var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  background: var(--paper-sunken);
+  padding: 10px 14px;
+  text-align: left;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.maintenance-history-table td {
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--line-soft);
+  vertical-align: top;
+}
+
+.maintenance-history-table tr:last-child td { border-bottom: 0; }
+
+.maintenance-history-table .status-pill {
+  font-size: 10px;
+  padding: 3px 10px;
+}

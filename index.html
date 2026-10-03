@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PesaGuard System Status</title>
+  <meta name="description" content="Real-time operational status, incidents, maintenance, and uptime for PesaGuard services.">
+  <link rel="canonical" href="https://status.pesaguard.victorkipruto.com/">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#061a12" media="(prefers-color-scheme: dark)">
+  <meta name="color-scheme" content="light dark">
+
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="PesaGuard System Status">
+  <meta property="og:title" content="PesaGuard System Status">
+  <meta property="og:description" content="Real-time operational status, incidents, maintenance, and uptime for PesaGuard services.">
+  <meta property="og:url" content="https://status.pesaguard.victorkipruto.com/">
+  <meta property="og:image" content="https://status.pesaguard.victorkipruto.com/assets/logo/logo.svg">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="PesaGuard System Status">
+  <meta name="twitter:description" content="Real-time operational status, incidents, maintenance, and uptime for PesaGuard services.">
+  <meta name="twitter:image" content="https://status.pesaguard.victorkipruto.com/assets/logo/logo.svg">
+
+  <link rel="icon" type="image/svg+xml" href="assets/logo/favicon.svg">
+  <link rel="stylesheet" href="css/reset.css">
+  <link rel="stylesheet" href="css/variables.css">
+  <link rel="stylesheet" href="css/global.css">
+  <link rel="stylesheet" href="css/layout.css">
+  <link rel="stylesheet" href="css/components.css">
+  <link rel="stylesheet" href="css/status.css">
+  <link rel="stylesheet" href="css/animations.css">
+  <link rel="stylesheet" href="css/responsive.css">
+
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"WebSite","name":"PesaGuard System Status","url":"https://status.pesaguard.victorkipruto.com/","description":"Real-time operational status, incidents, maintenance, and uptime for PesaGuard services.","inLanguage":"en"}
+  </script>
+</head>
+<body data-path="/" class="status-page status-home">
+  <a class="visually-hidden" href="#main">Skip to content</a>
+  <header id="site-header"></header>
+
+  <main id="main">
+    <div class="status-shell">
+
+      <!-- ── Status hero ────────────────────────────────────────────────────
+           Compact and informational, not a marketing hero. The static state
+           reads "Checking status…" and is replaced only with data the status
+           endpoint actually returned. -->
+      <section class="status-hero" aria-labelledby="status-headline" id="status-hero">
+        <p class="status-eyebrow">PesaGuard System Status</p>
+
+        <h1 class="status-headline" id="status-headline">
+          <span class="status-state" id="status-indicator" data-state="loading">
+            <svg class="status-glyph" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="3 3"/></svg>
+            <span class="status-state-text" id="hero-status-heading">Checking status…</span>
+          </span>
+        </h1>
+
+        <p class="status-hero-subtitle" id="status-summary">
+          Reading the current state of each service from the status endpoint.
+        </p>
+
+        <div class="status-freshness" role="group" aria-label="Status freshness">
+          <span class="freshness-item">
+            <span class="freshness-label">Last checked</span>
+            <time id="last-checked" datetime="">—</time>
+            <span class="freshness-ago" id="last-checked-ago"></span>
+          </span>
+          <span class="freshness-sep" aria-hidden="true"></span>
+          <span class="freshness-item" id="autorefresh" data-paused="false" data-auto-refresh="30">
+            <span class="pulse-dot" aria-hidden="true"></span>
+            <span class="freshness-label" id="autorefresh-label">Auto-refresh every 30s</span>
+          </span>
+          <span class="freshness-sep" aria-hidden="true"></span>
+          <button type="button" class="btn-refresh" id="refresh-button" aria-describedby="refresh-hint">
+            <svg class="btn-refresh-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M13.5 8a5.5 5.5 0 1 1-1.9-4.15M13.5 2.5V5H11"/></svg>
+            <span>Refresh</span>
+          </button>
+          <p class="visually-hidden" id="refresh-hint">Reads the latest status from the status endpoint.</p>
+        </div>
+
+        <div id="unverified-notice" class="status-unverified" role="note" hidden>
+          <strong>No monitoring source connected</strong>
+          <p class="js-unverified-note">Service states read “Unknown” until a health-check source is connected to this page.</p>
+        </div>
+
+        <p id="status-live" class="visually-hidden" role="status" aria-live="polite"></p>
+      </section>
+
+      <!-- ── Active incident banner ─────────────────────────────────────────
+           Rendered only when an active incident exists. When there is none the
+           container stays hidden — no empty incident box. -->
+      <div id="incident-banner" hidden></div>
+
+      <!-- ── Services ─────────────────────────────────────────────────────── -->
+      <section class="status-section" aria-labelledby="services-heading">
+        <div class="section-head">
+          <div class="section-head-text">
+            <h2 id="services-heading">Services</h2>
+            <p>Current operational status of PesaGuard services.</p>
+          </div>
+          <a class="section-link" href="uptime.html">Uptime history<span aria-hidden="true"> →</span></a>
+        </div>
+        <div id="service-list" class="service-list" aria-busy="true"></div>
+      </section>
+
+       <!-- ── Subscribe to updates ──────────────────────────────────────────────
+            Real endpoint must be supplied via data-endpoint on the form. While it
+            is empty the controls stay disabled and the page says so: nothing is
+            sent, no address is stored, and no confirmation is produced. -->
+       <section class="status-section status-subscription" aria-labelledby="subscribe-heading">
+         <div class="section-head">
+           <div class="section-head-text">
+             <h2 id="subscribe-heading">Subscribe to updates</h2>
+             <p>Get notified when PesaGuard services are disrupted or recover.</p>
+           </div>
+         </div>
+         <form id="subscription-form" class="status-subscription-form" data-endpoint="" novalidate>
+           <div class="subscribe-row">
+             <label for="subscribe-email">Email address</label>
+             <input id="subscribe-email" type="email" name="email" placeholder="you@example.com" autocomplete="email" required>
+             <button type="submit">Subscribe</button>
+           </div>
+         </form>
+         <p id="subscribe-status" class="subscribe-status" role="status" aria-live="polite"></p>
+       </section>
+    </div>
+  </main>
+
+  <footer id="site-footer"></footer>
+
+  <script src="js/ui.js" defer></script>
+  <script src="js/app.js" defer></script>
+  <script src="js/status.js" defer></script>
+</body>
+</html>
+

@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Incidents — PesaGuard Status</title>
+  <meta name="description" content="Incident history for PesaGuard. View active incidents, past outages, and filter by service and date.">
+  <link rel="canonical" href="https://status.pesaguard.victorkipruto.com/incidents.html">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#061a12" media="(prefers-color-scheme: dark)">
+  <meta name="color-scheme" content="light dark">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="PesaGuard Status">
+  <meta property="og:title" content="Incidents — PesaGuard Status">
+  <meta property="og:description" content="Incident history for PesaGuard.">
+  <meta property="og:url" content="https://status.pesaguard.victorkipruto.com/incidents.html">
+  <meta property="og:image" content="https://status.pesaguard.victorkipruto.com/assets/logo/logo.svg">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Incidents — PesaGuard Status">
+  <meta name="twitter:description" content="Incident history for PesaGuard.">
+  <meta name="twitter:image" content="https://status.pesaguard.victorkipruto.com/assets/logo/logo.svg">
+  <link rel="icon" type="image/svg+xml" href="assets/logo/favicon.svg">
+  <link rel="stylesheet" href="css/reset.css">
+  <link rel="stylesheet" href="css/variables.css">
+  <link rel="stylesheet" href="css/global.css">
+  <link rel="stylesheet" href="css/layout.css">
+  <link rel="stylesheet" href="css/components.css">
+  <link rel="stylesheet" href="css/incidents.css">
+  <link rel="stylesheet" href="css/animations.css">
+  <link rel="stylesheet" href="css/responsive.css">
+</head>
+<body data-path="/incidents.html" class="status-page incidents">
+  <a class="visually-hidden" href="#main">Skip to content</a>
+  <header id="site-header"></header>
+  <main id="main">
+    <div class="status-shell">
+      <section class="incidents-header reveal">
+        <p class="status-eyebrow">Incident history</p>
+        <h1>Incidents</h1>
+        <p class="status-hero-subtitle" style="max-width:58ch;">
+          Incidents published from the PesaGuard incident record. If no source is
+          connected, this page reports that no incidents are recorded rather than
+          showing example entries.
+        </p>
+      </section>
+
+      <section class="reveal">
+        <div class="section-label">Active incidents</div>
+        <div id="active-incidents">
+          <!-- Populated by js/incidents.js -->
+        </div>
+      </section>
+
+      <section class="reveal">
+        <div class="section-label">Past incidents</div>
+        <div class="incident-filters">
+          <label for="filter-year">Year:</label>
+          <select id="filter-year"><option value="all">All years</option></select>
+          <label for="filter-service">Service:</label>
+          <select id="filter-service"><option value="all">All services</option></select>
+          <label for="filter-status">Status:</label>
+          <select id="filter-status"><option value="all">All statuses</option></select>
+        </div>
+        <div id="past-incidents">
+          <!-- Populated by js/incidents.js -->
+        </div>
+      </section>
+
+      <div id="incident-detail" style="display:none;"></div>
+
+      <div class="reveal" style="margin-top:34px;">
+        <a href="index.html" class="status-back-link"><span class="arrow">←</span> Back to status</a>
+      </div>
+    </div>
+  </main>
+  <footer id="site-footer"></footer>
+
+  <script src="js/ui.js" defer></script>
+  <script src="js/app.js" defer></script>
+  <script src="js/incidents.js" defer></script>
+</body>
+</html>

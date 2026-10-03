@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Uptime — PesaGuard Status</title>
+  <meta name="description" content="Uptime history and reliability metrics for PesaGuard services.">
+  <link rel="canonical" href="https://status.pesaguard.victorkipruto.com/uptime.html">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#061a12" media="(prefers-color-scheme: dark)">
+  <meta name="color-scheme" content="light dark">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="PesaGuard Status">
+  <meta property="og:title" content="Uptime — PesaGuard Status">
+  <meta property="og:description" content="Uptime history and reliability metrics for PesaGuard services.">
+  <meta property="og:url" content="https://status.pesaguard.victorkipruto.com/uptime.html">
+  <meta property="og:image" content="https://status.pesaguard.victorkipruto.com/assets/logo/logo.svg">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Uptime — PesaGuard Status">
+  <meta name="twitter:description" content="Uptime history and reliability metrics for PesaGuard services.">
+  <meta name="twitter:image" content="https://status.pesaguard.victorkipruto.com/assets/logo/logo.svg">
+  <link rel="icon" type="image/svg+xml" href="assets/logo/favicon.svg">
+  <link rel="stylesheet" href="css/reset.css">
+  <link rel="stylesheet" href="css/variables.css">
+  <link rel="stylesheet" href="css/global.css">
+  <link rel="stylesheet" href="css/layout.css">
+  <link rel="stylesheet" href="css/components.css">
+  <link rel="stylesheet" href="css/uptime.css">
+  <link rel="stylesheet" href="css/animations.css">
+  <link rel="stylesheet" href="css/responsive.css">
+</head>
+<body data-path="/uptime.html" class="status-page uptime">
+  <a class="visually-hidden" href="#main">Skip to content</a>
+  <header id="site-header"></header>
+  <main id="main">
+    <div class="status-shell">
+      <section class="uptime-header reveal">
+        <p class="status-eyebrow">Uptime history</p>
+        <h1>Uptime</h1>
+        <p class="status-hero-subtitle" style="max-width:58ch;">
+          Uptime and reliability metrics for every PesaGuard service.
+        </p>
+      </section>
+
+      <section class="reveal">
+        <div id="uptime-overall" class="uptime-overall">
+          <!-- Populated by js/uptime.js -->
+        </div>
+      </section>
+
+      <section class="reveal">
+        <div class="status-section-title">
+          <h2>Service uptime</h2>
+          <a href="incidents.html" class="view-all">Incident history →</a>
+        </div>
+        <div id="service-uptime-grid" class="service-uptime-grid">
+          <!-- Populated by js/uptime.js -->
+        </div>
+      </section>
+
+      <section class="reveal">
+        <div class="status-section-title">
+          <h2>Daily uptime</h2>
+          <span class="uptime-meta" id="chart-range-label">Last 90d</span>
+        </div>
+        <div class="uptime-range-selector">
+          <button type="button" data-range="24h">24h</button>
+          <button type="button" data-range="7d">7d</button>
+          <button type="button" data-range="30d">30d</button>
+          <button type="button" data-range="90d" aria-current="true">90d</button>
+        </div>
+        <div class="uptime-service-selector">
+          <label for="service-selector">Service:</label>
+          <select id="service-selector"><option value="all">All services</option></select>
+        </div>
+        <div id="uptime-bar-chart" class="uptime-bar-chart">
+          <!-- Populated by js/uptime.js -->
+        </div>
+      </section>
+
+      <section class="reveal">
+        <div class="status-section-title">
+          <h2>Availability summary</h2>
+          <span class="uptime-meta" id="last-updated-display">
+            Last updated <span class="js-last-updated">—</span>
+          </span>
+        </div>
+        <div id="availability-summary" class="availability-summary">
+          <!-- Populated by js/uptime.js -->
+        </div>
+      </section>
+
+      <section class="reveal">
+        <h2>Recent downtime</h2>
+        <div id="recent-downtime">
+          <!-- Populated by js/uptime.js -->
+        </div>
+      </section>
+
+      <div class="reveal" style="margin-top:34px;">
+        <a href="index.html" class="status-back-link"><span class="arrow">←</span> Back to status</a>
+      </div>
+    </div>
+  </main>
+  <footer id="site-footer"></footer>
+
+  <script src="js/ui.js" defer></script>
+  <script src="js/app.js" defer></script>
+  <script src="js/uptime.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+{
+  "name": "pesaguard-status",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Static status site for PesaGuard. Serves prebuilt HTML; JS renders data from /data/*.json.",
+  "scripts": {
+    "serve": "python -m http.server 4174 --directory .",
+    "check": "node tests/run.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

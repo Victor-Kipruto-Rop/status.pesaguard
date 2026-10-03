@@ -1,0 +1,23 @@
+{
+  "version": "1.0.0",
+  "generatedAt": null,
+  "dataSource": "unconfigured",
+  "verified": false,
+  "note": "Runtime status endpoint. No monitoring source is connected, so this mirrors data/status.json's unverified state. Replace this with live output from a health-check aggregator.",
+  "lastUpdated": null,
+  "overall": {
+    "status": "unknown",
+    "label": "Status unavailable",
+    "description": "No monitoring source is connected, so PesaGuard cannot confirm service health."
+  },
+  "services": [
+    { "id": "api", "name": "API", "status": "unknown", "latency": null, "uptime": null },
+    { "id": "dashboard", "name": "Dashboard", "status": "unknown", "latency": null, "uptime": null },
+    { "id": "transactions", "name": "Transactions", "status": "unknown", "latency": null, "uptime": null },
+    { "id": "reconciliation", "name": "Reconciliation", "status": "unknown", "latency": null, "uptime": null },
+    { "id": "fraud", "name": "Fraud Detection", "status": "unknown", "latency": null, "uptime": null },
+    { "id": "webhooks", "name": "Webhooks", "status": "unknown", "latency": null, "uptime": null }
+  ],
+  "activeIncidents": [],
+  "activeMaintenance": []
+}

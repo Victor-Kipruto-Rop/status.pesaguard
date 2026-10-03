@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Maintenance — PesaGuard Status</title>
+  <meta name="description" content="Scheduled and completed maintenance windows for PesaGuard services.">
+  <link rel="canonical" href="https://status.pesaguard.victorkipruto.com/maintenance.html">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#061a12" media="(prefers-color-scheme: dark)">
+  <meta name="color-scheme" content="light dark">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="PesaGuard Status">
+  <meta property="og:title" content="Maintenance — PesaGuard Status">
+  <meta property="og:description" content="Scheduled and completed maintenance windows for PesaGuard services.">
+  <meta property="og:url" content="https://status.pesaguard.victorkipruto.com/maintenance.html">
+  <meta property="og:image" content="https://status.pesaguard.victorkipruto.com/assets/logo/logo.svg">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Maintenance — PesaGuard Status">
+  <meta name="twitter:description" content="Scheduled and completed maintenance windows for PesaGuard services.">
+  <meta name="twitter:image" content="https://status.pesaguard.victorkipruto.com/assets/logo/logo.svg">
+  <link rel="icon" type="image/svg+xml" href="assets/logo/favicon.svg">
+  <link rel="stylesheet" href="css/reset.css">
+  <link rel="stylesheet" href="css/variables.css">
+  <link rel="stylesheet" href="css/global.css">
+  <link rel="stylesheet" href="css/layout.css">
+  <link rel="stylesheet" href="css/components.css">
+  <link rel="stylesheet" href="css/maintenance.css">
+  <link rel="stylesheet" href="css/animations.css">
+  <link rel="stylesheet" href="css/responsive.css">
+  <noscript>
+    <style>.reveal { opacity: 1 !important; transform: none !important; }</style>
+  </noscript>
+
+</head>
+<body data-path="/maintenance.html" class="status-page maintenance">
+  <a class="visually-hidden" href="#main">Skip to content</a>
+  <header id="site-header"></header>
+  <main id="main">
+    <div class="status-shell">
+      <section class="maintenance-header">
+        <p class="status-eyebrow">Scheduled maintenance</p>
+        <h1>Maintenance</h1>
+        <p class="status-hero-subtitle">
+          Planned maintenance windows and completed history for PesaGuard services.
+          Windows appear here as soon as they are scheduled, and move to the
+          history section once they finish.
+        </p>
+      </section>
+
+      <section class="maintenance-section reveal" aria-labelledby="maintenance-active-title">
+        <h2 class="maintenance-section-title" id="maintenance-active-title" data-tone="in-progress">In progress</h2>
+        <div id="active-maintenance">
+          <!-- Populated by js/maintenance.js -->
+        </div>
+      </section>
+
+      <section class="maintenance-section reveal" aria-labelledby="maintenance-upcoming-title">
+        <h2 class="maintenance-section-title" id="maintenance-upcoming-title" data-tone="scheduled">Upcoming</h2>
+        <div id="upcoming-maintenance">
+          <!-- Populated by js/maintenance.js -->
+        </div>
+      </section>
+
+      <section class="maintenance-section reveal" aria-labelledby="maintenance-completed-title">
+        <h2 class="maintenance-section-title" id="maintenance-completed-title" data-tone="completed">Completed</h2>
+        <div id="maintenance-history">
+          <!-- Populated by js/maintenance.js -->
+        </div>
+      </section>
+
+      <div class="maintenance-back">
+        <a href="index.html" class="status-back-link"><span class="arrow" aria-hidden="true">&larr;</span> Back to status</a>
+      </div>
+    </div>
+  </main>
+  <footer id="site-footer"></footer>
+
+  <script src="js/ui.js" defer></script>
+  <script src="js/app.js" defer></script>
+  <script src="js/maintenance.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+<!-- Status Overview Component
+     Markup template for the overall status block. Populated at runtime by
+     js/status.js from data/status.json (falling back to api/status.json).
+     The defaults below are deliberately UNKNOWN: this file must never claim
+     a healthy system before a measurement has actually been read. -->
+<div class="status-overview" id="status-overview">
+  <div class="status-indicator" id="status-indicator">
+    <svg class="status-icon unknown" viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="10" fill="currentColor" opacity="0.2"/>
+    </svg>
+    <span class="status-indicator-text">Status unavailable</span>
+  </div>
+  <p class="status-indicator-subtext">Awaiting status data.</p>
+  <ul class="status-hero-meta">
+    <li class="status-last-updated">
+      <span class="status-dot unknown" aria-hidden="true"></span>
+      <span>Last updated: <span class="js-last-updated">Not yet reported</span></span>
+    </li>
+    <li class="auto-refresh-pulse" id="auto-refresh-indicator">
+      <span class="auto-refresh-dot" aria-hidden="true"></span>
+      <span class="js-refresh-label">Auto-refresh not started</span>
+    </li>
+  </ul>
+</div>

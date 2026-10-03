@@ -1,0 +1,23 @@
+{
+  "version": "1.0.0",
+  "generatedAt": null,
+  "dataSource": "unconfigured",
+  "verified": false,
+  "note": "No health-check source is connected to this status page yet. The states below are UNKNOWN, not operational. Connect a monitoring source, write real measurements, and set \"verified\": true before publishing.",
+  "lastUpdated": null,
+  "overall": {
+    "status": "unknown",
+    "label": "Status unavailable",
+    "description": "No monitoring source is connected, so PesaGuard cannot confirm service health. This is not a statement that services are operational."
+  },
+  "services": [
+    { "id": "api", "name": "API", "description": "REST API for transaction creation, retrieval, and search.", "status": "unknown", "latency": null, "uptime": null, "updated": null },
+    { "id": "dashboard", "name": "Dashboard", "description": "Web dashboard for monitoring and managing transactions.", "status": "unknown", "latency": null, "uptime": null, "updated": null },
+    { "id": "transactions", "name": "Transactions", "description": "Payment transaction processing.", "status": "unknown", "latency": null, "uptime": null, "updated": null },
+    { "id": "reconciliation", "name": "Reconciliation", "description": "Reconciliation of M-Pesa payments against provider records.", "status": "unknown", "latency": null, "uptime": null, "updated": null },
+    { "id": "fraud", "name": "Fraud Detection", "description": "Anomaly and fraud signal evaluation.", "status": "unknown", "latency": null, "uptime": null, "updated": null },
+    { "id": "webhooks", "name": "Webhooks", "description": "Outbound webhook delivery and retries.", "status": "unknown", "latency": null, "uptime": null, "updated": null }
+  ],
+  "activeIncidents": [],
+  "activeMaintenance": []
+}

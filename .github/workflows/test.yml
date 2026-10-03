@@ -1,0 +1,140 @@
+name: Test status site
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "status.pesaguard.victorkipruto.com/**"
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "status.pesaguard.victorkipruto.com/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: status.pesaguard.victorkipruto.com
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Validate JSON data files
+        run: |
+          for f in data/status.json data/incidents.json data/maintenance.json data/uptime.json; do
+            if [ -f "$f" ]; then
+              node -e "JSON.parse(require('fs').readFileSync('$f','utf8')); console.log('✓ $f valid')"
+            else
+              echo "✗ $f missing"
+              exit 1
+            fi
+          done
+
+      - name: Run test suite
+        run: node tests/run.js
+
+      - name: Check HTML files exist
+        run: |
+          for f in index.html incidents.html maintenance.html uptime.html 404.html; do
+            if [ -f "$f" ]; then
+              echo "✓ $f exists"
+            else
+              echo "✗ $f missing"
+              exit 1
+            fi
+          done
+
+      - name: Check asset files exist
+        run: |
+          for f in \
+            assets/logo/logo.svg \
+            assets/logo/logo-dark.svg \
+            assets/logo/favicon.svg \
+            assets/icons/operational.svg \
+            assets/icons/degraded.svg \
+            assets/icons/outage.svg \
+            assets/icons/maintenance.svg; do
+            if [ -f "$f" ]; then
+              echo "✓ $f exists"
+            else
+              echo "✗ $f missing"
+              exit 1
+            fi
+          done
+
+      - name: Check CSS files exist
+        run: |
+          for f in \
+            css/reset.css \
+            css/variables.css \
+            css/global.css \
+            css/layout.css \
+            css/components.css \
+            css/status.css \
+            css/incidents.css \
+            css/maintenance.css \
+            css/uptime.css \
+            css/responsive.css \
+            css/animations.css; do
+            if [ -f "$f" ]; then
+              echo "✓ $f exists"
+            else
+              echo "✗ $f missing"
+              exit 1
+            fi
+          done
+
+      - name: Check JS files exist
+        run: |
+          for f in \
+            js/ui.js \
+            js/app.js \
+            js/status.js \
+            js/incidents.js \
+            js/maintenance.js \
+            js/uptime.js; do
+            if [ -f "$f" ]; then
+              echo "✓ $f exists"
+            else
+              echo "✗ $f missing"
+              exit 1
+            fi
+          done
+
+      - name: Check component files exist
+        run: |
+          for f in \
+            components/header.html \
+            components/footer.html \
+            components/status-overview.html \
+            components/service-list.html \
+            components/incident-card.html \
+            components/maintenance-card.html \
+            components/uptime-card.html; do
+            if [ -f "$f" ]; then
+              echo "✓ $f exists"
+            else
+              echo "✗ $f missing"
+              exit 1
+            fi
+          done
+
+      - name: Verify no secrets in source
+        run: |
+          if grep -rE "(api_key|secret|password|token)\s*[:=]\s*['\"][a-zA-Z0-9]" . --include="*.js" --include="*.html" --include="*.json" --include="*.css" 2>/dev/null; then
+            echo "✗ Potential secrets found in source files"
+            exit 1
+          else
+            echo "✓ No secrets found"
+          fi

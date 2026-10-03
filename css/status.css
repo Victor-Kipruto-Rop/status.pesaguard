@@ -1,0 +1,785 @@
+/* -----------------------------------------------------------------------
+ * PesaGuard Status Site — Home page (index.html)
+ * ------------------------------------------------------------------------- */
+
+.status-hero {
+  padding: clamp(28px, 4vw, 48px) 0 clamp(20px, 3vw, 32px);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.status-eyebrow {
+  margin: 0 0 10px;
+  font: 500 12px / 1.4 var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--lime-deep);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.status-eyebrow::before {
+  content: "";
+  width: 24px;
+  height: 1px;
+  background: currentColor;
+  opacity: 0.6;
+}
+
+/* --- Primary status line -------------------------------------------------- */
+
+.status-headline {
+  margin: 0 0 8px;
+  font-size: clamp(1.55rem, 1.15rem + 1.9vw, 2.1rem);
+  line-height: 1.08;
+  letter-spacing: -0.032em;
+  font-weight: 700;
+}
+
+.status-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.status-glyph {
+  width: 24px;
+  height: 24px;
+  flex: none;
+  transition: color 180ms var(--ease-out), transform 180ms var(--ease-out);
+}
+
+.status-state-text {
+  display: inline-block;
+}
+
+.status-state[data-state="operational"] { color: var(--lime-ink); }
+.status-state[data-state="degraded"] { color: var(--signal-amber); }
+.status-state[data-state="partial-outage"],
+.status-state[data-state="major-outage"],
+.status-state[data-state="outage"] { color: var(--signal-red); }
+.status-state[data-state="maintenance"] { color: var(--text-muted); }
+.status-state[data-state="unknown"] { color: var(--text-muted); }
+.status-state[data-state="loading"] { color: var(--text-faint); }
+.status-state[data-state="error"] { color: var(--signal-red); }
+
+/* Subtle pulse only on attention states — never on operational. */
+.status-state[data-state="degraded"] .status-glyph,
+.status-state[data-state="partial-outage"] .status-glyph,
+.status-state[data-state="major-outage"] .status-glyph,
+.status-state[data-state="outage"] .status-glyph {
+  animation: status-glyph-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes status-glyph-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.08); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-state .status-glyph { animation: none; }
+}
+
+.status-hero-subtitle {
+  margin: 0 0 18px;
+  max-width: 62ch;
+  font-size: 0.95rem;
+  color: var(--text-muted);
+}
+
+/* --- Freshness row ---------------------------------------------------------- */
+
+.status-freshness {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  color: var(--text-faint);
+}
+
+.freshness-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.freshness-label { color: var(--text-faint); }
+
+#last-checked {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.freshness-sep {
+  width: 1px;
+  height: 14px;
+  background: var(--line);
+  flex: none;
+}
+
+.pulse-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--signal-green);
+  flex: none;
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+#autorefresh[data-paused="true"] .pulse-dot {
+  background: var(--text-faint);
+  animation: none;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
+/* --- Refresh control --------------------------------------------------------- */
+
+.btn-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-full);
+  background: var(--paper-raised);
+  color: var(--text-muted);
+  font: 600 11px / 1 var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: border-color 140ms var(--ease-out), color 140ms var(--ease-out), background 140ms var(--ease-out);
+}
+
+.btn-refresh:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  color: var(--text);
+  background: var(--paper-sunken);
+}
+
+.btn-refresh:focus-visible {
+  outline: 2px solid var(--lime-deep);
+  outline-offset: 2px;
+}
+
+.btn-refresh:disabled { cursor: wait; opacity: 0.7; }
+
+.btn-refresh-icon { width: 13px; height: 13px; flex: none; }
+
+.btn-refresh[aria-busy="true"] .btn-refresh-icon {
+  animation: refresh-spin 0.9s linear infinite;
+}
+
+@keyframes refresh-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse-dot, .btn-refresh[aria-busy="true"] .btn-refresh-icon { animation: none; }
+}
+
+/* --- Unverified / not-connected notice -------------------------------------
+ * Shown when the page has no monitoring source. It must be visually distinct
+ * so a reader never mistakes "unknown" for "healthy".
+ * -------------------------------------------------------------------------- */
+
+.status-unverified {
+  border: 1px solid var(--line-strong);
+  border-left: 3px solid var(--signal-amber);
+  border-radius: 0 var(--r-md) var(--r-md) 0;
+  background: var(--paper-raised);
+  padding: 14px 18px;
+  margin: 0 0 22px;
+  text-align: left;
+}
+
+.status-unverified strong {
+  display: block;
+  font: 600 11px / 1.4 var(--font-mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-bottom: 4px;
+}
+
+.status-unverified p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13.5px;
+}
+
+/* --- Subscription (unavailable) -------------------------------------------- */
+
+.status-subscription form input[disabled],
+.status-subscription form button[disabled] {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* --- Service list ---------------------------------------------------------- */
+
+.service-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.service-status-card { padding: 13px 16px; gap: 12px; min-width: 0; }
+
+.service-status-card .service-name { min-width: 0; }
+
+.service-status-card .service-name .status-dot {
+  width: 10px;
+  height: 10px;
+  margin: 0;
+  box-shadow: none;
+}
+
+.service-status-card .service-name .status-icon { width: 18px; height: 18px; }
+
+.service-name-text {
+  display: block;
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.service-name-sub {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.service-status-card .status-pill { font-size: 10.5px; padding: 4px 11px; }
+
+.service-meta-sub {
+  display: block;
+  margin-top: 5px;
+  font: 500 10.5px / 1.4 var(--font-mono);
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+}
+
+/* --- Home empty / error states (shared by all home sections) ------------- */
+
+.status-empty {
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--r-md);
+  background: var(--paper-raised);
+  padding: 18px 20px;
+  display: flex;
+  align-items: flex-start;
+  gap: 13px;
+}
+
+.status-empty .status-empty-glyph {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  margin-top: 2px;
+  color: var(--text-faint);
+}
+
+.status-empty strong {
+  display: block;
+  font-size: 13.5px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.status-empty p {
+  margin: 3px 0 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.status-empty a { font-weight: 650; }
+
+.status-error-box {
+  border: 1px solid rgba(217, 122, 108, 0.45);
+  border-radius: var(--r-md);
+  background: var(--paper-raised);
+  padding: 18px 20px;
+}
+
+.status-error-box p {
+  margin: 0 0 12px;
+  font-size: 13.5px;
+  color: var(--text-muted);
+}
+
+.status-error-box strong { color: var(--text); }
+
+.btn-retry {
+  padding: 8px 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-full);
+  background: var(--paper-raised);
+  color: var(--text);
+  font: 600 11px / 1 var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.btn-retry:hover { background: var(--paper-sunken); }
+
+/* --- Home section rhythm --------------------------------------------------- */
+
+.status-section {
+  margin-top: 28px;
+  padding-top: 26px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.status-section .status-section-title { margin-bottom: 16px; }
+
+.status-section .status-section-title h2 {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font-size: 1.05rem;
+  letter-spacing: -0.015em;
+}
+
+.status-section-sub {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* --- Uptime summary -------------------------------------------------------- */
+
+.status-uptime-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0 0 22px;
+}
+
+.status-uptime-summary .uptime-card {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--paper-raised);
+  text-align: left;
+  padding: 16px 16px 14px;
+  box-shadow: var(--shadow-xs);
+  min-width: 0;
+}
+
+.status-uptime-summary .uptime-card .uptime-value {
+  font-size: 1.35rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+}
+
+.status-uptime-summary .uptime-card .uptime-value.is-missing {
+  color: var(--text-faint);
+  font-weight: 650;
+  font-size: 1.02rem;
+}
+
+.status-uptime-summary .uptime-card .uptime-label {
+  font: 600 10px / 1.4 var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-top: 6px;
+}
+
+.uptime-bar {
+  height: 4px;
+  border-radius: var(--r-full);
+  background: var(--paper-sunken);
+  margin-top: 12px;
+  overflow: hidden;
+}
+
+.uptime-bar i {
+  display: block;
+  height: 100%;
+  border-radius: var(--r-full);
+  background: var(--signal-green);
+}
+
+.uptime-bar[data-tone="degraded"] i { background: var(--signal-amber); }
+.uptime-bar[data-tone="outage"] i { background: var(--signal-red); }
+.uptime-bar[data-tone="maintenance"] i { background: var(--lime-deep); }
+.uptime-bar[data-tone="unknown"] i { background: transparent; }
+
+/* --- Home uptime visualisation --------------------------------------------- */
+
+.uptime-viz {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--paper-raised);
+  padding: 18px 18px 16px;
+  box-shadow: var(--shadow-xs);
+}
+
+.uptime-viz-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.uptime-viz-head h3 {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.uptime-viz-caption {
+  font: 500 11px / 1.4 var(--font-mono);
+  color: var(--text-faint);
+}
+
+.uptime-strip {
+  display: flex;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.uptime-seg {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 4px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: var(--paper-sunken);
+  cursor: default;
+  appearance: none;
+}
+
+button.uptime-seg { cursor: pointer; }
+
+.uptime-seg[data-status="operational"] { background: var(--signal-green); }
+.uptime-seg[data-status="degraded"] { background: var(--signal-amber); }
+.uptime-seg[data-status="partial-outage"],
+.uptime-seg[data-status="major-outage"],
+.uptime-seg[data-status="outage"] { background: var(--signal-red); }
+.uptime-seg[data-status="maintenance"] { background: var(--lime-deep); }
+.uptime-seg[data-status="unknown"] {
+  background: var(--paper-sunken);
+  border-color: var(--line-soft);
+}
+
+button.uptime-seg:hover,
+button.uptime-seg:focus-visible {
+  border-color: var(--line-strong);
+  outline: none;
+}
+
+button.uptime-seg:focus-visible {
+  box-shadow: 0 0 0 2px var(--paper), 0 0 0 4px var(--lime-deep);
+}
+
+/* Each segment sits in an <li> so the strip stays a real list, and the button
+ * inside fills that item so pointer and keyboard users can read one day. */
+.uptime-strip > li {
+  flex: 1 1 0;
+  min-width: 4px;
+  display: flex;
+}
+
+.uptime-strip > li > .uptime-seg {
+  flex: 1 1 auto;
+  width: 100%;
+}
+
+/* Lightweight CSS tooltip. Screen-reader users receive the same text through
+ * the button aria-label, so the tooltip is visual reinforcement only. */
+.uptime-seg::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%) translateY(2px);
+  min-width: max-content;
+  max-width: 220px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--ink-soft);
+  color: var(--paper);
+  font: 500 11px / 1.5 var(--font-mono);
+  white-space: pre-line;
+  text-align: left;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 120ms var(--ease-out), transform 120ms var(--ease-out);
+  z-index: 20;
+}
+
+button.uptime-seg:hover::after,
+button.uptime-seg:focus-visible::after {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(-50%) translateY(0);
+}
+
+.uptime-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.uptime-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font: 500 11px / 1.4 var(--font-mono);
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.uptime-legend .legend-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex: none;
+}
+
+.uptime-legend .legend-swatch[data-status="operational"] { background: var(--signal-green); }
+.uptime-legend .legend-swatch[data-status="degraded"] { background: var(--signal-amber); }
+.uptime-legend .legend-swatch[data-status="outage"] { background: var(--signal-red); }
+.uptime-legend .legend-swatch[data-status="maintenance"] { background: var(--lime-deep); }
+.uptime-legend .legend-swatch[data-status="unknown"] {
+  background: var(--paper-sunken);
+  border: 1px solid var(--line-strong);
+}
+
+.uptime-viz-note {
+  margin: 12px 0 0;
+  font-size: 12.5px;
+  color: var(--text-faint);
+}
+
+/* --- Active incident banner (rendered only when real) ------------------------ */
+
+.active-incident {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--signal-red);
+  border-radius: 0 var(--r-md) var(--r-md) 0;
+  background: var(--paper-raised);
+  padding: 18px 20px;
+  margin-top: 20px;
+  box-shadow: var(--shadow-xs);
+  animation: incident-enter 320ms var(--ease-out);
+}
+
+.active-incident[data-severity="identified"],
+.active-incident[data-severity="medium"] { border-left-color: var(--signal-amber); }
+
+.active-incident[data-severity="monitoring"],
+.active-incident[data-severity="low"] { border-left-color: var(--signal-green); }
+
+@keyframes incident-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .active-incident { animation: none; }
+}
+
+.active-incident-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.active-incident h2 {
+  margin: 0 0 6px;
+  font-size: 1.05rem;
+  letter-spacing: -0.015em;
+  color: var(--text);
+}
+
+.active-incident p { margin: 0 0 10px; font-size: 13.5px; color: var(--text-muted); }
+
+.active-incident dl {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 22px;
+  margin: 0 0 12px;
+}
+
+.active-incident dl > div { display: flex; gap: 8px; font-size: 12.5px; }
+
+.active-incident dt {
+  font: 600 10px / 1.8 var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.active-incident dd { margin: 0; color: var(--text-muted); }
+
+.active-incident .incident-link { font-size: 13px; font-weight: 650; }
+
+/* --- Subscription ------------------------------------------------------------ */
+
+.status-subscription {
+  margin-top: 28px;
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--paper-raised);
+  box-shadow: var(--shadow-xs);
+}
+
+.status-subscription h2 { font-size: 1.05rem; margin: 0 0 6px; }
+.status-subscription > p { color: var(--text-muted); font-size: 13.5px; max-width: 56ch; }
+
+.status-subscription-form { margin-top: 16px; }
+
+.status-subscription-form label {
+  display: block;
+  margin-bottom: 8px;
+  font: 600 11px / 1.4 var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.subscribe-row { display: flex; gap: 10px; }
+
+.status-subscription-form input[type="email"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 11px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--paper);
+  font-size: 13.5px;
+  color: var(--text);
+}
+
+.status-subscription-form input[type="email"]::placeholder { color: var(--text-faint); }
+
+.status-subscription-form input[type="email"]:focus {
+  outline: 2px solid var(--lime-deep);
+  outline-offset: 2px;
+  border-color: var(--lime-deep);
+}
+
+.status-subscription-form input[aria-invalid="true"] { border-color: var(--signal-red); }
+
+.status-subscription-form button[type="submit"] {
+  flex: none;
+  padding: 0 22px;
+  min-height: 42px;
+  border-radius: var(--r-full);
+  background: var(--forest);
+  color: var(--button-accent-text);
+  font: 700 0.85rem / 1 var(--font-sans);
+  border: none;
+  box-shadow: 0 6px 18px -10px rgba(11, 93, 59, 0.28);
+  cursor: pointer;
+  transition: transform 140ms var(--ease-out), opacity 140ms var(--ease-out);
+}
+
+.status-subscription-form button[type="submit"]:hover:not(:disabled) { transform: translateY(-1px); }
+.status-subscription-form button[type="submit"]:disabled { cursor: wait; opacity: 0.7; }
+
+.subscribe-status { margin: 10px 0 0; font-size: 13px; min-height: 20px; }
+.subscribe-status[data-kind="success"] { color: var(--lime-ink); }
+.subscribe-status[data-kind="error"] { color: var(--signal-red); }
+.subscribe-status[data-kind="info"] { color: var(--text-muted); }
+
+/* --- Support panel ----------------------------------------------------------- */
+
+.status-support .support-panel {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--paper-raised);
+  padding: 22px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  box-shadow: var(--shadow-xs);
+}
+
+.support-text h2 { margin: 0 0 6px; font-size: 1.05rem; }
+.support-text p { margin: 0; font-size: 13.5px; color: var(--text-muted); max-width: 52ch; }
+.support-actions { display: flex; gap: 10px; flex: none; }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 20px;
+  border-radius: var(--r-full);
+  font-size: 0.85rem;
+  font-weight: 700;
+  text-decoration: none;
+  cursor: pointer;
+  transition: transform 140ms var(--ease-out), background 140ms var(--ease-out), border-color 140ms var(--ease-out);
+  white-space: nowrap;
+}
+
+.btn-primary {
+  background: var(--forest);
+  color: var(--button-accent-text);
+  border: none;
+  box-shadow: 0 6px 18px -10px rgba(11, 93, 59, 0.28);
+}
+
+.btn-primary:hover { transform: translateY(-1px); }
+
+.btn-secondary {
+  border: 1px solid var(--line-strong);
+  background: var(--paper-raised);
+  color: var(--text);
+}
+
+.btn-secondary:hover { background: var(--paper-sunken); }
+
+/* --- Main rhythm --------------------------------------------------------------- */
+
+#main .status-shell { padding-bottom: 72px; }
+
+.status-section:last-of-type { margin-bottom: 0; }
+
+/* --- Legacy selectors kept for 404.html, which shares this sheet -------------- */
+
+.status-hero .status-pill { font-size: 13px; padding: 6px 18px; }
+.status-hero .logo-mark { display: none; }
+.status-hero-grid { display: block; }
+.status-hero-meta { display: flex; gap: 24px; flex-wrap: wrap; }
+.status-last-updated { display: inline-flex; align-items: center; gap: 8px; }
+.status-last-updated .status-dot { width: 7px; height: 7px; box-shadow: none; }
+.status-indicator { display: flex; align-items: center; gap: 14px; }
+.status-indicator .status-dot { width: 18px; height: 18px; }
+.status-indicator .status-icon { width: 32px; height: 32px; }
+.status-indicator-text { font-size: 1.4rem; font-weight: 700; letter-spacing: -0.03em; }
+.status-indicator-subtext { font-size: 0.9rem; color: var(--text-muted); }
