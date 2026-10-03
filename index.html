@@ -80,7 +80,7 @@
         </div>
 
         <div id="unverified-notice" class="status-unverified" role="note" hidden>
-          <strong>No monitoring source connected</strong>
+          <strong id="status-notice-heading">Monitoring coverage</strong>
           <p class="js-unverified-note">Service states read “Unknown” until a health-check source is connected to this page.</p>
         </div>
 
@@ -97,32 +97,34 @@
         <div class="section-head">
           <div class="section-head-text">
             <h2 id="services-heading">Services</h2>
-            <p>Current operational status of PesaGuard services.</p>
+            <p>Live API health and the dependencies currently covered by its checks.</p>
           </div>
           <a class="section-link" href="uptime.html">Uptime history<span aria-hidden="true"> →</span></a>
         </div>
         <div id="service-list" class="service-list" aria-busy="true"></div>
       </section>
 
-       <!-- ── Subscribe to updates ──────────────────────────────────────────────
-            Real endpoint must be supplied via data-endpoint on the form. While it
-            is empty the controls stay disabled and the page says so: nothing is
-            sent, no address is stored, and no confirmation is produced. -->
-       <section class="status-section status-subscription" aria-labelledby="subscribe-heading">
+       <!-- ── Subscribe to updates ────────────────────────────────────────────── -->
+       <section id="subscribe" class="status-section status-subscription" aria-labelledby="subscribe-heading">
          <div class="section-head">
            <div class="section-head-text">
              <h2 id="subscribe-heading">Subscribe to updates</h2>
-             <p>Get notified when PesaGuard services are disrupted or recover.</p>
+             <p>Confirm your email to receive automatic messages when monitored services change state.</p>
            </div>
          </div>
-         <form id="subscription-form" class="status-subscription-form" data-endpoint="" novalidate>
+          <form id="subscription-form" class="status-subscription-form" data-endpoint="https://api.pesaguard.victorkipruto.com/public/status/subscriptions" novalidate>
            <div class="subscribe-row">
              <label for="subscribe-email">Email address</label>
-             <input id="subscribe-email" type="email" name="email" placeholder="you@example.com" autocomplete="email" required>
-             <button type="submit">Subscribe</button>
+              <input id="subscribe-email" type="email" name="email" placeholder="you@example.com" autocomplete="email" aria-label="Email address for PesaGuard status updates" required>
+              <button type="submit">Subscribe</button>
            </div>
          </form>
-         <p id="subscribe-status" class="subscribe-status" role="status" aria-live="polite"></p>
+          <p id="subscribe-status" class="subscribe-status" role="status" aria-live="polite">You’ll receive a confirmation email before updates are sent. You can unsubscribe at any time.</p>
+          <div id="email-action" class="status-unverified" hidden>
+            <strong id="email-action-heading"></strong>
+            <p id="email-action-description"></p>
+            <button type="button" id="email-action-button"></button>
+          </div>
        </section>
     </div>
   </main>
@@ -134,4 +136,3 @@
   <script src="js/status.js" defer></script>
 </body>
 </html>
-

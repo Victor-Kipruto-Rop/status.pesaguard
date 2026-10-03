@@ -1,16 +1,6 @@
 /**
- * Home page (index.html) tests for js/status.js.
- *
- * Three layers:
- *  1. DOM contract - every id and class js/status.js looks up must exist in
- *     index.html or in a component. This is the regression guard for the bug
- *     where the home script rendered state into markup that no page contained.
- *  2. Honesty source guards - the module must gate on `verified` and must never
- *     fall back to a healthy value.
- *  3. Execution - js/status.js is actually run against a mock DOM with a
- *     stubbed fetch, and the rendered output is checked: unverified payloads
- *     stay unknown, an unreadable endpoint is never presented as fresh, and
- *     published measurements are shown exactly as published.
+ * Home-page status integration tests.
+ * Tests the real markup contract and the public API -> rendered status flow.
  */
 module.exports = function (ctx) {
   var test = ctx.test;
@@ -19,6 +9,7 @@ module.exports = function (ctx) {
   var fs = ctx.fs;
   var path = ctx.path;
   var BASE = ctx.BASE;
+  var STATUS_URL = "https://api.pesaguard.victorkipruto.com/public/status";
 
   function read(relative) {
     return fs.readFileSync(path.join(BASE, relative), "utf8");
@@ -27,244 +18,178 @@ module.exports = function (ctx) {
   var STATUS_JS = read("js/status.js");
   var UI_JS = read("js/ui.js");
   var INDEX = read("index.html");
-  var COMPONENT_HTML = [
-    "header.html", "footer.html", "status-overview.html",
-    "service-list.html", "uptime-card.html", "incident-card.html", "maintenance-card.html"
-  ].map(function (name) { return read("components/" + name); }).join("\n");
+  var HEADER = read("components/header.html");
+  var SUBSCRIPTION_URL = STATUS_URL + "/subscriptions";
 
-  /* --- 1. DOM contract --------------------------------------------------- */
-
-  function matches(source, pattern) {
-    var found = [];
-    var regex = new RegExp(pattern, "g");
-    var match;
-    while ((match = regex.exec(source)) !== null) found.push(match[1]);
-    return found;
+  function element(spec) {
+    var attributes = {};
+    var node = {
+      tagName: String(spec.tag || "div").toUpperCase(),
+      textContent: spec.text || "",
+      innerHTML: "",
+      value: "",
+      disabled: false,
+      listeners: {},
+      setAttribute: function (name, value) {
+        attributes[name] = String(value);
+        if (name === "disabled") node.disabled = true;
+      },
+      getAttribute: function (name) {
+        return Object.prototype.hasOwnProperty.call(attributes, name) ? attributes[name] : null;
+      },
+      removeAttribute: function (name) {
+        delete attributes[name];
+        if (name === "disabled") node.disabled = false;
+      },
+      hasAttribute: function (name) {
+        return Object.prototype.hasOwnProperty.call(attributes, name);
+      },
+      addEventListener: function (type, handler) {
+        (node.listeners[type] = node.listeners[type] || []).push(handler);
+      },
+      querySelector: function (selector) {
+        return (spec.children || {})[selector] || null;
+      }
+    };
+    Object.keys(spec.attributes || {}).forEach(function (name) {
+      node.setAttribute(name, spec.attributes[name]);
+    });
+    if (spec.disabled) node.setAttribute("disabled", "");
+    return node;
   }
 
-  function hasClass(haystack, className) {
-    return new RegExp("(^|[\\s\"'])" + className + "($|[\\s\"'])").test(haystack);
-  }
+  function createPage(payloads, responseStatuses, timeoutOnFetch, queryString) {
+    var nodes = {};
+    var selectors = {};
+    var requestedUrls = [];
+    var requests = [];
 
-  test("status.js only looks up element ids that index.html contains", function () {
-    var ids = matches(STATUS_JS, 'getElementById\\("([^"]+)"\\)')
-      .concat(matches(STATUS_JS, 'byId\\("([^"]+)"\\)'));
-
-    assert(ids.length >= 15, "expected the home script to resolve its containers by id");
-
-    ids.forEach(function (id) {
-      assert(INDEX.indexOf('id="' + id + '"') >= 0,
-        "status.js looks up #" + id + ", which index.html does not contain");
-    });
-  });
-
-  test("status.js only queries selectors that exist in the page or a component", function () {
-    var selectors = matches(STATUS_JS, 'querySelector(?:All)?[(][ ]*"([^"]+)"');
-    assert(selectors.length >= 3, "expected the home script to query the hero glyph and header chrome");
-
-    var haystack = INDEX + "\n" + COMPONENT_HTML;
-
-    selectors.forEach(function (selector) {
-      (selector.match(/[#.][A-Za-z][\w-]*/g) || []).forEach(function (token) {
-        var name = token.slice(1);
-        var present = token.charAt(0) === "#"
-          ? haystack.indexOf('id="' + name + '"') >= 0
-          : hasClass(haystack, name);
-        assert(present, "status.js queries " + token + " (" + selector +
-          "), which no page or component defines");
-      });
-    });
-  });
-
-  test("status.js loads its data files relative to the site root", function () {
-    assert(STATUS_JS.indexOf('"api/status.json"') >= 0, "the runtime endpoint must be the preferred source");
-    assert(STATUS_JS.indexOf('"data/status.json"') >= 0, "the static snapshot must remain the fallback");
-    assert(STATUS_JS.indexOf('url: "/') < 0 && STATUS_JS.indexOf('url: "http') < 0,
-      "status.js must not hardcode an absolute or remote data URL");
-  });
-
-  /* --- 2. Honesty source guards ----------------------------------------- */
-
-  test("status.js gates rendering on the payload's verified flag", function () {
-    assert(/verified\s*===\s*true/.test(STATUS_JS),
-      "status.js must read the payload's verified flag");
-    assert(STATUS_JS.indexOf('"unknown"') >= 0,
-      "unknown must stay a first-class state");
-    assert(STATUS_JS.indexOf("Not measured") >= 0,
-      "a missing measurement must be labelled, not implied");
-  });
-
-  test("status.js never falls back to an operational state", function () {
-    assert(!/All [Ss]ystems [Oo]perational/.test(STATUS_JS),
-      "status.js must not contain a healthy claim");
-    assert(!/\|\|\s*"operational"/.test(STATUS_JS),
-      "operational must never be a fallback value");
-    assert(!/tone\s*[:=]\s*"operational"/.test(STATUS_JS),
-      "the default tone must not be operational");
-  });
-
-  /* --- 3. Mock DOM -------------------------------------------------------
-   * Small enough to read in one screen: element lookup, attributes, text and
-   * the selector forms status.js uses. It is deliberately loose about ancestry
-   * - the source guard above is what proves the selectors exist. */
-
-  function createDom() {
-    var byId = {};
-    var all = [];
-
-    function element(tag) {
-      var attributes = {};
-      var node = {
-        tagName: String(tag || "div").toUpperCase(),
-        textContent: "",
-        innerHTML: "",
-        value: "",
-        disabled: false,
-        listeners: {},
-        setAttribute: function (name, value) { attributes[name] = String(value); },
-        getAttribute: function (name) {
-          return Object.prototype.hasOwnProperty.call(attributes, name) ? attributes[name] : null;
-        },
-        removeAttribute: function (name) { delete attributes[name]; },
-        hasAttribute: function (name) {
-          return Object.prototype.hasOwnProperty.call(attributes, name);
-        },
-        addEventListener: function (type, handler) {
-          (node.listeners[type] = node.listeners[type] || []).push(handler);
-        },
-        querySelector: function (selector) { return resolve(selector); },
-        querySelectorAll: function (selector) { return resolveAll(selector); }
-      };
+    function register(id, spec) {
+      spec = spec || {};
+      spec.attributes = spec.attributes || {};
+      if (id) spec.attributes.id = id;
+      var node = element(spec);
+      if (id) nodes[id] = node;
       return node;
     }
 
-    function compoundMatches(node, compound) {
-      var id = /#([A-Za-z][\w-]*)/.exec(compound);
-      var tag = /^([A-Za-z][\w-]*)/.exec(compound);
-      var classes = compound.match(/\.[A-Za-z][\w-]*/g) || [];
-      var attribute = /\[([\w-]+)(?:=("|')?([^\]"']*)\2)?\]/.exec(compound);
+    var glyph = register(null, { tag: "svg", attributes: { "class": "status-glyph" } });
+    var note = register(null, { tag: "p", attributes: { "class": "js-unverified-note" } });
+    var input = register("subscribe-email", { tag: "input", attributes: { type: "email" }, disabled: true });
+    var button = register(null, { tag: "button", attributes: { type: "submit" }, disabled: true });
+    var subscribeButton = button;
+    var actionButton = register("email-action-button", { tag: "button" });
+    register("email-action", { attributes: { "hidden": "" } });
+    register("email-action-heading", { tag: "strong" });
+    register("email-action-description", { tag: "p" });
+    register("status-indicator", {
+      tag: "span",
+      attributes: { "data-state": "loading" },
+      children: { ".status-glyph": glyph }
+    });
+    register("hero-status-heading", { tag: "span", text: "Checking status…" });
+    register("status-summary", { tag: "p" });
+    register("last-checked", { tag: "time", attributes: { datetime: "" } });
+    register("last-checked-ago", { tag: "span" });
+    register("autorefresh", { attributes: { "data-auto-refresh": "30", "data-paused": "false" } });
+    register("autorefresh-label", { tag: "span" });
+    register("refresh-button", { tag: "button" });
+    register("refresh-hint", { tag: "p" });
+    register("unverified-notice", {
+      attributes: { "hidden": "" },
+      children: { ".js-unverified-note": note }
+    });
+    register("status-notice-heading", { tag: "strong" });
+    register("status-live", { tag: "p" });
+    register("incident-banner", { attributes: { "hidden": "" } });
+    register("service-list", { attributes: { "aria-busy": "true" } });
+    register("subscription-form", {
+      tag: "form",
+      attributes: { "data-endpoint": SUBSCRIPTION_URL },
+      children: { 'input[type="email"]': input, 'button[type="submit"]': button }
+    });
+    register("subscribe-status", { tag: "p" });
+    selectors["#status-indicator .status-glyph"] = glyph;
+    selectors[".js-unverified-note"] = note;
+    selectors[".js-header-status"] = register(null, { attributes: { "class": "js-header-status" } });
+    selectors[".status-indicator-mini .status-dot"] = register(null, {
+      attributes: { "class": "status-dot unknown" }
+    });
 
-      if (id && node.getAttribute("id") !== id[1]) return false;
-      if (tag && node.tagName !== tag[1].toUpperCase()) return false;
-      if (attribute) {
-        var actual = node.getAttribute(attribute[1]);
-        if (actual === null) return false;
-        if (attribute[3] && actual !== attribute[3]) return false;
-      }
-
-      var declared = " " + (node.getAttribute("class") || "") + " ";
-      for (var i = 0; i < classes.length; i++) {
-        if (declared.indexOf(" " + classes[i].slice(1) + " ") < 0) return false;
-      }
-      return true;
-    }
-
-    function lastCompound(selector) {
-      var parts = String(selector).trim().split(/\s+/);
-      return parts[parts.length - 1];
-    }
-
-    function resolve(selector) {
-      var compound = lastCompound(selector);
-      for (var i = 0; i < all.length; i++) {
-        if (compoundMatches(all[i], compound)) return all[i];
-      }
-      return null;
-    }
-
-    function resolveAll(selector) {
-      var compound = lastCompound(selector);
-      return all.filter(function (node) { return compoundMatches(node, compound); });
-    }
-
-    function register(spec) {
-      var node = element(spec.tag);
-      if (spec.id) node.setAttribute("id", spec.id);
-      if (spec.classes) node.setAttribute("class", spec.classes);
-      Object.keys(spec.attributes || {}).forEach(function (name) {
-        node.setAttribute(name, spec.attributes[name]);
-      });
-      if (spec.id) byId[spec.id] = node;
-      all.push(node);
-      return node;
-    }
-
-    var mockDocument = {
+    var document = {
       readyState: "complete",
       visibilityState: "visible",
       listeners: {},
-      getElementById: function (id) {
-        return Object.prototype.hasOwnProperty.call(byId, id) ? byId[id] : null;
-      },
-      querySelector: function (selector) { return resolve(selector); },
-      querySelectorAll: function (selector) { return resolveAll(selector); },
+      getElementById: function (id) { return nodes[id] || null; },
+      querySelector: function (selector) { return selectors[selector] || null; },
       addEventListener: function (type, handler) {
-        (mockDocument.listeners[type] = mockDocument.listeners[type] || []).push(handler);
+        (document.listeners[type] = document.listeners[type] || []).push(handler);
       }
     };
-
-    return { document: mockDocument, register: register };
-  }
-
-  /* The elements index.html hands to the home script. */
-  function registerHomeElements(dom) {
-    dom.register({ id: "status-indicator", tag: "span", classes: "status-state",
-      attributes: { "data-state": "loading" } });
-    dom.register({ tag: "svg", classes: "status-glyph" });
-    dom.register({ id: "hero-status-heading", tag: "span" });
-    dom.register({ id: "status-summary", tag: "p" });
-    dom.register({ id: "last-checked", tag: "time", attributes: { datetime: "" } });
-    dom.register({ id: "last-checked-ago", tag: "span" });
-    dom.register({ id: "autorefresh", tag: "span", classes: "freshness-item",
-      attributes: { "data-paused": "false", "data-auto-refresh": "30" } });
-    dom.register({ id: "autorefresh-label", tag: "span" });
-    dom.register({ id: "refresh-button", tag: "button" });
-    dom.register({ id: "unverified-notice", tag: "div", classes: "status-unverified",
-      attributes: { hidden: "" } });
-    dom.register({ classes: "js-unverified-note" });
-    dom.register({ id: "status-live", tag: "p" });
-    dom.register({ id: "incident-banner", tag: "div", attributes: { hidden: "" } });
-    dom.register({ id: "service-list", tag: "div", classes: "service-list",
-      attributes: { "aria-busy": "true" } });
-    dom.register({ id: "recent-incidents", tag: "div" });
-    dom.register({ id: "scheduled-maintenance", tag: "div" });
-    dom.register({ id: "uptime-summary", tag: "div", classes: "uptime-grid status-uptime-summary" });
-    dom.register({ id: "uptime-strip", tag: "ul", classes: "uptime-strip" });
-    dom.register({ id: "uptime-legend", tag: "ul", classes: "uptime-legend" });
-    dom.register({ id: "uptime-viz-caption", tag: "span", classes: "uptime-viz-caption" });
-    dom.register({ id: "uptime-viz-note", tag: "p", classes: "uptime-viz-note" });
-    dom.register({ id: "subscription-form", tag: "form", attributes: { "data-endpoint": "" } });
-    dom.register({ id: "subscribe-email", tag: "input", attributes: { type: "email", disabled: "" } });
-    dom.register({ tag: "button", attributes: { type: "submit" } });
-    dom.register({ id: "subscribe-status", tag: "p" });
-    dom.register({ classes: "js-header-status" });
-    dom.register({ classes: "status-indicator-mini" });
-    dom.register({ classes: "status-dot unknown" });
-  }
-
-  function createWindow() {
     var intervals = [];
+    var warnings = [];
     var mockWindow = {
-      console: { warn: function () {}, error: function () {} },
+      console: {
+        warn: function (message) { warnings.push(message); },
+        error: function (message) { warnings.push(message); }
+      },
       navigator: { language: "en-US" },
-      location: { pathname: "/", hash: "" },
+      location: { pathname: "/", hash: "", search: queryString || "" },
       matchMedia: function () { return { matches: false, addEventListener: function () {} }; },
       addEventListener: function () {},
+      AbortController: AbortController,
+      setTimeout: timeoutOnFetch
+        ? function (callback) { return setImmediate(callback); }
+        : setTimeout,
+      clearTimeout: timeoutOnFetch ? clearImmediate : clearTimeout,
       setInterval: function (fn, ms) {
         intervals.push({ fn: fn, ms: ms });
         return intervals.length;
       },
-      clearInterval: function () { },
+      clearInterval: function () {},
       intervals: intervals,
       syncedTimestamp: null,
-      syncLastUpdated: function (iso) { mockWindow.syncedTimestamp = iso; }
+      syncLastUpdated: function (iso) { mockWindow.syncedTimestamp = iso; },
+      fetch: function (url, options) {
+        requestedUrls.push(url);
+        requests.push({ url: url, options: options || {} });
+        if (timeoutOnFetch && url === STATUS_URL) return new Promise(function () {});
+        if (!Object.prototype.hasOwnProperty.call(payloads, url)) {
+          return Promise.reject(new Error("no stub for " + url));
+        }
+        var configured = payloads[url];
+        var payload = configured && configured.payload !== undefined ? configured.payload : configured;
+        var status = configured && configured.payload !== undefined
+          ? configured.status
+          : ((responseStatuses && responseStatuses[url]) || 200);
+        return Promise.resolve({
+          ok: status >= 200 && status < 300,
+          status: status,
+          json: function () { return Promise.resolve(payload); }
+        });
+      }
     };
-    return mockWindow;
+    return {
+      document: document,
+      window: mockWindow,
+      nodes: nodes,
+      requestedUrls: requestedUrls,
+      requests: requests,
+      warnings: warnings,
+      input: input,
+      button: button,
+      subscribeButton: subscribeButton,
+      actionButton: actionButton
+    };
   }
 
-  /* Anything that is not stubbed behaves like a failed request. */
-  function fetchStub(payloads) {
-    return function (url) {
+  function loadPage(payloads, responseStatuses, assertions, timeoutOnFetch, queryString) {
+    var page = createPage(payloads, responseStatuses || {}, timeoutOnFetch, queryString);
+    var hadFetch = Object.prototype.hasOwnProperty.call(global, "fetch");
+    var realFetch = global.fetch;
+    var realWarn = console.warn;
+    global.fetch = function (url) {
+      page.requestedUrls.push(url);
       if (!Object.prototype.hasOwnProperty.call(payloads, url)) {
         return Promise.reject(new Error("no stub for " + url));
       }
@@ -274,284 +199,332 @@ module.exports = function (ctx) {
         json: function () { return Promise.resolve(payloads[url]); }
       });
     };
-  }
+    console.warn = function () {};
 
-  /* The page uses promise chains only - no timers - so draining the microtask
-     queue twice is enough to finish a render. */
-  function settle() {
-    return new Promise(function (resolve) { setImmediate(resolve); })
-      .then(function () {
-        return new Promise(function (resolve) { setImmediate(resolve); });
-      });
-  }
-
-  /* Loads ui.js then status.js against a fresh mock DOM and stubbed fetch, and
-     hands the rendered document to `assertions` once the page has settled. The
-     real fetch is always restored, including when an assertion throws. */
-  function loadPage(payloads, assertions) {
-    var dom = createDom();
-    registerHomeElements(dom);
-    var mockWindow = createWindow();
-
-    var hadFetch = Object.prototype.hasOwnProperty.call(global, "fetch");
-    var realFetch = global.fetch;
-    var realWarn = console.warn;
-    global.fetch = fetchStub(payloads);
-    console.warn = function () { };
-
-    var restored = false;
-    function restore() {
-      if (restored) return;
-      restored = true;
+    try {
+      new Function("window", "document", UI_JS)(page.window, page.document);
+      new Function("window", "document", STATUS_JS)(page.window, page.document);
+    } catch (err) {
       console.warn = realWarn;
       if (hadFetch) global.fetch = realFetch;
       else delete global.fetch;
-    }
-
-    try {
-      new Function("window", "document", UI_JS)(mockWindow, dom.document);
-      new Function("window", "document", STATUS_JS)(mockWindow, dom.document);
-    } catch (err) {
-      restore();
       throw err;
     }
 
-    return settle().then(function () {
-      restore();
-      assertions({ window: mockWindow, document: dom.document });
-    }, function (err) {
-      restore();
-      throw err;
-    });
+    return new Promise(function (resolve) { setImmediate(resolve); })
+      .then(function () { return new Promise(function (resolve) { setImmediate(resolve); }); })
+      .then(function () {
+        console.warn = realWarn;
+        if (hadFetch) global.fetch = realFetch;
+        else delete global.fetch;
+        return assertions(page);
+      }, function (err) {
+        console.warn = realWarn;
+        if (hadFetch) global.fetch = realFetch;
+        else delete global.fetch;
+        throw err;
+      });
   }
 
-  /* --- 4. Execution ------------------------------------------------------ */
-
-  /* The payloads this site actually ships, plus the empty incident,
-     maintenance and uptime files. Rendering them must never look healthy. */
+  var LIVE_STATUS = {
+    version: "1.0.0",
+    generatedAt: "2026-10-03T08:00:00Z",
+    lastUpdated: "2026-10-03T08:00:00Z",
+    dataSource: "PesaGuard API health checks",
+    verified: true,
+    note: "Live API health checks only; incident, maintenance, and uptime feeds are not connected.",
+    overall: {
+      status: "operational",
+      label: "Covered services operational",
+      description: "All dependencies covered by the API health checks report operational."
+    },
+    services: [
+      { id: "api", name: "PesaGuard API", status: "operational" },
+      { id: "database", name: "Database", status: "operational" },
+      { id: "kafka", name: "Event processing", status: "operational" },
+      { id: "redis", name: "Cache", status: "operational" },
+      { id: "daraja", name: "Payment provider", status: "operational" }
+    ]
+  };
   var UNVERIFIED_STATUS = JSON.parse(read("data/status.json"));
-  var EMPTY_INCIDENTS = JSON.parse(read("data/incidents.json"));
-  var EMPTY_MAINTENANCE = JSON.parse(read("data/maintenance.json"));
-  var EMPTY_UPTIME = JSON.parse(read("data/uptime.json"));
 
-  function count(text, needle) {
-    return String(text).split(needle).length - 1;
-  }
-
-  function cloneWith(payload, patch) {
-    var copy = JSON.parse(JSON.stringify(payload));
-    Object.keys(patch).forEach(function (key) { copy[key] = patch[key]; });
-    return copy;
-  }
-
-  test("the shipped unverified payload renders unknown everywhere and says so", function () {
-    return loadPage({
-      "api/status.json": UNVERIFIED_STATUS,
-      "data/incidents.json": EMPTY_INCIDENTS,
-      "data/maintenance.json": EMPTY_MAINTENANCE,
-      "data/uptime.json": EMPTY_UPTIME
-    }, function (page) {
-      var doc = page.document;
-      var services = UNVERIFIED_STATUS.services.length;
-
-      assertEqual(doc.getElementById("status-indicator").getAttribute("data-state"), "unknown",
-        "an unverified payload must not render a healthy hero state");
-      assertEqual(doc.getElementById("hero-status-heading").textContent,
-        UNVERIFIED_STATUS.overall.label, "the hero must show the payload's own label");
-      assertEqual(doc.getElementById("status-summary").textContent,
-        UNVERIFIED_STATUS.overall.description, "the hero must show the payload's own description");
-      assert(!doc.getElementById("unverified-notice").hasAttribute("hidden"),
-        "the unverified notice must be shown");
-      assertEqual(doc.querySelector(".js-unverified-note").textContent, UNVERIFIED_STATUS.note,
-        "the notice must carry the payload's own explanation");
-
-      /* The read completed, so this browser may record it - nothing else may. */
-      assert(/^\d{4}-\d{2}-\d{2}T/.test(doc.getElementById("last-checked").getAttribute("datetime")),
-        "#last-checked must carry the time of the completed read");
-      assert(doc.getElementById("last-checked").textContent,
-        "#last-checked must be readable as text as well as machine-readable");
-
-      var list = doc.getElementById("service-list");
-      assertEqual(count(list.innerHTML, 'class="service-status-card"'), services,
-        "every published service needs a card");
-      assertEqual(count(list.innerHTML, 'class="status-pill" data-tone="unknown"'), services,
-        "every unverified service must render an unknown tone");
-      assertEqual(count(list.innerHTML, 'data-tone="operational"'), 0,
-        "no service may render as operational while the payload is unverified");
-      assert(list.innerHTML.indexOf("Not measured") >= 0,
-        "an absent latency or uptime measurement must be labelled");
-      assertEqual(list.getAttribute("aria-busy"), "false",
-        "the services container must stop reporting itself busy");
-
-      assert(doc.getElementById("recent-incidents").innerHTML.indexOf("No incidents recorded") >= 0,
-        "an empty incident log is an empty state, not an error");
-      assert(doc.getElementById("scheduled-maintenance").innerHTML.indexOf("No maintenance scheduled") >= 0,
-        "an empty schedule is an empty state, not an error");
-
-      var summary = doc.getElementById("uptime-summary").innerHTML;
-      assertEqual(count(summary, 'class="uptime-card"'), 4, "four availability windows are expected");
-      assertEqual(count(summary, "Not available"), 4, "unmeasured windows must say Not available");
-      assertEqual(count(summary, 'style="width:0%"'), 4,
-        "unmeasured windows must not be drawn as a filled bar");
-      assertEqual(doc.getElementById("uptime-strip").innerHTML, "",
-        "no availability segment may be invented");
-      assert(doc.getElementById("uptime-viz-note").textContent.indexOf("No daily availability measurement") >= 0,
-        "the strip must explain that nothing is measured");
-      assertEqual(count(doc.getElementById("uptime-legend").innerHTML, "<li>"), 5,
-        "the legend explains the colours with fixed labels");
-
-      assert(doc.querySelector(".js-header-status").textContent.indexOf("Status unavailable") >= 0,
-        "the header indicator must repeat the payload's state");
-      assertEqual(doc.querySelector(".status-indicator-mini .status-dot").getAttribute("class"),
-        "status-dot unknown", "the header dot must not look healthy");
-
-      assertEqual(doc.getElementById("autorefresh-label").textContent, "Auto-refresh every 30s",
-        "the auto-refresh label must state the interval actually used");
-      assertEqual(page.window.intervals.length, 1, "exactly one refresh timer is expected");
-      assertEqual(page.window.intervals[0].ms, 30000,
-        "the timer must use the interval published in the markup");
-
-      assert(doc.getElementById("incident-banner").hasAttribute("hidden"),
-        "with no active incident the banner must stay hidden");
-      assertEqual(doc.getElementById("subscribe-email").disabled, true,
-        "the subscription input must stay disabled while no endpoint is configured");
-      assert(doc.getElementById("subscribe-status").textContent.indexOf("not available yet") >= 0,
-        "the page must state that subscriptions are unavailable");
+  test("homepage status script targets the public API and only reads elements in its markup", function () {
+    assert(STATUS_JS.indexOf('https://api.pesaguard.victorkipruto.com/public/status') >= 0,
+      "the runtime status source must be the public PesaGuard API endpoint");
+    assert(STATUS_JS.indexOf('"data/status.json"') >= 0,
+      "the local snapshot must remain available for offline messaging");
+    var ids = STATUS_JS.match(/byId\("([^"]+)"\)/g) || [];
+    ids.forEach(function (lookup) {
+      var id = /byId\("([^"]+)"\)/.exec(lookup)[1];
+      assert(INDEX.indexOf('id="' + id + '"') >= 0,
+        "status.js looks up #" + id + ", which index.html does not contain");
+    });
+    [INDEX, HEADER].forEach(function (markup) {
+      assert(/status-indicator/.test(markup) || markup === HEADER, "missing status indicator");
     });
   });
 
-  test("an unreadable endpoint is reported as unavailable, never as fresh", function () {
-    /* Nothing is stubbed, so every request fails. */
-    return loadPage({}, function (page) {
-      var doc = page.document;
+  test("status script never defaults an unknown measurement to operational", function () {
+    assert(STATUS_JS.indexOf('"unknown"') >= 0, "unknown must stay a first-class state");
+    assert(!/All [Ss]ystems [Oo]perational/.test(STATUS_JS),
+      "status.js must not contain a hardcoded healthy claim");
+    assert(!/\|\|\s*"operational"/.test(STATUS_JS),
+      "operational must never be a fallback value");
+  });
 
+  test("live API response drives the homepage and records the server timestamp", function () {
+    var payloads = {};
+    payloads[STATUS_URL] = LIVE_STATUS;
+    return loadPage(payloads, {}, function (page) {
+      var doc = page.document;
+      assertEqual(doc.getElementById("status-indicator").getAttribute("data-state"), "operational",
+        "the hero must reflect a verified live API response");
+      assertEqual(doc.getElementById("hero-status-heading").textContent, LIVE_STATUS.overall.label,
+        "the hero must use the API's published label");
+      assertEqual(doc.getElementById("status-summary").textContent, LIVE_STATUS.overall.description,
+        "the summary must use the API's published description");
+      assert(!doc.getElementById("unverified-notice").hasAttribute("hidden"),
+        "a live response must keep limitations of the monitoring coverage visible");
+      assertEqual(doc.getElementById("status-notice-heading").textContent, "Monitoring coverage",
+        "the status notice must distinguish monitoring scope from connectivity");
+      assertEqual(page.window.syncedTimestamp, LIVE_STATUS.lastUpdated,
+        "the server measurement timestamp must reach the shared footer");
+      assert(/^\d{4}-\d{2}-\d{2}T/.test(doc.getElementById("last-checked").getAttribute("datetime")),
+        "last checked must record a completed API read");
+      assertEqual((doc.getElementById("service-list").innerHTML.match(/service-status-card/g) || []).length,
+        LIVE_STATUS.services.length, "all API health checks must be rendered");
+      assert(doc.getElementById("service-list").innerHTML.indexOf("Database") >= 0,
+        "API dependency names must be visible");
+      assertEqual(doc.getElementById("service-list").getAttribute("aria-busy"), "false",
+        "the service list must leave its loading state");
+      assert(page.requestedUrls.indexOf(STATUS_URL) >= 0, "the real API endpoint must be requested");
+      assertEqual(page.window.intervals[0].ms, 30000, "auto-refresh must honor the page interval");
+      assertEqual(page.input.disabled, false, "a configured subscription endpoint must enable the email field");
+      assertEqual(page.subscribeButton.disabled, false, "a configured endpoint must enable subscription submit");
+    });
+  });
+
+  test("automatic and manual refresh both perform a new live API request", function () {
+    var payloads = {};
+    payloads[STATUS_URL] = LIVE_STATUS;
+    return loadPage(payloads, {}, function (page) {
+      assertEqual(page.requestedUrls.filter(function (url) { return url === STATUS_URL; }).length, 1,
+        "the initial page load must read the live endpoint once");
+      page.window.intervals[0].fn();
+      return new Promise(function (resolve) { setImmediate(resolve); })
+        .then(function () { return new Promise(function (resolve) { setImmediate(resolve); }); })
+        .then(function () {
+          assertEqual(page.requestedUrls.filter(function (url) { return url === STATUS_URL; }).length, 2,
+            "the auto-refresh timer must read the live endpoint again");
+          page.nodes["refresh-button"].listeners.click[0]();
+          return new Promise(function (resolve) { setImmediate(resolve); })
+            .then(function () { return new Promise(function (resolve) { setImmediate(resolve); }); });
+        })
+        .then(function () {
+          assertEqual(page.requestedUrls.filter(function (url) { return url === STATUS_URL; }).length, 3,
+            "the manual refresh button must read the same live endpoint");
+          assertEqual(page.nodes["refresh-button"].disabled, false,
+            "manual refresh must restore the button after the read completes");
+        });
+
+        test("automatic refresh pauses in hidden tabs and resumes on return", function () {
+          var payloads = {};
+          payloads[STATUS_URL] = LIVE_STATUS;
+          return loadPage(payloads, {}, function (page) {
+            var visibilityChange = page.document.listeners.visibilitychange[0];
+            assertEqual(page.window.intervals.length, 1, "auto-refresh must start on initial load");
+            page.document.visibilityState = "hidden";
+            visibilityChange();
+            assertEqual(page.window.intervals.length, 1, "hiding the tab must stop and not replace the timer");
+            assertEqual(page.nodes.autorefresh.getAttribute("data-paused"), "true",
+              "the page must expose its paused state");
+            page.document.visibilityState = "visible";
+            visibilityChange();
+            assertEqual(page.window.intervals.length, 2, "returning to the tab must restart the timer");
+            assertEqual(page.nodes.autorefresh.getAttribute("data-paused"), "false",
+              "the page must expose its resumed state");
+            return new Promise(function (resolve) { setImmediate(resolve); })
+              .then(function () { return new Promise(function (resolve) { setImmediate(resolve); }); })
+              .then(function () {
+                assertEqual(page.requestedUrls.filter(function (url) { return url === STATUS_URL; }).length, 2,
+                  "returning to the tab must immediately refresh live status");
+              });
+          });
+        });
+    });
+  });
+
+  test("HTTP 503 health payloads render their reported degradation instead of being discarded", function () {
+    var payloads = {};
+    payloads[STATUS_URL] = { status: 503, payload: {
+      version: "1.0.0",
+      generatedAt: LIVE_STATUS.generatedAt,
+      lastUpdated: LIVE_STATUS.lastUpdated,
+      dataSource: LIVE_STATUS.dataSource,
+      verified: true,
+      note: LIVE_STATUS.note,
+      overall: { status: "outage", label: "Service disruption detected", description: "A health check failed." },
+      services: [{ id: "database", name: "Database", status: "outage" }]
+    } };
+    return loadPage(payloads, {}, function (page) {
+      assertEqual(page.document.getElementById("status-indicator").getAttribute("data-state"), "outage",
+        "a valid 503 health response must be displayed as an outage");
+      assertEqual(page.document.getElementById("hero-status-heading").textContent,
+        "Service disruption detected", "the API label must be retained on a 503 response");
+      assert(!page.document.getElementById("unverified-notice").hasAttribute("hidden"),
+        "the API note about monitoring coverage must remain visible");
+      assert(page.document.getElementById("service-list").innerHTML.indexOf('data-tone="outage"') >= 0,
+        "failed dependencies must render as outages");
+    });
+  });
+
+  test("failed live API reads fall back only to an explicitly unverified local snapshot", function () {
+    var payloads = {};
+    payloads["data/status.json"] = UNVERIFIED_STATUS;
+    return loadPage(payloads, {}, function (page) {
+      assertEqual(page.document.getElementById("status-indicator").getAttribute("data-state"), "unknown",
+        "an unverified fallback must remain unknown");
+      assertEqual(page.document.getElementById("last-checked").getAttribute("datetime"), "",
+        "reading a static fallback must not imply that the live API was checked");
+      assert(page.document.querySelector(".js-unverified-note").textContent.indexOf("live API status feed could not be reached") >= 0,
+        "the notice must explain that the live API could not be reached");
+      assert(page.warnings.some(function (message) {
+        return message.indexOf("live API status feed") >= 0;
+      }), "the network failure must also be recorded in the console");
+    });
+  });
+
+  test("unreachable API without a local snapshot leaves status unavailable and not fresh", function () {
+    return loadPage({}, {}, function (page) {
+      var doc = page.document;
       assertEqual(doc.getElementById("hero-status-heading").textContent, "Status unavailable",
         "an unreadable endpoint must not render a state");
       assertEqual(doc.getElementById("status-indicator").getAttribute("data-state"), "error",
-        "the hero must show that the read failed");
+        "the hero must show that the live read failed");
       assertEqual(doc.getElementById("last-checked").getAttribute("datetime"), "",
-        "no read completed, so no check time may be recorded");
-      assertEqual(doc.getElementById("last-checked").textContent, "",
-        "#last-checked must stay blank rather than implying a fresh read");
-      assert(doc.getElementById("unverified-notice").hasAttribute("hidden"),
-        "the unverified notice describes a connected-but-unmeasured page, not a failed read");
-
+        "a failed read must not appear fresh");
+      assert(!doc.getElementById("unverified-notice").hasAttribute("hidden"),
+        "the user must be told the live status feed is unavailable");
       assert(doc.getElementById("service-list").innerHTML.indexOf("Service states unavailable") >= 0,
-        "the services section must say the payload was not read");
-      assertEqual(doc.getElementById("service-list").getAttribute("aria-busy"), "false",
-        "the skeleton must not be left shimmering forever");
-      assert(doc.getElementById("recent-incidents").innerHTML.indexOf("Incident log unavailable") >= 0,
-        "an unreadable incident log must not be described as empty");
-      assert(doc.getElementById("scheduled-maintenance").innerHTML.indexOf("Maintenance schedule unavailable") >= 0,
-        "an unreadable schedule must not be described as free");
-      assert(doc.getElementById("uptime-viz-note").textContent.indexOf("could not be read") >= 0,
-        "the absence of a measurement must be explained");
-      assert(doc.getElementById("status-live").textContent.indexOf("could not be read") >= 0,
-        "the failure must reach the live region");
-      assertEqual(page.window.intervals.length, 1, "the page must keep retrying on its timer");
+        "the service section must explain that no payload was read");
     });
   });
 
-  /* A verified payload, constructed here on purpose: these numbers are test
-     fixtures, never production data. */
-  var VERIFIED_STATUS = {
-    version: "1.0.0",
-    generatedAt: "2026-09-22T14:30:00Z",
-    dataSource: "test-fixture",
-    verified: true,
-    lastUpdated: "2026-09-22T14:30:00Z",
-    overall: {
-      status: "degraded",
-      label: "Degraded Performance",
-      description: "Reduced performance measured on the API."
-    },
-    services: [
-      { id: "api", name: "API", description: "REST API.",
-        status: "degraded", latency: 812, uptime: "99.2%" },
-      { id: "webhooks", name: "Webhooks", description: "Outbound webhooks.",
-        status: "operational", latency: 120, uptime: "99.99%" }
-    ],
-    activeIncidents: [],
-    activeMaintenance: []
-  };
-
-  var VERIFIED_UPTIME = {
-    version: "1.0.0",
-    generatedAt: "2026-09-22T14:30:00Z",
-    dataSource: "test-fixture",
-    verified: true,
-    overall: "99.1%",
-    periods: { "24h": "99.9%", "7d": "99.5%", "30d": "99.1%", "90d": "98.8%" },
-    services: [],
-    history: [
-      { date: "2026-09-21", status: "operational", uptime: "100%" },
-      { date: "2026-09-22", status: "degraded", uptime: "98.5%" }
-    ],
-    recentDowntime: []
-  };
-
-  test("a verified payload renders exactly the measurements it publishes", function () {
-    return loadPage({
-      "api/status.json": VERIFIED_STATUS,
-      "data/incidents.json": EMPTY_INCIDENTS,
-      "data/maintenance.json": EMPTY_MAINTENANCE,
-      "data/uptime.json": VERIFIED_UPTIME
-    }, function (page) {
-      var doc = page.document;
-
-      assert(doc.getElementById("unverified-notice").hasAttribute("hidden"),
-        "a verified payload must hide the unverified notice");
-      assertEqual(doc.getElementById("status-indicator").getAttribute("data-state"), "degraded",
-        "the hero must use the payload's published status");
-      assertEqual(page.window.syncedTimestamp, VERIFIED_STATUS.lastUpdated,
-        "the payload's own measurement time must reach the shared footer hook");
-
-      var list = doc.getElementById("service-list").innerHTML;
-      assert(list.indexOf('data-tone="degraded"') >= 0,
-        "the degraded service must render as degraded");
-      assert(list.indexOf('data-tone="operational"') >= 0,
-        "the operational service must render as operational");
-      assert(list.indexOf("812 ms latency") >= 0, "a published latency must be shown");
-      assert(list.indexOf("99.99% uptime") >= 0, "a published availability figure must be shown");
-
-      var summary = doc.getElementById("uptime-summary").innerHTML;
-      assert(summary.indexOf("99.9%") >= 0, "published period figures must be shown");
-      assertEqual(count(summary, "Not available"), 0, "a measured window must not say Not available");
-      assert(summary.indexOf('style="width:99.9%"') >= 0, "a measured window must scale its bar");
-
-      var strip = doc.getElementById("uptime-strip").innerHTML;
-      assertEqual(count(strip, '<li role="listitem">'), 2, "one segment per measured day");
-      assertEqual(count(strip, 'class="uptime-seg"'), 2, "each segment must be a real control");
-      assert(strip.indexOf('data-status="degraded"') >= 0,
-        "a degraded day must not be drawn as healthy");
-      assert(strip.indexOf('aria-label="2026-09-22: 98.5% uptime"') >= 0,
-        "each segment must expose its reading to assistive technology");
-      assertEqual(doc.getElementById("uptime-viz-caption").textContent, "Last 2 measured days",
-        "the caption must describe what is actually shown");
-    });
+  test("a stalled API request times out and reaches the unavailable state", function () {
+    return loadPage({}, {}, function (page) {
+      assertEqual(page.document.getElementById("hero-status-heading").textContent, "Status unavailable",
+        "a stalled API request must not leave the page checking forever");
+      assert(page.document.querySelector(".js-unverified-note").textContent.indexOf("live API status feed could not be reached") >= 0,
+        "the timeout must be explained to the reader");
+    }, true);
   });
 
-  test("an active incident published by the payload is never hidden", function () {
-    var withIncident = cloneWith(UNVERIFIED_STATUS, { activeIncidents: ["INC-2026-001"] });
-
-    return loadPage({
-      "api/status.json": withIncident,
-      "data/incidents.json": EMPTY_INCIDENTS,
-      "data/maintenance.json": EMPTY_MAINTENANCE,
-      "data/uptime.json": EMPTY_UPTIME
-    }, function (page) {
+  test("homepage keeps an explicitly published active incident visible", function () {
+    var payload = JSON.parse(JSON.stringify(LIVE_STATUS));
+    payload.activeIncidents = ["INC-2026-001"];
+    var payloads = {};
+    payloads[STATUS_URL] = payload;
+    return loadPage(payloads, {}, function (page) {
       var banner = page.document.getElementById("incident-banner");
-
-      assert(!banner.hasAttribute("hidden"),
-        "an active incident must surface even when the incident log has no record");
+      assert(!banner.hasAttribute("hidden"), "an active incident must be surfaced");
       assert(banner.innerHTML.indexOf("Incident INC-2026-001") >= 0,
-        "the published id must be shown verbatim");
-      assert(banner.innerHTML.indexOf("Details are not shown on this page") >= 0,
-        "the page must admit that it holds no details for it");
-      assert(banner.innerHTML.indexOf('data-severity="unknown"') >= 0,
-        "no severity may be invented for a record that was not read");
-      assertEqual(count(banner.innerHTML, 'class="active-incident"'), 1,
-        "one active incident produces one banner block");
+        "the published incident id must be shown without invented details");
     });
+  });
+
+  test("subscription area is accessible and uses the real backend endpoint", function () {
+    assert(/id="subscribe"/.test(INDEX), "the header's subscribe link must resolve to the form section");
+    assert(/id="subscribe-email"[^>]*aria-label=/.test(INDEX),
+      "the subscription email field must have an accessible name");
+    assert(INDEX.indexOf(SUBSCRIPTION_URL) >= 0,
+      "the form must post to the production backend subscription route");
+    assert(/confirm your email/i.test(INDEX),
+      "the form must tell users that updates require email confirmation");
+    assert(/id="email-action-button"/.test(INDEX),
+      "email confirmation and unsubscribe links must have an actionable confirmation control");
+  });
+
+  test("subscription form sends the entered email to the backend and shows its response", function () {
+    var payloads = {};
+    payloads[STATUS_URL] = LIVE_STATUS;
+    payloads[SUBSCRIPTION_URL] = {
+      status: 202,
+      payload: { message: "Check your email for a link to confirm your status subscription." }
+    };
+    return loadPage(payloads, {}, function (page) {
+      page.input.value = "reader@example.com";
+      page.nodes["subscription-form"].listeners.submit[0]({ preventDefault: function () {} });
+      return new Promise(function (resolve) { setImmediate(resolve); })
+        .then(function () { return new Promise(function (resolve) { setImmediate(resolve); }); })
+        .then(function () {
+          assertEqual(page.requestedUrls.indexOf(SUBSCRIPTION_URL) >= 0, true,
+            "the form must call the subscription API");
+          var request = page.requests.filter(function (entry) {
+            return entry.url === SUBSCRIPTION_URL;
+          })[0];
+          assertEqual(request.options.method, "POST", "subscription must use POST");
+          assertEqual(JSON.parse(request.options.body).email, "reader@example.com",
+            "the submitted address must reach the API request");
+          assertEqual(page.nodes["subscribe-status"].textContent,
+            "Check your email for a link to confirm your status subscription.",
+            "the API response must be shown instead of a fake success");
+          assertEqual(page.input.value, "", "the email field should clear after request acceptance");
+          assertEqual(page.subscribeButton.disabled, false, "the submit button must be restored after sending");
+        });
+    });
+  });
+
+  test("email confirmation link asks for consent and posts the token to the backend", function () {
+    var payloads = {};
+    payloads[STATUS_URL] = LIVE_STATUS;
+    payloads[SUBSCRIPTION_URL + "/confirm"] = {
+      status: 200,
+      payload: { message: "Your PesaGuard status email subscription is confirmed." }
+    };
+    return loadPage(payloads, {}, function (page) {
+      assertEqual(page.nodes["email-action-heading"].textContent, "Confirm status email updates",
+        "confirmation link must identify its action");
+      page.actionButton.listeners.click[0]();
+      return new Promise(function (resolve) { setImmediate(resolve); })
+        .then(function () { return new Promise(function (resolve) { setImmediate(resolve); }); })
+        .then(function () {
+          assert(page.requestedUrls.indexOf(SUBSCRIPTION_URL + "/confirm") >= 0,
+            "confirmation must be sent to the backend");
+          var request = page.requests.filter(function (entry) {
+            return entry.url === SUBSCRIPTION_URL + "/confirm";
+          })[0];
+          assertEqual(JSON.parse(request.options.body).token, "one-time-confirmation-token",
+            "the confirmation token must be sent to the API");
+          assertEqual(page.nodes["email-action-description"].textContent,
+            "Your PesaGuard status email subscription is confirmed.",
+            "confirmation state must be based on the backend response");
+        });
+    }, false, "?confirm=one-time-confirmation-token");
+  });
+
+  test("unsubscribe link requires an explicit action and calls the backend", function () {
+    var payloads = {};
+    payloads[STATUS_URL] = LIVE_STATUS;
+    payloads[SUBSCRIPTION_URL + "/unsubscribe"] = {
+      status: 200,
+      payload: { message: "This email address has been unsubscribed from status updates." }
+    };
+    return loadPage(payloads, {}, function (page) {
+      assertEqual(page.nodes["email-action-heading"].textContent, "Unsubscribe from status emails",
+        "unsubscribe link must identify its action");
+      page.actionButton.listeners.click[0]();
+      return new Promise(function (resolve) { setImmediate(resolve); })
+        .then(function () { return new Promise(function (resolve) { setImmediate(resolve); }); })
+        .then(function () {
+          var request = page.requests.filter(function (entry) {
+            return entry.url === SUBSCRIPTION_URL + "/unsubscribe";
+          })[0];
+          assert(request, "unsubscribe must call the backend");
+          assertEqual(JSON.parse(request.options.body).token, "subscription-id.signature",
+            "the signed unsubscribe token must reach the API");
+          assertEqual(page.actionButton.hidden, true,
+            "the action must be hidden only after backend success");
+        });
+    }, false, "?unsubscribe=subscription-id.signature");
   });
 };

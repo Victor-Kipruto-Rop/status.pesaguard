@@ -218,14 +218,13 @@ module.exports = function (ctx) {
     });
   });
 
-  test("index.html subscription form is disabled and declared unavailable", function () {
+  test("index.html subscription form is accessible and connected to the live endpoint", function () {
     var html = fs.readFileSync(path.join(BASE, "index.html"), "utf8");
     assert(/id="subscription-form"/.test(html), "missing subscription form");
-    assert(/disabled/.test(html), "subscription controls must be disabled");
-    assert(/not available yet/i.test(html),
-      "subscription section must state that it is unavailable");
-    assert(!/Check your email to confirm/i.test(html),
-      "must not claim an email was sent");
+    assert(/public\/status\/subscriptions/.test(html), "subscription form must call the backend");
+    assert(/type=["']email["']/.test(html) && /aria-label=/.test(html),
+      "subscription address must be accessible");
+    assert(/confirm your email/i.test(html), "subscription must disclose email confirmation");
   });
 
   test("index.html exposes an unverified notice element", function () {

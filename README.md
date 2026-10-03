@@ -1,45 +1,57 @@
 # PesaGuard Status (status.pesaguard.victorkipruto.com)
 
-Static status page for PesaGuard services (API, Dashboard, Transactions,
-Reconciliation, Fraud Detection, Webhooks). No build step: hand-written HTML
-plus vanilla CSS/JS. State is read at runtime from JSON under `data/`, with
-`api/status.json` preferred as the runtime endpoint.
+Static status page for PesaGuard. No build step: hand-written HTML plus vanilla
+CSS/JS. The home page reads current API and dependency health from
+`https://api.pesaguard.victorkipruto.com/public/status`.
 
 The palette, typography and motion mirror
 [docs.pesaguard.victorkipruto.com](https://docs.pesaguard.victorkipruto.com);
 the favicon and colour tokens come from that site.
 
-## Current status of this page: NOT CONNECTED
+## Live status integration
 
-**No monitoring source, incident system or maintenance scheduler is wired up
-yet.** The page therefore reports `unknown` / `Not available` everywhere rather
-than showing a green board. This is deliberate.
+The backend endpoint returns a sanitized status snapshot derived from its
+database, Kafka, Redis, and Daraja health checks. It also checks HTTP
+reachability for the public website, dashboard, documentation site, and status
+site. These checks exclude internal error details and include the server-side
+check time. The endpoint supports both normal responses and HTTP 503 responses
+carrying a measured degraded/outage state. The browser refreshes the endpoint
+automatically and renders failed requests as unavailable instead of treating
+them as healthy.
 
-Do not publish a green status page for a payments platform without real
-measurements behind it. `tests/accessibility.test.js` and
-`tests/status.test.js` fail the build if a hardcoded "healthy" state or a
-fabricated timestamp appears in a page or component.
+The endpoint is public and read-only. Its CORS allowlist must include
+`https://status.pesaguard.victorkipruto.com`; if
+`PESAGUARD_CORS_ALLOWED_ORIGINS` is explicitly set in the backend environment,
+include both that origin and the API's own origin in the comma-separated value.
+The full production value must include
+`https://api.pesaguard.victorkipruto.com,https://status.pesaguard.victorkipruto.com`.
 
-### The verification contract
+The API does not currently publish public incident, maintenance, or historical
+uptime records. Those sections remain unavailable/unknown and must not be
+interpreted as an all-clear. No uptime history is derived from the current
+health response.
 
-Every payload declares its provenance:
+### Verification contract
+
+The API response declares its provenance and verification state:
 
 ```json
 {
-  "dataSource": "unconfigured",
-  "verified": false,
-  "note": "explains the current state to anyone reading the file"
+  "dataSource": "PesaGuard API health checks",
+  "verified": true,
+  "generatedAt": "server-generated UTC timestamp"
 }
 ```
 
-* `verified: false` — the page renders `unknown` / `Not available` and shows an
-  on-page notice. Payloads must stay empty (`[]`, `{}`, `null`). Tests enforce this.
-* `verified: true` — the payload must carry real measurements **and** a real
-  `lastUpdated`/`generatedAt`. Tests then require valid percentages.
-
-To go live: connect a health-check aggregator, write its real output into the
-JSON files (or serve it from the runtime endpoint), then flip `verified` to
-`true` and set `dataSource` to the system that produced the numbers.
+* A valid API response is rendered only when `verified: true`; dependency
+  states are mapped from the backend's current health checks.
+* HTTP 503 is accepted only when it carries a valid status payload, so real
+  outages are displayed rather than discarded as network errors.
+* If the API is unreachable, the page may read `data/status.json` only as an
+  unverified fallback. It remains unknown and does not update the live
+  `Last checked` timestamp.
+* Static JSON files must stay unverified until backed by real measurements.
+  Tests reject fabricated status, uptime, or timestamps.
 
 ## Preview
 
@@ -67,8 +79,8 @@ npm run check
 
 | File | Purpose | Shape |
 | --- | --- | --- |
-| `data/status.json` | Overall + per-service state | `{ version, generatedAt, dataSource, verified, note, lastUpdated, overall, services[], activeIncidents[], activeMaintenance[] }` |
-| `api/status.json` | Runtime status endpoint mirror | same as above |
+| `data/status.json` | Unverified offline fallback | Same shape as the status payload; must not claim live health. |
+| `api/status.json` | Static compatibility placeholder; not the browser's live endpoint | Same shape as the status payload. |
 | `data/incidents.json` | Incident record | `{ version, dataSource, verified, note, incidents[] }` |
 | `data/maintenance.json` | Maintenance windows | `{ version, dataSource, verified, note, maintenance[] }` |
 | `data/uptime.json` | Uptime measurements | `{ version, dataSource, verified, note, overall, periods{}, services[], history[], recentDowntime[] }` |
@@ -82,17 +94,20 @@ measured.
 `js/status.js` renders the home page from the payloads above and owns these
 contracts:
 
-* Every section degrades on its own: an unreadable file is reported as
-  unavailable, an empty list is reported as empty, and the two are never
-  conflated.
-* `#last-checked` records only the time this browser completed a read of the
-  status endpoint. It stays blank after a failed read; the payload's own
-  `lastUpdated` reaches the shared footer hook instead.
+* The live status source is the backend's public `/public/status` endpoint.
+  `#last-checked` changes only after a valid live API response; it stays blank
+  when the page renders a static fallback.
+* The payload's server-generated `lastUpdated` reaches the shared footer hook.
+* A visible coverage notice distinguishes live API health from incident,
+  maintenance, and uptime monitoring, which are not connected.
 * `#autorefresh` carries `data-auto-refresh="30"`. The script reads the interval
   from the markup, pauses while the tab is hidden, and resumes on return.
-* The subscription form is enabled only when `#subscription-form` has a
-  non-empty `data-endpoint`. While it is empty the controls stay disabled and
-  the page says so; nothing is sent and no address is stored.
+* `#subscription-form` posts to the backend's public subscription endpoint.
+  Subscriptions require double opt-in: users receive an email and must follow
+  its confirmation link before status-change notifications are sent.
+* Confirmation and signed unsubscribe links are handled by the status page and
+  backend; the page displays the backend response rather than claiming an
+  email was sent when delivery fails.
 * An active incident id published in `status.json` is always surfaced with a
   link to the incident log, even when `incidents.json` holds no record for it.
 
@@ -124,17 +139,31 @@ structure from data.
 controls, `aria-label` on chart bars, and status conveyed by icon plus text plus
 colour (never colour alone).
 
-## Known gaps
+## Remaining gaps
 
-* Email subscriptions are **not implemented**. The form is rendered disabled
-  with an explanation; it sends nothing. `js/status.js` enables it only when
-  `#subscription-form` carries a non-empty `data-endpoint`, and that send path
-  has never been exercised against a real service.
-* Uptime charts render only measured days. There is no synthetic backfill.
-* No CSP, no SRI on the Google Fonts stylesheet, and no rate limiting on the
-  runtime status endpoint (which is currently a static file).
+* Email subscription code and tests are implemented, but production delivery
+  requires deployment/configuration before it is live: apply the backend
+  Alembic migration (`alembic -c pesaguard_backend_pipeline/alembic.ini upgrade
+  head` from the repository root); configure `SMTP_HOST`, `SMTP_PORT`,
+  `SMTP_FROM_EMAIL`, and TLS settings plus credentials when required; set
+  `JWT_SECRET_KEY` and a random `PESAGUARD_STATUS_MONITOR_TOKEN` (at least 32
+  characters) in the backend environment; add the same monitor token as the
+  GitHub Actions repository secret; and deploy the backend and scheduled
+  workflow. Ensure production `PESAGUARD_CORS_ALLOWED_ORIGINS` includes both
+  API and status-site origins. Do not treat email delivery or production
+  monitoring as verified until tested after deployment.
+* The monitor workflow polls every five minutes. A status change can therefore
+  take up to one polling interval to trigger an email, and a brief issue that
+  starts and recovers between polls may not be observed. Notifications are
+  sent only after a confirmed subscriber's status fingerprint changes.
+* Public incident publishing, maintenance scheduling, and historical uptime
+  collection are not yet wired to backend data sources; these remain
+  unavailable rather than inferred.
+* The status site still has no CSP. Its API status endpoint is subject to the
+  backend's public API rate limit.
 * `npm run check` validates data shape, page/component structure, SEO and the
   no-false-claims contract by reading files. It also runs `js/status.js` against
-  a mock DOM (`tests/home.test.js`), which is not a browser and does not cover
-  incidents.js, maintenance.js or uptime.js — a browser smoke test is therefore
-  still required after front-end changes.
+  a mock DOM (`tests/home.test.js`), including subscription, confirmation,
+  manual refresh and timer refresh flows. This is not a browser and does not
+  cover incidents.js, maintenance.js or uptime.js — a browser smoke test is
+  therefore still required after front-end changes.

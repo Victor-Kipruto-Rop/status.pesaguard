@@ -19,14 +19,9 @@
  *   - An active incident id published in the status payload is never hidden,
  *     even when the incident log has no record for it.
  *
- * Sources (relative to the site root):
- *   api/status.json        preferred runtime status endpoint
- *   data/status.json       static fallback when the endpoint is unreadable
- *   data/incidents.json    incident records
- *   data/maintenance.json  maintenance windows
- *   data/uptime.json       availability measurements
- *
- * Each section degrades on its own: one unreadable file never blanks the page.
+ * The live source is the sanitized public endpoint on the PesaGuard API.
+ * The local snapshot is an unverified fallback for clear offline messaging;
+ * it must never be presented as a live measurement.
  * No framework and no build step - same plain-JS style as the sibling page
  * scripts (incidents.js, maintenance.js, uptime.js).
  */
@@ -45,30 +40,17 @@
 
   /* --- Endpoints and published limits ------------------------------------ */
 
-  var STATUS_ENDPOINT = "api/status.json";
+  var STATUS_ENDPOINT = "https://api.pesaguard.victorkipruto.com/public/status";
+  var SUBSCRIPTION_ENDPOINT = "https://api.pesaguard.victorkipruto.com/public/status/subscriptions";
   var STATUS_FALLBACK = "data/status.json";
-  var INCIDENTS_URL = "data/incidents.json";
-  var MAINTENANCE_URL = "data/maintenance.json";
-  var UPTIME_URL = "data/uptime.json";
 
   var HOME_INCIDENT_LIMIT = 3;
-  var HOME_MAINTENANCE_LIMIT = 3;
-  var STRIP_DAYS = 30;
   var DEFAULT_REFRESH_SECONDS = 30;
   var MIN_REFRESH_SECONDS = 5;
 
   /* Shown wherever a measurement does not exist. Never a zero, never a guess. */
   var NOT_MEASURED = "Not measured";
   var NOT_AVAILABLE = "Not available";
-
-  /* Availability windows published by the uptime payload. */
-  var UPTIME_WINDOWS = ["24h", "7d", "30d", "90d"];
-  var WINDOW_LABELS = {
-    "24h": "Last 24 hours",
-    "7d": "Last 7 days",
-    "30d": "Last 30 days",
-    "90d": "Last 90 days"
-  };
 
   /* Incident statuses that mean "still active" - the same set incidents.js uses. */
   var ACTIVE_INCIDENT_STATES = ["investigating", "identified", "monitoring"];
@@ -118,8 +100,7 @@
     refreshing: false,
     initialised: false,
     statusPayload: null,
-    incidentRecords: null,
-    maintenancePayload: null
+    incidentRecords: null
   };
 
 
@@ -141,6 +122,57 @@
     } catch (err) {
       return Promise.resolve(null);
     }
+  }
+
+  function readPublicStatus() {
+    var request;
+    var controller = typeof window.AbortController === "function"
+      ? new window.AbortController()
+      : null;
+    var timeoutId;
+    try {
+      var options = {
+        cache: "no-store",
+        mode: "cors",
+        credentials: "omit"
+      };
+      if (controller) options.signal = controller.signal;
+      request = window.fetch(STATUS_ENDPOINT, options);
+    } catch (err) {
+      return Promise.resolve(null);
+    }
+
+    var timeout = new Promise(function (resolve, reject) {
+      timeoutId = window.setTimeout(function () {
+        if (controller) controller.abort();
+        reject(new Error("The public status endpoint timed out."));
+      }, 25000);
+    });
+
+    return Promise.race([Promise.resolve(request), timeout]).then(function (response) {
+      if (!response || (response.status !== 200 && response.status !== 503)) {
+        throw new Error("Unexpected response from the public status endpoint.");
+      }
+      return response.json().then(function (payload) {
+        if (!payload || payload.verified !== true ||
+            !payload.overall || typeof payload.overall.status !== "string" ||
+            !Array.isArray(payload.services)) {
+          throw new Error("The public status endpoint returned an invalid payload.");
+        }
+        return payload;
+      });
+    }).catch(function (err) {
+      if (window.console && window.console.warn) {
+        window.console.warn("status: the live API status feed could not be read.", err);
+      }
+      return null;
+    }).then(function (payload) {
+      window.clearTimeout(timeoutId);
+      return payload;
+    }, function (err) {
+      window.clearTimeout(timeoutId);
+      throw err;
+    });
   }
 
   function isVerified(payload) {
@@ -279,7 +311,7 @@
 
   /* --- Hero: unverified notice ------------------------------------------- */
 
-  function setUnverifiedNotice(shouldShow, note) {
+  function setUnverifiedNotice(shouldShow, note, heading) {
     var notice = byId("unverified-notice");
     if (!notice) return;
 
@@ -288,8 +320,8 @@
       return;
     }
 
-    /* The payload's own note explains why it is unverified; show it verbatim
-       rather than inventing an explanation. */
+    /* Keep the source's coverage and connection explanation verbatim. */
+    setText(byId("status-notice-heading"), heading || "Monitoring coverage");
     var noteEl = notice.querySelector(".js-unverified-note");
     if (noteEl && note) noteEl.textContent = note;
 
@@ -316,9 +348,12 @@
          leave `#last-checked` untouched so no read is implied. */
       setHero("error", "Status unavailable",
         "The status endpoint could not be read, so the current state of PesaGuard services cannot be confirmed.");
-      setUnverifiedNotice(false, null);
+      setUnverifiedNotice(true,
+        "The live API status feed could not be reached. No current service state can be confirmed.",
+        "Live API status unavailable");
       applyHeaderIndicator();
       renderServices(null);
+      renderIncidentBanner();
       UI.announce("Status unavailable: the status endpoint could not be read.");
       return;
     }
@@ -333,9 +368,17 @@
 
     setHero(tone, overall.label || statusText(overall.status),
       overall.description || defaultSummary(tone));
-    setUnverifiedNotice(!verified, data.note);
-    markChecked();
-    syncPayloadTimestamp(data);
+    setUnverifiedNotice(
+      !verified || data.liveApiUnavailable || !!data.note,
+      data.note,
+      data.liveApiUnavailable
+        ? "Live API status unavailable"
+        : verified ? "Monitoring coverage" : "No monitoring source connected"
+    );
+    if (!data.liveApiUnavailable) {
+      markChecked();
+      syncPayloadTimestamp(data);
+    }
     applyHeaderIndicator();
 
     renderServices(data.services);
@@ -383,7 +426,9 @@
   }
 
   function renderServiceCard(service) {
-    var tone = toneOf(service.status);
+    var verified = isVerified(view.statusPayload);
+    var tone = verified ? toneOf(service.status) : "unknown";
+    var label = verified ? statusText(service.status) : statusText("unknown");
     var name = service.name || service.id;
     var html = '<div class="service-status-card" data-service-id="' +
       UI.escapeHTML(service.id) + '" data-tone="' + tone + '">';
@@ -397,7 +442,7 @@
     html += "</span></span>";
 
     html += '<span class="service-meta">';
-    html += statusPill(tone, statusText(service.status));
+    html += statusPill(tone, label);
     html += '<span class="service-meta-sub">' + UI.escapeHTML(measurementText(service)) + "</span>";
     html += "</span></div>";
 
@@ -525,58 +570,97 @@
     show(banner);
   }
 
-  /* --- Subscription form --------------------------------------------------
-   * `data-endpoint` is empty until a notification service exists. While it is
-   * empty the controls stay disabled and the page says so: nothing is sent,
-   * no address is stored, and no "check your inbox" confirmation is produced.
-   * The form is only enabled when a real endpoint is configured in the markup. */
+  /* --- Subscription and email-link actions ------------------------------- */
 
   function initSubscription() {
     var form = byId("subscription-form");
-    if (!form) return;
+    if (form) {
+      var input = form.querySelector('input[type="email"]');
+      var button = form.querySelector('button[type="submit"]');
+      var status = byId("subscribe-status");
+      var endpoint = (form.getAttribute("data-endpoint") || SUBSCRIPTION_ENDPOINT).trim();
 
-    var input = form.querySelector('input[type="email"]');
-    var button = form.querySelector('button[type="submit"]');
-    var status = byId("subscribe-status");
-    var endpoint = (form.getAttribute("data-endpoint") || "").trim();
+      if (input) input.disabled = false;
+      if (button) button.disabled = false;
 
-    if (!endpoint) {
-      if (input) input.disabled = true;
-      if (button) button.disabled = true;
-      setText(status, "Email subscriptions are not available yet. This form is inert: it sends nothing and stores no address.");
-      return;
+      form.addEventListener("submit", function (event) {
+        event.preventDefault();
+        if (!input) return;
+
+        var address = (input.value || "").trim();
+        if (!address || (typeof input.checkValidity === "function" && !input.checkValidity())) {
+          input.setAttribute("aria-invalid", "true");
+          setText(status, "Enter a valid email address.");
+          return;
+        }
+
+        input.removeAttribute("aria-invalid");
+        if (button) button.disabled = true;
+        setText(status, "Sending a confirmation email...");
+
+        window.fetch(endpoint, {
+          method: "POST",
+          mode: "cors",
+          credentials: "omit",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: address })
+        }).then(function (response) {
+          return response.json().catch(function () { return {}; }).then(function (result) {
+            if (!response.ok) {
+              throw new Error(result.message || "The request could not be accepted.");
+            }
+            setText(status, result.message || "Check your email to confirm this subscription.");
+            input.value = "";
+          });
+        }).catch(function (error) {
+          setText(status, error.message || "The subscription request could not be sent. Please try again later.");
+        }).then(function () {
+          if (button) button.disabled = false;
+        });
+      });
     }
 
-    if (input) input.disabled = false;
-    if (button) button.disabled = false;
+    initEmailAction();
+  }
 
-    form.addEventListener("submit", function (event) {
-      event.preventDefault();
-      if (!input) return;
+  function initEmailAction() {
+    var params = new URLSearchParams(window.location.search || "");
+    var confirmToken = params.get("confirm");
+    var unsubscribeToken = params.get("unsubscribe");
+    var action = confirmToken ? "confirm" : unsubscribeToken ? "unsubscribe" : null;
+    var token = confirmToken || unsubscribeToken;
+    if (!action || !token) return;
 
-      var address = (input.value || "").trim();
-      if (!address || (typeof input.checkValidity === "function" && !input.checkValidity())) {
-        input.setAttribute("aria-invalid", "true");
-        setText(status, "Enter a valid email address.");
-        return;
-      }
+    var panel = byId("email-action");
+    var heading = byId("email-action-heading");
+    var description = byId("email-action-description");
+    var button = byId("email-action-button");
+    if (!panel || !button) return;
 
-      input.removeAttribute("aria-invalid");
-      if (button) button.disabled = true;
-      setText(status, "Sending subscription request...");
-
-      window.fetch(endpoint, {
+    setText(heading, action === "confirm" ? "Confirm status email updates" : "Unsubscribe from status emails");
+    setText(description, action === "confirm"
+      ? "Confirm that you want to receive email when monitored services change state."
+      : "Confirm that you want to stop receiving PesaGuard status emails.");
+    setText(button, action === "confirm" ? "Confirm subscription" : "Unsubscribe");
+    show(panel);
+    button.addEventListener("click", function () {
+      button.disabled = true;
+      setText(description, action === "confirm" ? "Confirming your subscription..." : "Removing your subscription...");
+      window.fetch(SUBSCRIPTION_ENDPOINT + "/" + (action === "confirm" ? "confirm" : "unsubscribe"), {
         method: "POST",
+        mode: "cors",
+        credentials: "omit",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: address })
+        body: JSON.stringify({ token: token })
       }).then(function (response) {
-        if (!response.ok) throw new Error("HTTP " + response.status);
-        setText(status, "Subscription request accepted.");
-        input.value = "";
-      }).catch(function () {
-        setText(status, "The subscription request could not be sent. Please try again later.");
-      }).then(function () {
-        if (button) button.disabled = false;
+        return response.json().catch(function () { return {}; }).then(function (result) {
+          if (!response.ok) throw new Error(result.message || "This email action could not be completed.");
+          setText(description, result.message || "Your request is complete.");
+          button.hidden = true;
+        });
+      }).catch(function (error) {
+        setText(description, error.message || "This email action could not be completed. Please try again later.");
+        button.disabled = false;
       });
     });
   }
@@ -664,9 +748,20 @@
          and say plainly when nothing could be read. */
       if (options.announce) {
         UI.announce(view.lastCheckedAt === null
-          ? "Status could not be refreshed: the status endpoint was not read."
+          ? "Status could not be refreshed: the live API status endpoint was not read."
           : "Status refreshed at " + UI.formatDate(new Date(view.lastCheckedAt).toISOString()));
       }
+    }).catch(function (err) {
+      if (window.console && window.console.error) {
+        window.console.error("status: an unexpected rendering error interrupted refresh.", err);
+      }
+      applyStatus(null);
+      view.refreshing = false;
+      if (button) {
+        button.removeAttribute("aria-busy");
+        button.disabled = false;
+      }
+      setAutoRefreshState(false, document.visibilityState === "hidden");
     });
   }
 
@@ -679,53 +774,23 @@
       UI.renderSkeleton(services, 4, "service");
     }
 
-    return readJSON(STATUS_ENDPOINT).then(function (payload) {
+    return readPublicStatus().then(function (payload) {
       if (payload) return payload;
-      /* The runtime endpoint was unreadable; try the static snapshot before
-         declaring the status unavailable. */
-      return readJSON(STATUS_FALLBACK);
+      return readJSON(STATUS_FALLBACK).then(function (fallback) {
+        if (!fallback || fallback.verified === true) return null;
+        return Object.assign({}, fallback, {
+          liveApiUnavailable: true,
+          note: "The live API status feed could not be reached. " +
+            (fallback.note || "No verified current status is available.")
+        });
+      });
     }).then(function (payload) {
       applyStatus(payload);
     });
   }
 
-  function loadIncidents() {
-    var recent = byId("recent-incidents");
-    if (recent) UI.renderSkeleton(recent, 2, "incident");
-
-    return readJSON(INCIDENTS_URL).then(function (payload) {
-      /* The payload is an object: { verified, note, incidents: [...] }. An
-         unreadable file is reported as unavailable; an empty list is reported
-         as empty. The two are never conflated. */
-      view.incidentRecords = payload && Array.isArray(payload.incidents)
-        ? payload.incidents
-        : null;
-      renderRecentIncidents(view.incidentRecords);
-      renderIncidentBanner();
-    });
-  }
-
-  function loadMaintenance() {
-    var scheduled = byId("scheduled-maintenance");
-    if (scheduled) UI.renderSkeleton(scheduled, 2, "maintenance");
-
-    return readJSON(MAINTENANCE_URL).then(function (payload) {
-      view.maintenancePayload = payload && Array.isArray(payload.maintenance) ? payload : null;
-      renderScheduledMaintenance();
-    });
-  }
-
-  function loadUptime() {
-    var summary = byId("uptime-summary");
-    if (summary) UI.renderSkeleton(summary, 4, "uptime");
-
-    return readJSON(UPTIME_URL).then(function (payload) {
-      renderUptime(payload);
-    });
-  }
-
   function loadAll() {
-    return Promise.all([loadStatus(), loadIncidents(), loadMaintenance(), loadUptime()]);
+    return loadStatus();
   }
 
   /* --- Init --------------------------------------------------------------- */
@@ -741,10 +806,14 @@
     }
 
     view.initialised = true;
-    renderUptimeLegend();
     initSubscription();
     initRefreshControls();
-    loadAll();
+    loadAll().catch(function (err) {
+      if (window.console && window.console.error) {
+        window.console.error("status: the initial status render failed.", err);
+      }
+      applyStatus(null);
+    });
     startAutoRefresh();
   }
 
@@ -760,4 +829,3 @@
     });
   }
 })(window, document);
-
