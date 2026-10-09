@@ -145,7 +145,8 @@ colour (never colour alone).
   requires deployment/configuration before it is live: apply the backend
   Alembic migration (`alembic -c pesaguard_backend_pipeline/alembic.ini upgrade
   head` from the repository root); configure `SMTP_HOST`, `SMTP_PORT`,
-  `SMTP_FROM_EMAIL`, and TLS settings plus credentials when required; set
+  `SMTP_FROM_EMAIL` (recommended sender: `no-reply@pesaguard.co.ke`), and TLS
+  settings plus credentials when required; set
   `JWT_SECRET_KEY` and a random `PESAGUARD_STATUS_MONITOR_TOKEN` (at least 32
   characters) in the backend environment; add the same monitor token as the
   GitHub Actions repository secret; and deploy the backend and scheduled

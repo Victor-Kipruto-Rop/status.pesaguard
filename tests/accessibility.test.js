@@ -24,7 +24,7 @@ module.exports = function (ctx) {
     test(page + ": follows the device color theme", function () {
       assert(/name="theme-color" content="#ffffff" media="\(prefers-color-scheme: light\)"/.test(html),
         "missing light theme-color");
-      assert(/name="theme-color" content="#061a12" media="\(prefers-color-scheme: dark\)"/.test(html),
+      assert(/name="theme-color" content="#121416" media="\(prefers-color-scheme: dark\)"/.test(html),
         "missing dark theme-color");
       assert(/name="color-scheme" content="light dark"/.test(html),
         "missing color-scheme declaration");
@@ -61,8 +61,8 @@ module.exports = function (ctx) {
     var css = fs.readFileSync(path.join(BASE, "css", "variables.css"), "utf8");
     assert(/@media\s*\(prefers-color-scheme:\s*dark\)/.test(css),
       "missing device-driven dark palette");
-    assert(/--paper:\s*#061a12/.test(css), "dark background must match the PesaGuard palette");
-    assert(/--forest:\s*#55d98b/.test(css), "dark primary green must match the PesaGuard palette");
+    assert(/--paper:\s*#121416/.test(css), "dark background must use the neutral charcoal palette");
+    assert(/--forest:\s*#65ca91/.test(css), "dark primary green must remain a restrained brand accent");
     assert(/color-scheme:\s*dark/.test(css), "dark native controls must follow the device theme");
   });
 
