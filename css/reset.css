@@ -1,0 +1,90 @@
+/* -----------------------------------------------------------------------
+ * PesaGuard Status Site — CSS Reset
+ * -----------------------------------------------------------------------
+ * A focused reset that establishes sensible defaults and matches the
+ * typography/colour model used across the PesaGuard docs site.
+ * ------------------------------------------------------------------------- */
+
+/* Use a slightly more sensible default when box-sizing isn't set. */
+*, *::before, *::after { box-sizing: border-box; }
+
+/* Remove default spacing that does not match our baseline. */
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 0.95rem;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Inherit fonts for form controls. */
+button, input, optgroup, select, textarea {
+  font: inherit;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+/* Make form elements behave more like the spec intends. */
+button, input {
+  overflow: visible;
+  border: none;
+}
+
+button { cursor: pointer; }
+select { text-transform: none; }
+
+/* Remove the default list style. */
+ul, ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* Remove default table spacing. */
+table {
+  border-collapse: collapse;
+  text-indent: 0;
+  border: 0;
+}
+
+/* Remove default fieldset styling. */
+fieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+/* Avoid conflicts with the site's heading sizes. */
+h1, h2, h3, h4, h5, h6 {
+  margin: 0;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+/* Remove the default emphasis styling. */
+abbr[title] {
+  border-bottom: none;
+  text-decoration: underline dotted;
+}
+
+/* Always add a focus outline for accessibility. */
+a { color: var(--forest); text-decoration: none; }
+a:hover { color: var(--lime-ink); }
+
+/* Reduce motion support — must come first. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

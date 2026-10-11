@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import importlib.util
 import pathlib
 import sys
@@ -24,6 +26,44 @@ def test_transaction_validation_algorithm_passes_valid_transaction():
     assert result["status"] == "passed"
     assert result["metadata"]["amount"] == 2500.0
     assert result["metadata"]["state"] == "VALIDATED"
+
+
+def test_transaction_validation_algorithm_rejects_unknown_lifecycle_state():
+    tx = {
+        "transaction_id": "TX-1002",
+        "amount": 100.0,
+        "currency": "KES",
+        "timestamp": "2024-06-01T12:00:00Z",
+        "status": "NOT_A_REAL_STATE",
+    }
+
+    result = ALGORITHMS.evaluate_algorithm("Transaction Validation Algorithm", tx)
+
+    assert result["status"] == "failed"
+    assert "not valid for the lifecycle model" in result["evidence"]
+
+
+def test_daraja_callback_algorithm_verifies_hmac_signature():
+    secret = "shared-secret-32-bytes-long-abc123"
+    payload = {
+        "merchant_id": "123456",
+        "amount": "2500",
+        "timestamp": "20240601120000",
+        "reference": "INV-404",
+        "shared_secret": secret,
+    }
+    body = "|".join([
+        str(payload["merchant_id"]),
+        str(payload["amount"]),
+        str(payload["timestamp"]),
+        str(payload["reference"]),
+    ])
+    payload["signature"] = hmac.new(secret.encode("utf-8"), body.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    result = ALGORITHMS.evaluate_algorithm("Callback Signature Verification Algorithm", payload)
+
+    assert result["status"] == "passed"
+    assert result["metadata"]["merchant_id"] == "123456"
 
 
 def test_exact_matching_algorithm_uses_reconciliation_engine():

@@ -1,0 +1,12 @@
+{
+  "version": "1.0.0",
+  "generatedAt": null,
+  "dataSource": "unconfigured",
+  "verified": false,
+  "note": "No uptime monitoring source is connected. Percentages are deliberately absent rather than estimated; the page reports 'Not available' until real measurements exist.",
+  "overall": null,
+  "periods": {},
+  "services": [],
+  "history": [],
+  "recentDowntime": []
+}

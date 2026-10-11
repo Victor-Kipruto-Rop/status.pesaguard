@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "generatedAt": null,
+  "dataSource": "unconfigured",
+  "verified": false,
+  "note": "No incident source is connected. This file is intentionally empty rather than filled with example incidents. Published incidents must come from a real, auditable record.",
+  "incidents": []
+}

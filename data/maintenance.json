@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "generatedAt": null,
+  "dataSource": "unconfigured",
+  "verified": false,
+  "note": "No maintenance scheduler is connected. This file is intentionally empty rather than filled with example windows. Published windows must reflect real, communicated maintenance.",
+  "maintenance": []
+}

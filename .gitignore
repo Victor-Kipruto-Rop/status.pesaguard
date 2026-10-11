@@ -3,13 +3,12 @@
 __pycache__/
 *.pyc
 
-# Node
+# Node and build output
 node_modules/
 frontend/node_modules/
-
-# Next.js
-.next/
+build/
 out/
+.next/
 
 # Environment
 .env
@@ -19,6 +18,7 @@ out/
 
 # Logs
 *.log
+npm-debug.log*
 
 # Generated at import time by pesaguard_backend_pipeline/metrics.py (see B10 in
 # docs/operations/PRODUCTION_CERTIFICATION.md). Never commit this artifact.

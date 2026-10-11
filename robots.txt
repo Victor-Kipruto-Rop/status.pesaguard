@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://status.pesaguard.victorkipruto.com/sitemap.xml

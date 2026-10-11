@@ -1,0 +1,118 @@
+/* -----------------------------------------------------------------------
+ * PesaGuard Status Site — Animations
+ * -----------------------------------------------------------------------
+ * All motion lives here. Structural styles stay in their respective files.
+ * Every effect is subtle, short, GPU-friendly, and disabled under
+ * prefers-reduced-motion.
+ * ------------------------------------------------------------------------- */
+
+/* --- Reveal on entrance ------------------------------------------------------
+ * Opt-in for elements that set .is-visible through app.js. The home page
+ * intentionally does not mark sections .reveal, so most of the page stays
+ * static and only the incident banner and small state transitions animate. */
+
+.reveal {
+  opacity: 0;
+  transform: translateY(12px);
+  transition: opacity 380ms var(--ease-out), transform 380ms var(--ease-out);
+}
+
+.reveal.is-visible {
+  opacity: 1;
+  transform: none;
+}
+
+/* --- Header scrolled state ------------------------------------------------- */
+
+.status-header.is-scrolled {
+  border-bottom-color: var(--line-strong);
+  box-shadow: var(--shadow-sm);
+}
+
+/* --- Refresh button spin -----------------------------------------------------
+ * The home page uses an inline SVG keyframe (refresh-spin in status.css)
+ * instead of this utility so the animation stays scoped to the control. */
+
+/* --- Home freshness pulse (legacy utility kept for other pages) --------------- */
+
+.auto-refresh-pulse {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  opacity: 0.6;
+  transition: opacity 200ms var(--ease-out);
+}
+
+.auto-refresh-pulse.is-pending {
+  opacity: 1;
+}
+
+.auto-refresh-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--signal-green);
+  animation: pulse 1.5s infinite;
+}
+
+.auto-refresh-dot.is-refreshing {
+  animation: refresh-pulse 0.6s var(--ease-out);
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.6; box-shadow: 0 0 0 0 var(--lime-veil); }
+  50% { opacity: 1; box-shadow: 0 0 0 8px var(--lime-veil); }
+}
+
+@keyframes refresh-pulse {
+  0% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.4); opacity: 0.6; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+/* --- Status transition ----------------------------------------------------- */
+
+.status-transition {
+  transition: color 180ms var(--ease-out), border-color 180ms var(--ease-out);
+}
+
+/* --- Skeleton states ------------------------------------------------------- */
+
+.skeleton {
+  background: var(--paper-sunken);
+  border-radius: var(--r-sm);
+  position: relative;
+  overflow: hidden;
+}
+
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(34, 197, 94, 0.08), transparent);
+  animation: shimmer 1.5s infinite;
+}
+
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+.skeleton-text { height: 14px; width: 100%; }
+.skeleton-title { height: 22px; width: 60%; margin-bottom: 8px; }
+.skeleton-paragraph { height: 14px; width: 100%; margin-bottom: 6px; }
+.skeleton-paragraph:last-child { width: 80%; }
+
+/* --- Reduced motion -------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .reveal { opacity: 1; transform: none; }
+  .auto-refresh-dot { animation: none; }
+  .skeleton::after { display: none; }
+}

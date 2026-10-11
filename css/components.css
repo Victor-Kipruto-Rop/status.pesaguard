@@ -1,0 +1,252 @@
+/* -----------------------------------------------------------------------
+ * PesaGuard Status Site — Components (pills, dots, icons)
+ * -----------------------------------------------------------------------
+ * Status pills, status cards, icon badges, and other reusable UI elements.
+ * These build on the shared design tokens from variables.css.
+ * ------------------------------------------------------------------------- */
+
+/* --- Status Pill (inline badge) ------------------------------------------- */
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 12px;
+  border-radius: var(--r-full);
+  border: 1px solid var(--line);
+  background: var(--paper-raised);
+  font: 600 11px / 1.5 var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  vertical-align: middle;
+}
+
+.status-pill i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+
+.status-pill[data-tone="operational"] {
+  color: var(--lime-ink);
+  border-color: rgba(11, 93, 59, 0.35);
+  background: var(--lime-veil);
+}
+
+.status-pill[data-tone="operational"] i { background: var(--signal-green); }
+
+.status-pill[data-tone="degraded"] {
+  color: var(--signal-amber);
+  border-color: rgba(229, 166, 60, 0.45);
+  background: rgba(229, 166, 60, 0.07);
+}
+
+.status-pill[data-tone="degraded"] i { background: var(--signal-amber); }
+
+.status-pill[data-tone="outage"] {
+  color: var(--signal-red);
+  border-color: rgba(217, 122, 108, 0.4);
+  background: rgba(217, 122, 108, 0.07);
+}
+
+.status-pill[data-tone="outage"] i { background: var(--signal-red); }
+
+.status-pill[data-tone="maintenance"] {
+  color: var(--text-muted);
+  border-color: rgba(61, 126, 166, 0.4);
+  background: rgba(61, 126, 166, 0.07);
+}
+
+.status-pill[data-tone="maintenance"] i { background: var(--text-muted); }
+
+.status-pill[data-tone="unknown"] {
+  color: var(--text-muted);
+  border-color: var(--line);
+}
+
+.status-pill[data-tone="unknown"] i {
+  background: var(--text-muted);
+  opacity: 0.5;
+}
+
+/* --- Status Dot (standalone circle) --------------------------------------- */
+
+.status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  display: inline-block;
+  flex: none;
+}
+
+.status-dot.operational { background: var(--signal-green); }
+.status-dot.degraded { background: var(--signal-amber); }
+.status-dot.outage { background: var(--signal-red); }
+.status-dot.maintenance { background: var(--lime-deep); }
+.status-dot.unknown { background: var(--text-muted); opacity: 0.5; }
+
+/* --- Status Icon (SVG) ---------------------------------------------------- */
+
+.status-icon {
+  width: 16px;
+  height: 16px;
+  display: inline-block;
+  flex: none;
+  vertical-align: middle;
+}
+
+/* --- Status Icon (SVG) ---------------------------------------------------- */
+
+.status-icon {
+  width: 16px;
+  height: 16px;
+  display: inline-block;
+  flex: none;
+  vertical-align: middle;
+}
+
+.status-icon.operational { fill: var(--signal-green); }
+.status-icon.degraded { fill: var(--signal-amber); }
+.status-icon.outage { fill: var(--signal-red); }
+.status-icon.maintenance { fill: var(--forest); }
+
+/* --- Service Status Card --------------------------------------------------- */
+
+.service-status-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--paper-raised);
+  box-shadow: var(--shadow-xs);
+  transition: border-color 140ms var(--ease-out), background-color 140ms var(--ease-out);
+}
+
+.service-status-card:hover {
+  border-color: var(--line-strong);
+  background: var(--paper-sunken);
+}
+
+.service-status-card:focus-within {
+  outline: 2px solid var(--lime-deep);
+  outline-offset: 2px;
+}
+
+.service-status-card .service-name {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.service-status-card .service-name .status-icon {
+  width: 20px;
+  height: 20px;
+}
+
+.service-status-card .service-meta {
+  text-align: right;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+/* --- Incident Card --------------------------------------------------------- */
+
+.incident-card {
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--paper-raised);
+  padding: 20px 22px;
+  margin-bottom: 14px;
+  box-shadow: var(--shadow-xs);
+}
+
+.incident-card[data-severity="major"] { border-left-color: var(--signal-red); }
+.incident-card[data-severity="high"] { border-left-color: var(--signal-amber); }
+.incident-card[data-severity="medium"] { border-left-color: var(--signal-green); }
+
+.incident-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.incident-card-title {
+  font-size: 1.1rem;
+  font-weight: 700;
+}
+
+.incident-card-meta {
+  font: 500 10px / 1.4 var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.incident-timeline {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-soft);
+  list-style: none;
+}
+
+.incident-timeline li {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 13px;
+}
+
+.incident-timeline li:last-child { border-bottom: 0; }
+
+.incident-timeline .timeline-timestamp {
+  font: 500 10.5px / 1.4 var(--font-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.incident-timeline .timeline-desc {
+  color: var(--text-muted);
+  margin: 2px 0 0;
+}
+
+/* --- Maintenance Card ------------------------------------------------------ */
+
+.maintenance-card {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--paper-raised);
+  padding: 18px 20px;
+  margin-bottom: 14px;
+  box-shadow: var(--shadow-xs);
+}
+
+.maintenance-card:hover {
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-sm);
+}
+
+.maintenance-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.maintenance-card-title {
+  font-size: 1.1rem;
+  font-weight: 700;
+}

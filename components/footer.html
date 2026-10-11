@@ -1,0 +1,55 @@
+<!-- Shared Footer Component
+     Loaded by js/app.js into <footer id="site-footer"></footer>.
+     Path context: pages are at the root level, so asset paths are relative
+     to root. The wrapper is a plain <div> — not a nested <footer> — so the
+     page keeps exactly one contentinfo landmark. No health claims live here:
+     state is rendered by page scripts from data, never hardcoded. The
+     .js-last-updated hook is populated by app.js — do not remove it. -->
+<div class="status-footer">
+  <div class="status-footer-inner">
+    <div class="status-footer-top">
+      <div class="status-footer-brand">
+        <a class="status-footer-logo" href="index.html" aria-label="PesaGuard System Status — home">
+          <img src="assets/logo/logo.svg" alt="" width="28" height="28">
+          <span class="status-footer-wordmark"><strong>PesaGuard</strong> <small>System Status</small></span>
+        </a>
+        <p>Service status, incidents, maintenance, and uptime for PesaGuard.</p>
+      </div>
+      <nav class="status-footer-grid" aria-label="Site footer">
+        <section aria-labelledby="status-footer-status-h">
+          <h3 id="status-footer-status-h">Status</h3>
+          <ul>
+            <li><a href="index.html">Status</a></li>
+            <li><a href="incidents.html">Incidents</a></li>
+            <li><a href="maintenance.html">Maintenance</a></li>
+            <li><a href="uptime.html">Uptime</a></li>
+          </ul>
+        </section>
+        <section aria-labelledby="status-footer-pesaguard-h">
+          <h3 id="status-footer-pesaguard-h">PesaGuard</h3>
+          <ul>
+            <li><a href="https://pesaguard.victorkipruto.com">Website</a></li>
+            <li><a href="https://dashboard.pesaguard.victorkipruto.com">Dashboard</a></li>
+            <li><a href="https://docs.pesaguard.victorkipruto.com">Documentation</a></li>
+            <li><a href="https://api.pesaguard.victorkipruto.com">API</a></li>
+          </ul>
+        </section>
+        <section aria-labelledby="status-footer-legal-h">
+          <h3 id="status-footer-legal-h">Legal</h3>
+          <ul>
+            <li><a href="https://pesaguard.victorkipruto.com/privacy">Privacy Policy</a></li>
+            <li><a href="https://pesaguard.victorkipruto.com/terms">Terms of Service</a></li>
+          </ul>
+        </section>
+      </nav>
+    </div>
+    <div class="status-footer-utility">
+      <p class="status-last-updated">Last updated: <span class="js-last-updated">Not yet reported</span></p>
+      <a class="status-footer-top-link" href="#main">Back to top</a>
+    </div>
+    <div class="status-footer-bottom">
+      <span>© 2026 PesaGuard. All rights reserved.</span>
+      <span>Status page v1.0.0</span>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,27 @@
+<!-- Shared Header Component
+     Loaded by js/ui.js into <header id="site-header">…</header>
+     Path context: pages are at the root level, so asset paths are relative
+     to root. Only header/footer chrome lives here — never page content or
+     health claims. Default mini-indicator state is "unknown". -->
+<header class="status-header">
+  <div class="status-header-inner">
+    <a class="status-brand" href="index.html">
+      <img src="assets/logo/logo.svg" alt="" width="26" height="26">
+      PesaGuard <small>Status</small>
+    </a>
+    <nav class="status-header-links" aria-label="Primary" id="primary-nav">
+      <a href="index.html">Home</a>
+      <a href="incidents.html">Incidents</a>
+      <a href="maintenance.html">Maintenance</a>
+      <a href="uptime.html">Uptime</a>
+      <span class="status-indicator-mini" role="status">
+        <span class="status-dot unknown" aria-hidden="true"></span>
+        <span class="js-header-status sr-only">Status unavailable</span>
+      </span>
+      <a href="index.html#subscribe" class="status-subscribe-link">Subscribe to Updates</a>
+    </nav>
+    <button class="status-nav-toggle" type="button" aria-expanded="false" aria-controls="primary-nav" aria-label="Toggle navigation menu">
+      <span></span><span></span><span></span>
+    </button>
+  </div>
+</header>

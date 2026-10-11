@@ -1,0 +1,29 @@
+<!-- Incident Card Component — REFERENCE TEMPLATE
+     Documents the DOM js/incidents.js builds for each incident. Not fetched at
+     runtime. Placeholders use {id}; the renderer escapes all data values.
+     data-severity drives the severity stripe: major|high|medium -->
+<article class="incident-card" data-severity="medium" data-incident-id="{id}">
+  <div class="incident-card-header">
+    <span class="status-pill" data-tone="outage">
+      <i></i>
+      <span class="incident-severity-label">Investigating</span>
+    </span>
+    <time class="incident-card-meta" datetime="">
+      Started: <span class="incident-start-time"></span>
+    </time>
+  </div>
+  <h2 class="incident-card-title" id="incident-title-{id}">
+    <a href="incidents.html#incident-{id}" class="incident-link">Incident title</a>
+  </h2>
+  <div class="incident-card-body">
+    <p class="incident-description">Incident description goes here.</p>
+    <div class="incident-affected-services">
+      <span class="service-label">Affected:</span>
+      <span class="service-names">Service name</span>
+    </div>
+  </div>
+  <div class="incident-card-footer">
+    <span>Last updated: <time class="incident-updated-time"></time></span>
+    <a href="incidents.html#incident-{id}" class="status-back-link">View details</a>
+  </div>
+</article>

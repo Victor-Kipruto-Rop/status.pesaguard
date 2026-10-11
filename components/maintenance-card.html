@@ -1,0 +1,23 @@
+<!-- Maintenance Card Component — REFERENCE TEMPLATE
+     Documents the DOM js/maintenance.js builds for each window. Not fetched at
+     runtime. data-status is scheduled|in-progress|completed -->
+<div class="maintenance-card" data-maintenance-id="{id}" data-status="scheduled">
+  <div class="maintenance-card-header">
+    <span class="status-pill" data-tone="maintenance">
+      <i></i>
+      <span class="maintenance-status-label">Scheduled</span>
+    </span>
+    <time class="maintenance-card-meta" datetime="">
+      <span class="maintenance-start-time"></span>
+      <span class="maintenance-duration"></span>
+    </time>
+  </div>
+  <h3 class="maintenance-card-title">Maintenance title</h3>
+  <div class="maintenance-card-body">
+    <p class="maintenance-description">Maintenance description goes here.</p>
+    <div class="maintenance-card-services">
+      <span class="service-label">Affected services:</span>
+      <span class="service-names">Service name</span>
+    </div>
+  </div>
+</div>
