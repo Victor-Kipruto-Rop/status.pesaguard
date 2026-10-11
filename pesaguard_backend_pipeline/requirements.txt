@@ -23,8 +23,8 @@ PyYAML==6.0.2
 
 # HTTP Networking & Security
 requests==2.33.0
-PyJWT==2.13.0
-cryptography==46.0.5
+PyJWT==2.15.0
+cryptography==50.0.0
 argon2-cffi==23.1.0
 webauthn==2.7.0
 qrcode[pil]==8.2

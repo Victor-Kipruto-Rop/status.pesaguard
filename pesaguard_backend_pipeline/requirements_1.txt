@@ -11,8 +11,8 @@ redis==5.3.1
 rq==2.1.0
 
 # Security, Networking & Utilities
-PyJWT==2.13.0
-cryptography==46.0.5
+PyJWT==2.15.0
+cryptography==50.0.0
 argon2-cffi==23.1.0
 requests==2.33.0
 python-dotenv==1.2.2
