@@ -40,8 +40,8 @@
 
   /* --- Endpoints and published limits ------------------------------------ */
 
-  var STATUS_ENDPOINT = "https://api.pesaguard.victorkipruto.com/public/status";
-  var SUBSCRIPTION_ENDPOINT = "https://api.pesaguard.victorkipruto.com/public/status/subscriptions";
+  var STATUS_ENDPOINT = "https://api.pesaguard.co.ke/public/status";
+  var SUBSCRIPTION_ENDPOINT = "https://api.pesaguard.co.ke/public/status/subscriptions";
   var STATUS_FALLBACK = "data/status.json";
 
   var HOME_INCIDENT_LIMIT = 3;

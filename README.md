@@ -2,11 +2,12 @@
 
 Static status page for PesaGuard. No build step: hand-written HTML plus vanilla
 CSS/JS. The home page reads current API and dependency health from
-`https://api.pesaguard.victorkipruto.com/public/status`.
+`https://api.pesaguard.co.ke/public/status`; status subscriptions use the same
+API origin. Support is available at `support@pesaguard.co.ke`.
 
-The palette, typography and motion mirror
-[docs.pesaguard.victorkipruto.com](https://docs.pesaguard.victorkipruto.com);
-the favicon and colour tokens come from that site.
+The palette, typography and brand mark follow the PesaGuard public website.
+Light mode is the default; the header toggle saves a theme choice in this
+browser.
 
 ## Live status integration
 
@@ -24,7 +25,7 @@ The endpoint is public and read-only. Its CORS allowlist must include
 `PESAGUARD_CORS_ALLOWED_ORIGINS` is explicitly set in the backend environment,
 include both that origin and the API's own origin in the comma-separated value.
 The full production value must include
-`https://api.pesaguard.victorkipruto.com,https://status.pesaguard.victorkipruto.com`.
+`https://api.pesaguard.co.ke,https://status.pesaguard.victorkipruto.com`.
 
 The API does not currently publish public incident, maintenance, or historical
 uptime records. Those sections remain unavailable/unknown and must not be
@@ -74,6 +75,19 @@ npm run check
 `npm run check` reads the data files and the page markup, and also executes
 `js/status.js` against a mock DOM to assert the home page's honesty contract
 (see `tests/home.test.js`). It is not a browser.
+
+## Deploy
+
+The `Deploy status site` workflow runs the status checks before uploading the
+public files to Cloudflare Pages. Pull requests validate without deploying.
+Configure the Cloudflare Pages project as `status-pesaguard` and add the
+repository secrets `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` (Account
+Cloudflare Pages: Edit). Bind `status.pesaguard.victorkipruto.com` to that
+project in Cloudflare Pages and configure its DNS there. Disable the previous
+GitHub Pages publishing source and move the custom-domain DNS record to
+Cloudflare as part of the host cutover. The API hostname must also resolve to
+the deployed backend and pass HTTPS/CORS checks before the live status UI can
+be considered connected.
 
 ## Data files
 

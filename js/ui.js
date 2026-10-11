@@ -14,6 +14,16 @@
 (function (global) {
   "use strict";
 
+  var theme = "light";
+  try {
+    theme = global.localStorage.getItem("pesaguard-site-theme") === "dark" ? "dark" : "light";
+  } catch (err) {
+    theme = "light";
+  }
+  if (document.documentElement) {
+    document.documentElement.setAttribute("data-theme", theme);
+  }
+
   /* Expose shared helpers on window.StatusUI */
   global.StatusUI = {
     reduceMotion: window.matchMedia("(prefers-reduced-motion: reduce)").matches,
@@ -243,4 +253,3 @@
     }
   };
 })(window);
-

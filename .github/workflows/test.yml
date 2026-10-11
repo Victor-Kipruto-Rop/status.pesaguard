@@ -1,14 +1,7 @@
 name: Test status site
 
 on:
-  push:
-    branches: ["main"]
-    paths:
-      - "status.pesaguard.victorkipruto.com/**"
-  pull_request:
-    branches: ["main"]
-    paths:
-      - "status.pesaguard.victorkipruto.com/**"
+  workflow_call:
   workflow_dispatch:
 
 permissions:
@@ -17,9 +10,6 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: status.pesaguard.victorkipruto.com
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -28,7 +18,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
 
       - name: Validate JSON data files
         run: |

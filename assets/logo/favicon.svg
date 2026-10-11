@@ -1,11 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 176 190">
-  <path fill="#0B5D3B" transform="translate(16 15)" d="M72 2 139 27v49c0 36-25 63-67 82C30 139 5 112 5 76V27z"/>
-  <path fill="#07875D" transform="translate(16 15)" d="M5 27 72 2v20L28 47 5 37z"/>
-  <path fill="#22C55E" transform="translate(16 15)" d="M72 2 139 27l-23 20-44-25z"/>
-  <path fill="#07875D" transform="translate(16 15)" d="M5 37 28 47v50c0 10 3 19 8 27C16 109 5 94 5 76z"/>
-  <path fill="#0B5D3B" transform="translate(16 15)" d="M72 22 116 47v50c0 16-10 29-26 40l-18 10z"/>
-  <path fill="#FFFFFF" transform="translate(16 15)" d="M72 35 107 49v29c0 18-13 33-35 46-22-13-35-28-35-46V49z"/>
-  <path fill="#07875D" transform="translate(16 15)" d="M48 64 83 50v12L48 77z"/>
-  <path fill="#0B5D3B" transform="translate(16 15)" d="M48 82 91 65v12L48 94z"/>
-  <path fill="#22C55E" transform="translate(16 15)" d="M48 100 78 88v12l-30 12z"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="title description">
+  <title id="title">PesaGuard secure payments mark</title>
+  <desc id="description">A payment card and verified check enclosed by a shield.</desc>
+  <path d="M50 8 85 21v24c0 22-13 38-35 47-22-9-35-25-35-47V21L50 8Z" fill="none" stroke="#2ECC87" stroke-linejoin="round" stroke-width="5"/>
+  <rect x="28" y="31" width="44" height="34" rx="5" fill="none" stroke="#2ECC87" stroke-linejoin="round" stroke-width="4"/>
+  <path d="M30 42h40" fill="none" stroke="#2ECC87" stroke-width="4"/>
+  <path d="M35 53h9" fill="none" stroke="#2ECC87" stroke-linecap="round" stroke-width="4"/>
+  <circle cx="66" cy="65" r="10" fill="#2ECC87"/>
+  <path d="m62 65 3 3 6-7" fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round" stroke-width="3"/>
 </svg>

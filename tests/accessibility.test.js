@@ -21,11 +21,9 @@ module.exports = function (ctx) {
       assert(/name=["']viewport["']/.test(html), "missing viewport");
     });
 
-    test(page + ": follows the device color theme", function () {
+    test(page + ": defaults to the light color theme", function () {
       assert(/name="theme-color" content="#ffffff" media="\(prefers-color-scheme: light\)"/.test(html),
         "missing light theme-color");
-      assert(/name="theme-color" content="#121416" media="\(prefers-color-scheme: dark\)"/.test(html),
-        "missing dark theme-color");
       assert(/name="color-scheme" content="light dark"/.test(html),
         "missing color-scheme declaration");
       assert(!/fonts\.googleapis\.com/.test(html), "must not depend on an external font service");
@@ -56,14 +54,26 @@ module.exports = function (ctx) {
     });
   });
 
-  /* --- Device-driven brand theme --------------------------------------- */
-  test("CSS tokens define the PesaGuard system-driven dark palette", function () {
+  /* --- User-selectable brand theme -------------------------------------- */
+  test("CSS tokens default to light and expose an explicit dark palette", function () {
     var css = fs.readFileSync(path.join(BASE, "css", "variables.css"), "utf8");
-    assert(/@media\s*\(prefers-color-scheme:\s*dark\)/.test(css),
-      "missing device-driven dark palette");
+    assert(!/@media\s*\(prefers-color-scheme:\s*dark\)/.test(css),
+      "theme must not follow the device preference");
+    assert(/color-scheme:\s*light/.test(css), "light must be the default");
+    assert(/:root\[data-theme="dark"\]/.test(css),
+      "missing explicit dark palette");
     assert(/--paper:\s*#121416/.test(css), "dark background must use the neutral charcoal palette");
     assert(/--forest:\s*#65ca91/.test(css), "dark primary green must remain a restrained brand accent");
-    assert(/color-scheme:\s*dark/.test(css), "dark native controls must follow the device theme");
+    assert(/color-scheme:\s*dark/.test(css), "dark native controls must follow the selected theme");
+  });
+
+  test("theme toggle is provided by the shared header and persists a selection", function () {
+    var header = fs.readFileSync(path.join(BASE, "components", "header.html"), "utf8");
+    var app = fs.readFileSync(path.join(BASE, "js", "app.js"), "utf8");
+    assert(/class="theme-toggle status-theme-toggle"/.test(header), "missing status theme control");
+    assert(/Switch to /.test(app), "theme control must announce its next action");
+    assert(/pesaguard-site-theme/.test(app) && /localStorage\.setItem/.test(app),
+      "theme selection must be persisted");
   });
 
   test("mobile navigation toggle meets the 44px touch target", function () {
