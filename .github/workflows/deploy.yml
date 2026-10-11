@@ -3,34 +3,52 @@ name: Deploy status site
 on:
   push:
     branches: ["main"]
-    paths:
-      - "status.pesaguard.victorkipruto.com/**"
+  pull_request:
+    branches: ["main"]
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
-  group: "pages"
+  group: "cloudflare-pages"
   cancel-in-progress: false
 
 jobs:
+  validate:
+    uses: ./.github/workflows/test.yml
+
   deploy:
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: validate
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    environment:
+      name: cloudflare-pages
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
+      - name: Stage public status files
+        run: |
+          mkdir -p "$RUNNER_TEMP/status-site"
+          rsync -a \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            --exclude='tests/' \
+            --exclude='CNAME' \
+            --exclude='README.md' \
+            --exclude='package.json' \
+            ./ "$RUNNER_TEMP/status-site/"
 
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: status.pesaguard.victorkipruto.com/
-
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v5
+      - name: Deploy to Cloudflare Pages
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "CLOUDFLARE_ACCOUNT_ID secret is required"; exit 1; }
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "CLOUDFLARE_API_TOKEN secret is required"; exit 1; }
+          npx --yes wrangler@4 pages deploy "$RUNNER_TEMP/status-site" \
+            --project-name=status-pesaguard \
+            --branch=main

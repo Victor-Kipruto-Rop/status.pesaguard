@@ -75,6 +75,35 @@
     });
   }
 
+  /* --- Theme toggle ------------------------------------------------------ */
+
+  function initThemeToggle() {
+    UI.safe("theme-toggle", function () {
+      var toggle = document.querySelector(".status-theme-toggle");
+      if (!toggle) return;
+
+      var syncLabel = function () {
+        var next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+        toggle.setAttribute("aria-label", "Switch to " + next + " theme");
+        toggle.title = "Switch to " + next + " theme";
+      };
+
+      toggle.addEventListener("click", function () {
+        var next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+        document.documentElement.setAttribute("data-theme", next);
+        try { window.localStorage.setItem("pesaguard-site-theme", next); } catch (err) {
+          console.warn("app: theme preference could not be saved.", err);
+        }
+        document.querySelectorAll('meta[name="theme-color"]').forEach(function (meta) {
+          meta.setAttribute("content", next === "dark" ? "#121416" : "#ffffff");
+          meta.removeAttribute("media");
+        });
+        syncLabel();
+      });
+      syncLabel();
+    });
+  }
+
   /* --- Header scroll state ------------------------------------------------ */
 
   function initScrollState() {
@@ -132,6 +161,7 @@
 
     loadComponents().then(function () {
       initNavToggle();
+      initThemeToggle();
       initScrollState();
       initCurrentPage();
 

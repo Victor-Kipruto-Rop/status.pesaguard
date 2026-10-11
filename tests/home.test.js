@@ -9,7 +9,7 @@ module.exports = function (ctx) {
   var fs = ctx.fs;
   var path = ctx.path;
   var BASE = ctx.BASE;
-  var STATUS_URL = "https://api.pesaguard.victorkipruto.com/public/status";
+  var STATUS_URL = "https://api.pesaguard.co.ke/public/status";
 
   function read(relative) {
     return fs.readFileSync(path.join(BASE, relative), "utf8");
@@ -19,6 +19,7 @@ module.exports = function (ctx) {
   var UI_JS = read("js/ui.js");
   var INDEX = read("index.html");
   var HEADER = read("components/header.html");
+  var FOOTER = read("components/footer.html");
   var SUBSCRIPTION_URL = STATUS_URL + "/subscriptions";
 
   function element(spec) {
@@ -249,15 +250,24 @@ module.exports = function (ctx) {
   var UNVERIFIED_STATUS = JSON.parse(read("data/status.json"));
 
   test("homepage status script targets the public API and only reads elements in its markup", function () {
-    assert(STATUS_JS.indexOf('https://api.pesaguard.victorkipruto.com/public/status') >= 0,
+    assert(STATUS_JS.indexOf('https://api.pesaguard.co.ke/public/status') >= 0,
       "the runtime status source must be the public PesaGuard API endpoint");
     assert(STATUS_JS.indexOf('"data/status.json"') >= 0,
       "the local snapshot must remain available for offline messaging");
+    assert(INDEX.indexOf('data-endpoint="https://api.pesaguard.co.ke/public/status/subscriptions"') >= 0,
+      "subscriptions must use the canonical public API hostname");
     var ids = STATUS_JS.match(/byId\("([^"]+)"\)/g) || [];
     ids.forEach(function (lookup) {
       var id = /byId\("([^"]+)"\)/.exec(lookup)[1];
       assert(INDEX.indexOf('id="' + id + '"') >= 0,
         "status.js looks up #" + id + ", which index.html does not contain");
+    });
+
+    test("shared status chrome links directly to email support", function () {
+      assert(HEADER.indexOf('href="mailto:support@pesaguard.co.ke"') >= 0,
+        "header must expose the support email quicklink");
+      assert(FOOTER.indexOf('href="mailto:support@pesaguard.co.ke"') >= 0,
+        "footer must expose the support email quicklink");
     });
     [INDEX, HEADER].forEach(function (markup) {
       assert(/status-indicator/.test(markup) || markup === HEADER, "missing status indicator");
