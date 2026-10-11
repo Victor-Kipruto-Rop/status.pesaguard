@@ -1,0 +1,94 @@
+............F....................................s...................... [  7%]
+............................F...FFFFFFF................................. [ 14%]
+........................................................................ [ 21%]
+........................................................................ [ 28%]
+.....................................................................FFF [ 35%]
+FF.FFFF..FF.FFFF....F................................................... [ 42%]
+..........................ssssssssssssssssssssssssss.................... [ 50%]
+........................ssss..................s..........FFFFFF...F..... [ 57%]
+..............................................FF........................ [ 64%]
+........................................................................ [ 71%]
+....ss.........................................................F........ [ 78%]
+........................................................................ [ 85%]
+..................................s...............F..................... [ 92%]
+..........F.................F..........................................  [100%]
+============================== warnings summary ===============================
+tests\test_alertmanager_live.py:26
+  C:\Users\kipru\pesaguard\pesaguard_backend_pipeline\tests\test_alertmanager_live.py:26: PytestUnknownMarkWarning: Unknown pytest.mark.integration - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.integration
+
+..\..\AppData\Local\Programs\Python\Python313\Lib\site-packages\starlette\testclient.py:40
+  C:\Users\kipru\AppData\Local\Programs\Python\Python313\Lib\site-packages\starlette\testclient.py:40: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = typing.Callable[[], typing.ContextManager[anyio.abc.BlockingPortal]]
+
+tests\test_kafka_lag_live.py:25
+  C:\Users\kipru\pesaguard\pesaguard_backend_pipeline\tests\test_kafka_lag_live.py:25: PytestUnknownMarkWarning: Unknown pytest.mark.integration - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.integration
+
+tests\test_kafka_lag_live.py:99
+  C:\Users\kipru\pesaguard\pesaguard_backend_pipeline\tests\test_kafka_lag_live.py:99: PytestUnknownMarkWarning: Unknown pytest.mark.integration - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.integration
+
+tests\test_live_traceability.py:28
+  C:\Users\kipru\pesaguard\pesaguard_backend_pipeline\tests\test_live_traceability.py:28: PytestUnknownMarkWarning: Unknown pytest.mark.integration - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.integration
+
+tests/test_alerting_monitoring.py::test_reconciliation_job_publishes_discrepancies_to_topic
+  C:\Users\kipru\AppData\Local\Programs\Python\Python313\Lib\site-packages\rq\job.py:329: DeprecationWarning: Passing a string or function for `on_failure` is deprecated, pass `Callback` instead
+    warnings.warn(
+
+tests/test_audit_hardening.py::test_canonical_asgi_entrypoint_serves_auth_and_dashboard_contract
+  C:\Users\kipru\AppData\Local\Programs\Python\Python313\Lib\site-packages\starlette\middleware\wsgi.py:14: DeprecationWarning: starlette.middleware.wsgi is deprecated and will be removed in a future release. Please refer to https://github.com/abersheeran/a2wsgi as a replacement.
+    warnings.warn(
+
+tests/test_password_policy.py::test_passphrase_policy_change_and_admin_reset
+tests/test_session_management.py::test_session_creation_renewal_device_logout_and_global_logout
+tests/test_session_management.py::test_session_creation_renewal_device_logout_and_global_logout
+  C:\Users\kipru\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\default.py:942: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+tests/test_reconciliation_utils.py::test_time_window_match_by_ref_and_time
+  C:\Users\kipru\pesaguard\pesaguard_backend_pipeline\tests\test_reconciliation_utils.py:35: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_advanced_features.py::TestAuthentication::test_login - asse...
+FAILED tests/test_audit_hardening.py::test_canonical_asgi_entrypoint_serves_auth_and_dashboard_contract
+FAILED tests/test_auth_lifecycle.py::test_register_verify_and_login - Asserti...
+FAILED tests/test_auth_lifecycle.py::test_refresh_rotation_and_reuse_revoke_the_entire_family
+FAILED tests/test_auth_lifecycle.py::test_refreshed_access_token_is_revoked_with_its_session[/auth/refresh-None]
+FAILED tests/test_auth_lifecycle.py::test_refreshed_access_token_is_revoked_with_its_session[/auth/sso/oidc/token-refresh_token]
+FAILED tests/test_auth_lifecycle.py::test_password_reset_and_lockout - assert...
+FAILED tests/test_auth_lifecycle.py::test_expired_password_and_reset_revoke_existing_session
+FAILED tests/test_auth_lifecycle.py::test_totp_recovery_email_and_reset_workflow
+FAILED tests/test_developer_api_key_sync.py::test_service_jwt_replay_is_rejected_and_redis_errors_fail_closed
+FAILED tests/test_developer_api_key_sync.py::test_developer_key_suspend_and_revoke_are_tenant_version_and_idempotency_safe
+FAILED tests/test_developer_api_key_sync.py::test_jwt_primary_lifecycle_requires_exact_scope_and_consumes_jti
+FAILED tests/test_developer_api_key_sync.py::test_jwt_primary_resolve_requires_tenant_read_scope
+FAILED tests/test_developer_api_key_sync.py::test_developer_platform_key_authenticates_scoped_pipeline_requests
+FAILED tests/test_developer_api_key_sync.py::test_tenant_resolve_requires_signed_canonical_query_and_preserves_correlation_id
+FAILED tests/test_developer_api_key_sync.py::test_tenant_resolve_rejects_invalid_and_ambiguous_ids
+FAILED tests/test_developer_api_key_sync.py::test_developer_key_sync_persists_only_normalized_approved_scopes
+FAILED tests/test_developer_api_key_sync.py::test_developer_key_sync_idempotency_replays_and_rejects_changed_requests
+FAILED tests/test_developer_api_key_sync.py::test_internal_service_request_context_is_returned_to_caller
+FAILED tests/test_developer_api_key_sync.py::test_internal_key_sync_and_lifecycle_preserve_supported_correlation_header
+FAILED tests/test_developer_api_key_sync.py::test_developer_key_sync_reports_safe_validation_reason
+FAILED tests/test_developer_api_key_sync.py::test_developer_key_ip_allowlist_is_enforced
+FAILED tests/test_device_risk_auth.py::test_device_registry_lifecycle_and_owner_scoping
+FAILED tests/test_device_risk_auth.py::test_login_risk_policy_requires_step_up_or_blocks
+FAILED tests/test_device_risk_auth.py::test_device_trust_requires_mfa_and_logout_all_ends_all_sessions
+FAILED tests/test_login_attempt_protection.py::test_per_account_lockout_and_admin_unlock
+FAILED tests/test_login_attempt_protection.py::test_account_lockout_progresses_and_automatically_unlocks
+FAILED tests/test_login_attempt_protection.py::test_per_ip_and_device_throttling
+FAILED tests/test_login_attempt_protection.py::test_unknown_account_attempts_are_limited_across_changing_ips_and_devices
+FAILED tests/test_login_attempt_protection.py::test_ip_throttle_limits_attempts_spread_across_unknown_accounts
+FAILED tests/test_login_attempt_protection.py::test_credential_stuffing_attempts_are_audited_and_rate_limited
+FAILED tests/test_login_hardening.py::test_login_uses_generic_failure_and_audits_authentication_events
+FAILED tests/test_password_credentials.py::test_argon2id_credential_rotation_history_and_single_use_reset
+FAILED tests/test_password_policy.py::test_passphrase_policy_change_and_admin_reset
+FAILED tests/test_readiness_hardening.py::test_auth_requires_explicit_jwt_secret_even_with_dev_fallback_flag
+FAILED tests/test_session_management.py::test_session_creation_renewal_device_logout_and_global_logout
+FAILED tests/test_token_revocation.py::test_revocation_levels_and_emergency_global_revoke
+FAILED tests/test_transaction_routes.py::test_versioned_auth_aliases_are_registered
+38 failed, 934 passed, 35 skipped, 11 warnings in 1979.18s (0:32:59)

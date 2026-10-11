@@ -1,0 +1,4 @@
+
+tests/test_auth_lifecycle.py::test_register_verify_and_login PASSED      [100%]
+
+============================== 1 passed in 6.34s ==============================

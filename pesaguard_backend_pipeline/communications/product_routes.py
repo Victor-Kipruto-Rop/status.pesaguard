@@ -8,8 +8,9 @@ from datetime import datetime, timezone
 from flask import Blueprint, jsonify, request, Response
 
 from .core.enums import CommunicationChannel
-from .domain import approve_template, create_template, issue_otp, set_consent, verify_otp
-from .models import CommunicationCampaign, CommunicationConsent, CommunicationNotification, CommunicationOtpChallenge, CommunicationPreference, CommunicationTemplate
+from .application.channel_services import NotificationPreferenceService, NotificationTemplateService
+from .domain import issue_otp, set_consent, verify_otp
+from .models import CommunicationCampaign, CommunicationNotification, CommunicationOtpChallenge, CommunicationTemplate
 
 # Mirrors CommunicationNotification.ck_communication_notification_status so the
 # API rejects unknown filter/export values instead of leaking query behavior.
@@ -44,10 +45,18 @@ def create_product_blueprint(session_factory, require_auth_fn, current_user_fn):
         try:
             channel = CommunicationChannel(str(payload["channel"]).lower())
             session = session_factory()
-            template = create_template(session, tenant_id=tenant_id(), slug=str(payload["slug"]), channel=channel, body=str(payload["body"]), variables=list(payload.get("variables", [])))
+            template = NotificationTemplateService(session).create(
+                tenant_id=tenant_id(),
+                slug=str(payload["slug"]),
+                channel=channel,
+                body=str(payload["body"]),
+                variables=list(payload.get("variables", [])),
+            )
             session.commit()
             return jsonify(_template_payload(template)), 201
         except (KeyError, ValueError, TypeError) as exc:
+            if "session" in locals():
+                session.rollback()
             return jsonify({"error": str(exc)}), 400
         finally:
             if "session" in locals():
@@ -58,12 +67,35 @@ def create_product_blueprint(session_factory, require_auth_fn, current_user_fn):
     def approve_template_route(template_id):
         session = session_factory()
         try:
-            template = session.query(CommunicationTemplate).filter_by(id=template_id, tenant_id=tenant_id()).one_or_none()
-            if template is None:
-                return jsonify({"error": "template_not_found"}), 404
-            approve_template(session, template, str(getattr(current_user_fn(), "user_id", "system")))
+            template = NotificationTemplateService(session).approve(
+                tenant_id=tenant_id(),
+                template_id=template_id,
+                approver=str(getattr(current_user_fn(), "user_id", "system")),
+            )
             session.commit()
             return jsonify(_template_payload(template))
+        except ValueError as exc:
+            session.rollback()
+            return jsonify({"error": str(exc)}), 404 if str(exc) == "template not found" else 400
+        finally:
+            session.close()
+
+    @blueprint.get("/preferences/<path:recipient>")
+    @require_auth_fn("read:communications")
+    def get_preference_route(recipient):
+        session = session_factory()
+        try:
+            preference = NotificationPreferenceService(session).get(tenant_id=tenant_id(), recipient=recipient)
+            if preference is None:
+                return jsonify({"recipient": recipient, "channels": [], "quiet_hours_start": None, "quiet_hours_end": None, "timezone": "Africa/Nairobi", "marketing_opt_in": False})
+            return jsonify({
+                "recipient": recipient,
+                "channels": preference.channels,
+                "quiet_hours_start": preference.quiet_hours_start,
+                "quiet_hours_end": preference.quiet_hours_end,
+                "timezone": preference.timezone,
+                "marketing_opt_in": bool(preference.marketing_opt_in),
+            })
         finally:
             session.close()
 
@@ -73,15 +105,20 @@ def create_product_blueprint(session_factory, require_auth_fn, current_user_fn):
         session = session_factory()
         try:
             payload = request.get_json(silent=True) or {}
-            preference = session.query(CommunicationPreference).filter_by(tenant_id=tenant_id(), recipient=recipient).one_or_none()
-            if preference is None:
-                preference = CommunicationPreference(id=f"preference_{uuid.uuid4().hex}", tenant_id=tenant_id(), recipient=recipient)
-                session.add(preference)
-            for key in ("channels", "quiet_hours_start", "quiet_hours_end", "timezone", "marketing_opt_in"):
-                if key in payload:
-                    setattr(preference, key, payload[key])
+            preference = NotificationPreferenceService(session).update(
+                tenant_id=tenant_id(),
+                recipient=recipient,
+                channels=payload.get("channels") if "channels" in payload else None,
+                quiet_hours_start=payload.get("quiet_hours_start") if "quiet_hours_start" in payload else None,
+                quiet_hours_end=payload.get("quiet_hours_end") if "quiet_hours_end" in payload else None,
+                timezone_name=payload.get("timezone") if "timezone" in payload else None,
+                marketing_opt_in=payload.get("marketing_opt_in") if "marketing_opt_in" in payload else None,
+            )
             session.commit()
             return jsonify({"recipient": recipient, "channels": preference.channels, "quiet_hours_start": preference.quiet_hours_start, "quiet_hours_end": preference.quiet_hours_end, "timezone": preference.timezone, "marketing_opt_in": bool(preference.marketing_opt_in)})
+        except (TypeError, ValueError) as exc:
+            session.rollback()
+            return jsonify({"error": str(exc)}), 400
         finally:
             session.close()
 
@@ -91,10 +128,12 @@ def create_product_blueprint(session_factory, require_auth_fn, current_user_fn):
         payload = request.get_json(silent=True) or {}
         try:
             session = session_factory()
-            consent = set_consent(session, tenant_id=tenant_id(), recipient=recipient, channel=CommunicationChannel(str(payload["channel"]).lower()), purpose=str(payload.get("purpose", "transactional")), granted=bool(payload["granted"]), source=str(payload.get("source", "api")))
+            consent = set_consent(session, tenant_id=tenant_id(), recipient=recipient, channel=CommunicationChannel(str(payload["channel"]).lower()), purpose=str(payload.get("purpose", "transactional")), granted=payload["granted"], source=str(payload.get("source", "api")))
             session.commit()
             return jsonify({"id": consent.id, "granted": bool(consent.granted)})
         except (KeyError, ValueError) as exc:
+            if "session" in locals():
+                session.rollback()
             return jsonify({"error": str(exc)}), 400
         finally:
             if "session" in locals():
@@ -106,7 +145,7 @@ def create_product_blueprint(session_factory, require_auth_fn, current_user_fn):
         payload = request.get_json(silent=True) or {}
         session = session_factory()
         try:
-            challenge, code = issue_otp(session, tenant_id=tenant_id(), recipient=str(payload["recipient"]), purpose=str(payload.get("purpose", "login")))
+            challenge = issue_otp(session, tenant_id=tenant_id(), recipient=str(payload["recipient"]), purpose=str(payload.get("purpose", "login")))[0]
             session.commit()
             return jsonify({"challenge_id": challenge.id, "expires_at": challenge.expires_at.isoformat(), "delivery_required": True}), 202
         except KeyError as exc:

@@ -14,9 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from flask import Flask, Response, jsonify, request, g
-from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 from werkzeug.exceptions import HTTPException
 
 from action_audit import ActionAuditEntry
@@ -28,6 +26,7 @@ from on_call_service import OnCallService
 from rate_limiter import get_rate_limit_status, rate_limit
 from search_engine import AdvancedSearchEngine
 from tenant_settings import TenantSettingsStore
+from database_service import create_database_engine
 from webhook_manager import WebhookManager
 
 configure_logging = lambda: None  # Import from logging_utils if available
@@ -42,26 +41,10 @@ DATABASE_URL = required_env("DATABASE_URL")
 
 def create_db_engine(url: str):
     """Create a robust database engine with appropriate pooling and timeout settings."""
-    if url.startswith("sqlite"):
-        engine = create_engine(
-            url,
-            connect_args={"check_same_thread": False},
-            poolclass=StaticPool,
-        )
-    else:
-        engine = create_engine(
-            url,
-            pool_pre_ping=True,
-            pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
-            max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "20")),
-            connect_args={"connect_timeout": 5} if "postgresql" in url else {},
-        )
-    try:
-        from metrics import instrument_engine_query_timing
-        instrument_engine_query_timing(engine)
-    except Exception:
-        logger.debug("Engine query timing instrumentation skipped.", exc_info=True)
-    return engine
+    return create_database_engine(
+        url,
+        connect_args={"connect_timeout": 5} if "postgresql" in url else {},
+    )
 
 
 engine = create_db_engine(DATABASE_URL)
@@ -212,7 +195,7 @@ if "login" not in app.view_functions:
             "username": username,
             "tenant_id": user["tenant_id"],
             "roles": user.get("roles", ["operator"]),
-            "expires_in": 86400,
+            "expires_in": AuthRBAC.ACCESS_TOKEN_TTL_MINUTES * 60,
         }), 200
 
 
@@ -874,4 +857,3 @@ if __name__ == "__main__":
         logger.warning("Running with debug=True â€” never do this in production.")
     port = int(os.getenv("PORT", 5002))
     app.run(debug=debug_mode, host=os.getenv("PESAGUARD_BIND_HOST", "127.0.0.1"), port=port)
-

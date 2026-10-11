@@ -418,3 +418,78 @@ class ConnectorRegistry:
     def get_connector(self, tenant_id: str) -> Optional[BaseConnector]:
         """Retrieve the configured connector instance for a tenant."""
         return self.connectors.get(tenant_id)
+
+
+class CsvLedgerConnector(BaseConnector):
+    """Simple CSV-backed internal ledger reader for importing purchase orders and ledger sheets."""
+
+    def __init__(self, csv_path: str = "", *, mapping: Optional[Dict[str, str]] = None):
+        self.csv_path = csv_path
+        self.mapping = _merge_mapping(_DEFAULT_MAPPING, mapping)
+
+    def fetch_recent_records(self, since_minutes: int = 15) -> List[Dict[str, Any]]:
+        if not self.csv_path:
+            return []
+        try:
+            import csv
+
+            with open(self.csv_path, newline="", encoding="utf-8-sig") as handle:
+                reader = csv.DictReader(handle)
+                records: List[Dict[str, Any]] = []
+                for row in reader:
+                    record = {
+                        "internal_ref": str(row.get(self.mapping["internal_ref"], row.get("reference", ""))),
+                        "amount": float(row.get(self.mapping["amount"], 0) or 0),
+                        "phone_number": str(row.get(self.mapping["phone_number"], "") or ""),
+                        "timestamp": str(row.get(self.mapping["timestamp"], "") or ""),
+                        "status": str(row.get(self.mapping["status"], "pending") or "pending"),
+                    }
+                    if record["internal_ref"] or record["amount"]:
+                        records.append(record)
+                return records
+        except Exception as exc:
+            logger.exception("Failed to read CSV ledger file %s: %s", self.csv_path, exc)
+            return []
+
+
+class ExcelLedgerConnector(BaseConnector):
+    """Excel-backed internal ledger connector for .xlsx and .xls import work."""
+
+    def __init__(self, source_path: str = "", *, mapping: Optional[Dict[str, str]] = None):
+        self.source_path = source_path
+        self.mapping = _merge_mapping(_DEFAULT_MAPPING, mapping)
+
+    def fetch_recent_records(self, since_minutes: int = 15) -> List[Dict[str, Any]]:
+        if not self.source_path:
+            return []
+        try:
+            from openpyxl import load_workbook
+
+            workbook = load_workbook(self.source_path, read_only=True, data_only=True)
+            try:
+                sheet = workbook.active
+                rows = sheet.iter_rows(values_only=True)
+                headers = next(rows, ())
+                if not headers:
+                    return []
+                normalized = [str(value).strip() for value in headers]
+                records: List[Dict[str, Any]] = []
+                for values in rows:
+                    row = {header: value for header, value in zip(normalized, values) if header}
+                    if not row:
+                        continue
+                    record = {
+                        "internal_ref": str(row.get(self.mapping["internal_ref"], row.get("reference", ""))),
+                        "amount": float(row.get(self.mapping["amount"], 0) or 0),
+                        "phone_number": str(row.get(self.mapping["phone_number"], "") or ""),
+                        "timestamp": str(row.get(self.mapping["timestamp"], "") or ""),
+                        "status": str(row.get(self.mapping["status"], "pending") or "pending"),
+                    }
+                    if record["internal_ref"] or record["amount"]:
+                        records.append(record)
+                return records
+            finally:
+                workbook.close()
+        except Exception as exc:
+            logger.exception("Failed to read Excel ledger file %s: %s", self.source_path, exc)
+            return []

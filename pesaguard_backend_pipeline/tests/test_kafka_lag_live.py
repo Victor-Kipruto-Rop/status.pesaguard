@@ -10,6 +10,7 @@ Run with PESAGUARD_LIVE_E2E=1 against a reachable Kafka broker.
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 
@@ -25,20 +26,6 @@ pytestmark = pytest.mark.skipif(
 def test_broker_derived_lag_and_queue_depth_match_published_messages():
     from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 
-def test_broker_consumer_lag_is_empty_when_env_unconfigured():
-    """Broker-derived lag must not block startup or scrape when Kafka is absent."""
-    for name in ("KAFKA_BOOTSTRAP_SERVERS", "KAFKA_LAG_TOPICS", "KAFKA_LAG_GROUPS"):
-        assert os.getenv(name) != "pesaguard-test-value"
-    result = broker_consumer_lag()
-    assert result == {}
-
-
-def test_consumer_lag_registry_is_process_local_snapshot():
-    consumer_lag_registry.update("reconciliation", {0: 7, 1: 2})
-    snapshot = consumer_lag_registry.snapshot()
-    assert snapshot["reconciliation"] == {0: 7, 1: 2}
-    # Registry reflects the last consumer snapshot, not broker offsets.
-
     from event_bus import admin_client_lag, query_broker_lag, queue_depth
 
     bootstrap = os.environ["PESAGUARD_LIVE_KAFKA_BOOTSTRAP"]
@@ -47,6 +34,7 @@ def test_consumer_lag_registry_is_process_local_snapshot():
     total_messages = 10
 
     from kafka.admin import KafkaAdminClient, NewTopic
+
     admin = KafkaAdminClient(bootstrap_servers=bootstrap.split(","), client_id="pesaguard-lag-test")
     admin.create_topics([NewTopic(topic, num_partitions=1, replication_factor=1)])
     admin.close()
@@ -61,6 +49,7 @@ def test_consumer_lag_registry_is_process_local_snapshot():
     producer.close()
 
     consumer = KafkaConsumer(
+        topic,
         bootstrap_servers=bootstrap.split(","),
         group_id=group,
         auto_offset_reset="earliest",
@@ -86,6 +75,25 @@ def test_consumer_lag_registry_is_process_local_snapshot():
     admin_result = admin_client_lag(bootstrap, [topic], [group])
     if admin_result is not None:
         assert admin_result[group][f"{topic}:0"] == 6
+
+
+def test_broker_consumer_lag_is_empty_when_env_unconfigured():
+    """Broker-derived lag must not block startup or scrape when Kafka is absent."""
+    from event_bus import broker_consumer_lag
+
+    for name in ("KAFKA_BOOTSTRAP_SERVERS", "KAFKA_LAG_TOPICS", "KAFKA_LAG_GROUPS"):
+        assert os.getenv(name) != "pesaguard-test-value"
+    result = broker_consumer_lag()
+    assert result == {}
+
+
+def test_consumer_lag_registry_is_process_local_snapshot():
+    from event_bus import consumer_lag_registry
+
+    consumer_lag_registry.update("reconciliation", {0: 7, 1: 2})
+    snapshot = consumer_lag_registry.snapshot()
+    assert snapshot["reconciliation"] == {0: 7, 1: 2}
+    # Registry reflects the last consumer snapshot, not broker offsets.
 
 
 @pytest.mark.integration

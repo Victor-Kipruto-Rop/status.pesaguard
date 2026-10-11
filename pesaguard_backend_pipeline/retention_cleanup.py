@@ -16,7 +16,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
-from sqlalchemy import and_, create_engine, delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import sessionmaker
 
 # Resilient import handling across package layouts
@@ -48,28 +48,48 @@ def get_database_url() -> str:
     return required_env("DATABASE_URL")
 
 # Default Retention Windows (in days)
-RETENTION_DAYS_TRANSACTIONS = int(os.getenv("PESAGUARD_RETENTION_DAYS_TRANSACTIONS", str(_RETENTION_POLICY.retention_days("transactions") if _RETENTION_POLICY else 90)))
-RETENTION_DAYS_DISCREPANCIES = int(os.getenv("PESAGUARD_RETENTION_DAYS_DISCREPANCIES", str(_RETENTION_POLICY.retention_days("transactions") if _RETENTION_POLICY else 180)))
-RETENTION_DAYS_DEAD_LETTERS = int(os.getenv("PESAGUARD_RETENTION_DAYS_DEAD_LETTERS", str(_RETENTION_POLICY.retention_days("security_logs") if _RETENTION_POLICY else 30)))
-RETENTION_DAYS_AUDIT = int(os.getenv("PESAGUARD_RETENTION_DAYS_AUDIT", str(_RETENTION_POLICY.retention_days("audit") if _RETENTION_POLICY else 365)))
+
+def _positive_setting(name: str, default: int) -> int:
+    raw = os.getenv(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if value < 1:
+        raise ValueError(f"{name} must be greater than zero")
+    return value
+
+
+RETENTION_DAYS_TRANSACTIONS = _positive_setting(
+    "PESAGUARD_RETENTION_DAYS_TRANSACTIONS",
+    _RETENTION_POLICY.retention_days("transactions") if _RETENTION_POLICY else 90,
+)
+RETENTION_DAYS_DISCREPANCIES = _positive_setting(
+    "PESAGUARD_RETENTION_DAYS_DISCREPANCIES",
+    _RETENTION_POLICY.retention_days("transactions") if _RETENTION_POLICY else 180,
+)
+RETENTION_DAYS_DEAD_LETTERS = _positive_setting(
+    "PESAGUARD_RETENTION_DAYS_DEAD_LETTERS",
+    _RETENTION_POLICY.retention_days("security_logs") if _RETENTION_POLICY else 30,
+)
+RETENTION_DAYS_AUDIT = _positive_setting(
+    "PESAGUARD_RETENTION_DAYS_AUDIT",
+    _RETENTION_POLICY.retention_days("audit") if _RETENTION_POLICY else 365,
+)
 
 # Deletion batch size to prevent long-lived table locks and WAL bloat
-BATCH_SIZE = int(os.getenv("PESAGUARD_RETENTION_BATCH_SIZE", "1000"))
+BATCH_SIZE = _positive_setting("PESAGUARD_RETENTION_BATCH_SIZE", 1000)
 
 
 def get_engine():
     """Construct database engine instance with connection pooling."""
-    engine = create_engine(
-        get_database_url(),
-        pool_pre_ping=True,
-        connect_args={"connect_timeout": 10} if get_database_url().startswith("postgresql") else {},
+    from database_service import create_database_engine
+
+    database_url = get_database_url()
+    return create_database_engine(
+        database_url,
+        connect_args={"connect_timeout": 10} if database_url.startswith("postgresql") else {},
     )
-    try:
-        from metrics import instrument_engine_query_timing
-        instrument_engine_query_timing(engine)
-    except Exception:
-        logger.debug("Retention cleanup engine query timing instrumentation skipped.", exc_info=True)
-    return engine
 
 
 def get_session_factory():
@@ -162,6 +182,11 @@ def cleanup_retention(tenant_id: Optional[str] = None, dry_run: bool = False) ->
     Returns:
         Telemetry summary dict with deleted record counts.
     """
+    if tenant_id is not None:
+        if not tenant_id.strip():
+            raise ValueError("tenant_id must not be empty")
+        tenant_id = tenant_id.strip()
+
     now = datetime.now(timezone.utc)
     oldest_transaction = now - timedelta(days=RETENTION_DAYS_TRANSACTIONS)
     oldest_discrepancy = now - timedelta(days=RETENTION_DAYS_DISCREPANCIES)
@@ -180,7 +205,11 @@ def cleanup_retention(tenant_id: Optional[str] = None, dry_run: bool = False) ->
     try:
         deleted_transactions = _delete_in_batches(
             session, Transaction, Transaction.created_at, oldest_transaction, tenant_id, dry_run,
-            Transaction.archived_at.is_not(None),
+            and_(
+                Transaction.archived_at.is_not(None),
+                Transaction.archive_object_key.is_not(None),
+                Transaction.archive_object_key != "",
+            ),
         )
         deleted_processed = _delete_in_batches(
             session, ProcessedTransaction, ProcessedTransaction.received_at, oldest_transaction, tenant_id, dry_run
@@ -226,7 +255,16 @@ def cleanup_retention(tenant_id: Optional[str] = None, dry_run: bool = False) ->
             "deleted_audit": deleted_audit,
             "eligible_audit_entries": eligible_audit_entries,
             "post_delete_counts": {
-                "transactions": post_delete_count(Transaction, Transaction.created_at, oldest_transaction),
+                "transactions": post_delete_count(
+                    Transaction,
+                    Transaction.created_at,
+                    oldest_transaction,
+                    and_(
+                        Transaction.archived_at.is_not(None),
+                        Transaction.archive_object_key.is_not(None),
+                        Transaction.archive_object_key != "",
+                    ),
+                ),
                 "processed_transactions": post_delete_count(ProcessedTransaction, ProcessedTransaction.received_at, oldest_transaction),
                 "discrepancies": post_delete_count(Discrepancy, Discrepancy.detected_at, oldest_discrepancy),
                 "dead_letters": post_delete_count(DeadLetter, DeadLetter.created_at, oldest_dead_letter),

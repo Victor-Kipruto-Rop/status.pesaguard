@@ -248,8 +248,11 @@ def test_retry_after_timeout_does_not_duplicate(tmp_path):
     first = store.mark_processed(_payload(trans_id), tenant_id="tenant-a")
     assert first is ProcessResult.STORED
 
-    # Retry after client-side timeout.
-    retry = store.mark_processed(_payload(trans_id, retry_count=2), tenant_id="tenant-a")
+    # Retry after client-side timeout: a real client retry replays the identical
+    # request body, so it must resolve to DUPLICATE (never a duplicate row and
+    # never a false conflict). Changed content with the same identity is
+    # covered by test_identical_retry_is_duplicate_while_changed_content_conflicts.
+    retry = store.mark_processed(_payload(trans_id), tenant_id="tenant-a")
     assert retry is ProcessResult.DUPLICATE
 
     with sessionmaker(bind=engine)() as session:
@@ -494,3 +497,51 @@ def test_exit_gate_full_pipeline(tmp_path):
         assert _count(session, Transaction) == 20
         assert _count(session, IdempotencyRecord) == 20
         assert _count(session, ProcessedTransaction) == 20
+
+
+# ---------------------------------------------------------------------------
+# Replay-hash determinism regression (2026-10-09)
+#
+# The replay-detection hash must be stable across byte-identical provider
+# retries even though normalization injects fresh created_at/updated_at
+# timestamps. Before this fix every legitimate Daraja retry was misclassified
+# as a conflicting replay (409) instead of a duplicate (200).
+# ---------------------------------------------------------------------------
+
+def test_payload_hash_ignores_volatile_bookkeeping_fields():
+    from event_store import _payload_hash
+
+    base = {
+        "TransID": "HASH-1",
+        "TransAmount": "10.00",
+        "Currency": "KES",
+        "created_at": "2026-10-09T10:00:00+00:00",
+        "updated_at": "2026-10-09T10:00:00+00:00",
+    }
+    replay = dict(base, created_at="2026-10-09T10:00:09+00:00",
+                  updated_at="2026-10-09T10:00:09+00:00")
+    assert _payload_hash(base) == _payload_hash(replay)
+
+    # Different financial content must still hash differently.
+    conflicting = dict(base, TransAmount="999.00")
+    assert _payload_hash(base) != _payload_hash(conflicting)
+
+
+def test_identical_retry_is_duplicate_while_changed_content_conflicts(tmp_path):
+    url, engine = _store(tmp_path, name="replay-hash.db")
+    store = EventStore(database_url=url)
+    trans_id = f"replay-{uuid.uuid4().hex[:8]}"
+
+    first = store.mark_processed(_payload(trans_id), tenant_id="tenant-a")
+    assert first is ProcessResult.STORED
+
+    # A byte-identical provider retry is a benign duplicate, never a conflict.
+    retry = store.mark_processed(_payload(trans_id), tenant_id="tenant-a")
+    assert retry is ProcessResult.DUPLICATE
+
+    # Reusing the identity with different financial content is a conflict.
+    changed = store.mark_processed(_payload(trans_id, TransAmount="999.99"), tenant_id="tenant-a")
+    assert changed is ProcessResult.CONFLICT
+
+    with sessionmaker(bind=engine)() as session:
+        assert _count(session, Transaction) == 1

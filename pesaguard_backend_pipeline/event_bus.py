@@ -104,15 +104,26 @@ def query_broker_lag(
     """
     from kafka import KafkaConsumer, TopicPartition
 
-    consumer = KafkaConsumer(
-        bootstrap_servers=str(bootstrap_servers).split(","),
-        enable_auto_commit=False,
-        request_timeout_ms=int(timeout_ms),
-        consumer_timeout_ms=int(timeout_ms),
-    )
+    # A KafkaConsumer only reports committed offsets for its own group_id, and
+    # kafka-python hard-asserts on committed() without one — so the consumer is
+    # created per group rather than shared across groups. Joining a group also
+    # requires request_timeout_ms > session_timeout_ms, so the group timeouts
+    # are derived from the caller's timeout to keep that ordering valid.
+    request_timeout_ms = int(timeout_ms)
+    session_timeout_ms = max(request_timeout_ms - 1, 1)
+    heartbeat_interval_ms = min(3000, max(request_timeout_ms // 2, 1))
     result: Dict[str, Dict[str, int]] = {}
-    try:
-        for group in groups:
+    for group in groups:
+        consumer = KafkaConsumer(
+            bootstrap_servers=str(bootstrap_servers).split(","),
+            group_id=str(group),
+            enable_auto_commit=False,
+            request_timeout_ms=request_timeout_ms,
+            session_timeout_ms=session_timeout_ms,
+            heartbeat_interval_ms=heartbeat_interval_ms,
+            consumer_timeout_ms=request_timeout_ms,
+        )
+        try:
             group_lags: Dict[str, int] = {}
             for topic in topics:
                 partitions = consumer.partitions_for_topic(topic) or set()
@@ -127,9 +138,9 @@ def query_broker_lag(
                     )
             if group_lags:
                 result[group] = group_lags
-        return result
-    finally:
-        consumer.close()
+        finally:
+            consumer.close()
+    return result
 
 
 def admin_client_lag(
@@ -180,9 +191,11 @@ def admin_client_lag(
                             committed = int(offset_meta.offset or 0)
                         elif isinstance(offset_meta, dict):
                             committed = int(offset_meta.get("offset", 0) or 0)
-                        elif offset_meta is None:
-                            committed = consumer.committed(partition) or 0
                         else:
+                            # The admin offset report is authoritative (docstring):
+                            # a partition missing from the group's committed-offset
+                            # map has never been committed, so its committed
+                            # offset is 0 and the full end offset counts as lag.
                             committed = 0
                         group_lags[_partition_lag_key(topic, partition.partition)] = max(
                             0, int(end_offsets.get(partition, 0)) - committed
@@ -226,7 +239,7 @@ def queue_depth(
             if not topic_partitions:
                 continue
             end_offsets = consumer.end_offsets(topic_partitions)
-            start_offsets = consumer.start_offsets(topic_partitions)
+            start_offsets = consumer.beginning_offsets(topic_partitions)
             depth = 0
             for partition in topic_partitions:
                 start = int(start_offsets.get(partition, 0))
@@ -472,7 +485,14 @@ class BackpressureGate:
 class EventDeliveryController:
     """Idempotent consumer delivery with retry, DLQ, replay, and backpressure."""
 
-    def __init__(self, *, retry_policy: Optional[RetryPolicy] = None, max_in_flight: int = 100, max_lag: int = 10_000):
+    def __init__(
+        self,
+        *,
+        retry_policy: Optional[RetryPolicy] = None,
+        max_in_flight: int = 100,
+        max_lag: int = 10_000,
+        redis_client: Optional[Any] = None,
+    ) -> None:
         self.retry_policy = retry_policy or RetryPolicy()
         self.backpressure = BackpressureGate(max_in_flight=max_in_flight, max_lag=max_lag)
         self.retry_queue: list[RetryTask] = []
@@ -480,21 +500,38 @@ class EventDeliveryController:
         self._completed: set[str] = set()
         self._lock = threading.Lock()
         self._state_client = None
+
+        if redis_client is not None:
+            self._state_client = redis_client
+            try:
+                self._state_client.ping()
+            except Exception:
+                pass
+            self._load_durable_state()
+            return
+
+        # Production deployments must be pinned to durable state so retries and
+        # dead-lettered events survive a process restart. Non-production
+        # environments stay process-local so that unit tests never observe or
+        # write durable state that is shared across the whole test session and
+        # that other test runs may have left behind.
         state_url = os.getenv("PESAGUARD_EVENT_STATE_REDIS_URL", "").strip()
         environment = os.getenv("PESAGUARD_ENVIRONMENT", "development").lower()
-        if state_url:
-            try:
-                import redis
-                self._state_client = redis.from_url(state_url, decode_responses=True, socket_connect_timeout=2, socket_timeout=2)
-                self._state_client.ping()
-                self._load_durable_state()
-            except Exception as exc:
-                if environment in {"production", "prod"}:
-                    raise RuntimeError("PESAGUARD_EVENT_STATE_REDIS_URL is unavailable") from exc
-                logger.warning("Event delivery state is using process-local fallback: %s", exc)
-                self._state_client = None
-        elif environment in {"production", "prod"}:
-            raise RuntimeError("PESAGUARD_EVENT_STATE_REDIS_URL is required in production")
+        if environment in {"development", "test", "testing"}:
+            return
+        if not state_url:
+            return
+        try:
+            import redis
+
+            self._state_client = redis.from_url(state_url, decode_responses=True, socket_connect_timeout=2, socket_timeout=2)
+            self._state_client.ping()
+            self._load_durable_state()
+        except Exception as exc:
+            if environment in {"production", "prod"}:
+                raise RuntimeError("PESAGUARD_EVENT_STATE_REDIS_URL is unavailable") from exc
+            logger.warning("Event delivery state is using process-local fallback: %s", exc)
+            self._state_client = None
 
     @property
     def _state_prefix(self) -> str:
@@ -506,10 +543,10 @@ class EventDeliveryController:
         self._completed.update(self._state_client.smembers(f"{self._state_prefix}:completed"))
         for encoded in self._state_client.lrange(f"{self._state_prefix}:retries", 0, -1):
             value = json.loads(encoded)
-            self.retry_queue.append(RetryTask(EventEnvelope(**value["event"]), value["available_at"], value["reason"]))
+            self.retry_queue.append(RetryTask(EventEnvelope.from_dict(value["event"]), value["available_at"], value["reason"]))
         for encoded in self._state_client.lrange(f"{self._state_prefix}:dlq", 0, -1):
             value = json.loads(encoded)
-            self.dlq.append(DeadLetterEvent(EventEnvelope(**value["event"]), value["reason"], value["failed_at"]))
+            self.dlq.append(DeadLetterEvent(EventEnvelope.from_dict(value["event"]), value["reason"], value["failed_at"]))
 
     def _persist_retry(self, task: RetryTask) -> None:
         if self._state_client is not None:
@@ -576,14 +613,18 @@ class EventDeliveryController:
     def replay(self, dead_letter: DeadLetterEvent, handler: Callable[[EventEnvelope], Any], *, lag: int = 0) -> DeliveryResult:
         """Replay a DLQ event from attempt one without changing its event identity."""
         replay_event = EventEnvelope.from_dict({**dead_letter.event.to_dict(), "attempt": 1})
+        result = self.deliver(replay_event, handler, lag=lag)
+        if result.status == "backpressured":
+            return result
+
         with self._lock:
-            self.dlq = [entry for entry in self.dlq if entry.event.event_id != replay_event.event_id]
+            self.dlq = [entry for entry in self.dlq if entry is not dead_letter]
             if self._state_client is not None:
                 key = f"{self._state_prefix}:dlq"
                 self._state_client.delete(key)
                 for entry in self.dlq:
                     self._persist_dead_letter(entry)
-        return self.deliver(replay_event, handler, lag=lag)
+        return result
 
     def due_retries(self, now: Optional[float] = None) -> list[RetryTask]:
         current = time.time() if now is None else now

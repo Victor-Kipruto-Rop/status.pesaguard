@@ -14,9 +14,18 @@ import subprocess
 from pathlib import Path
 
 import html.parser as html_parser
+import pytest
 
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
 JS = FRONTEND / "js"
+
+pytestmark = pytest.mark.skipif(
+    not FRONTEND.is_dir(),
+    reason=(
+        "retired legacy static-dashboard target is absent; restore "
+        "pesaguard_backend_pipeline/frontend to reactivate this contract"
+    ),
+)
 
 
 def js_files():

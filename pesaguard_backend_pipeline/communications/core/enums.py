@@ -6,6 +6,7 @@ from enum import StrEnum
 class CommunicationChannel(StrEnum):
     SMS = "sms"
     EMAIL = "email"
+    PUSH = "push"
     VOICE = "voice"
     USSD = "ussd"
     WHATSAPP = "whatsapp"

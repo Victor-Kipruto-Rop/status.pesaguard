@@ -1,6 +1,12 @@
 """Provider-neutral communications platform for PesaGuard."""
 
 from .application.email_service import EmailService
+from .application.channel_services import (
+    NotificationPreferenceService,
+    NotificationTemplateService,
+    PushNotificationService,
+    SmsService,
+)
 from .core.enums import CommunicationChannel, CommunicationPriority, NotificationStatus
 from .core.exceptions import CommunicationError, PermanentCommunicationError, TransientCommunicationError
 from .core.interfaces import CommunicationProvider, NotificationRequest, ProviderMessage
@@ -34,6 +40,10 @@ __all__ = [
     "ProviderMessage",
     "TransientCommunicationError",
     "EmailService",
+    "NotificationPreferenceService",
+    "NotificationTemplateService",
+    "PushNotificationService",
+    "SmsService",
     "EmailProviderAnalytics",
     "EmailProviderConfig",
     "EmailProviderFactory",

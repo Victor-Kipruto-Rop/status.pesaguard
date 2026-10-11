@@ -13,9 +13,10 @@ from typing import Any, Callable
 
 from sqlalchemy.orm import Session
 
+from data_protection import decrypt_value
 import time
 from .core.enums import CommunicationChannel, CommunicationPriority
-from .core.error_categories import ProviderErrorCategory, category_for_exception, is_retryable
+from .core.error_categories import category_for_exception, is_retryable
 from .core.interfaces import NotificationRequest
 from .core.state_machine import transition
 from .core.exceptions import CommunicationError
@@ -35,6 +36,7 @@ def process_outbox_once(
     session: Session,
     *,
     provider_factory: Callable[[], Any] = build_africas_talking_provider,
+    channel_provider_factory: Callable[[CommunicationChannel], Any] | None = None,
     worker_id: str | None = None,
     limit: int = 50,
     publish_events: bool = True,
@@ -58,17 +60,27 @@ def process_outbox_once(
         )
         session.add(attempt)
         try:
-            provider = provider_factory()
+            channel = CommunicationChannel(notification.channel)
+            provider = channel_provider_factory(channel) if channel_provider_factory else provider_factory()
+            recipient = notification.recipient
+            if channel is CommunicationChannel.PUSH:
+                recipient = decrypt_value(recipient)
+                if not isinstance(recipient, str) or not recipient:
+                    raise ValueError("stored push recipient is invalid")
             request = NotificationRequest(
                 tenant_id=notification.tenant_id,
-                recipient=notification.recipient,
+                recipient=recipient,
                 message=notification.message,
-                channel=CommunicationChannel(notification.channel),
+                channel=channel,
                 priority=CommunicationPriority(notification.priority),
                 idempotency_key=notification.idempotency_key,
                 notification_id=notification.id,
                 template_id=notification.template_id,
-                variables=notification.metadata_json or {},
+                variables={
+                    key: value
+                    for key, value in dict(notification.metadata_json or {}).items()
+                    if key not in {"request_fingerprint", "email_cost", "email_latency_ms"}
+                },
                 correlation_id=notification.correlation_id,
                 trace_id=notification.trace_id,
             )

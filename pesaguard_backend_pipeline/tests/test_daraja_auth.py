@@ -20,6 +20,8 @@ class DummyResponse:
 
 
 def test_token_is_cached(monkeypatch):
+    monkeypatch.delenv("REDIS_URL", raising=False)
+
     class DummySession:
         def __init__(self):
             self.calls = 0
@@ -44,6 +46,8 @@ def test_token_is_cached(monkeypatch):
 
 
 def test_401_triggers_refresh(monkeypatch):
+    monkeypatch.delenv("REDIS_URL", raising=False)
+
     class DummySession:
         def __init__(self):
             self.oauth_calls = 0

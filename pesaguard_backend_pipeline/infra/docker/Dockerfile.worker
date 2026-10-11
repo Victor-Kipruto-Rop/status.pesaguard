@@ -1,0 +1,13 @@
+FROM python:3.12-slim
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app:/app/pesaguard_backend_pipeline
+WORKDIR /app
+COPY pesaguard_backend_pipeline/requirements_3.txt ./requirements_3.txt
+RUN pip install --no-cache-dir -r requirements_3.txt
+COPY . .
+RUN useradd --create-home --shell /usr/sbin/nologin appuser \
+    && chown -R appuser:appuser /app
+USER appuser
+CMD ["sh", "-c", "exec rq worker ${RQ_QUEUE_NAME:-transaction_events}"]

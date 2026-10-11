@@ -7,6 +7,7 @@ import secrets
 import string
 import uuid
 from datetime import datetime, timedelta, timezone
+from string import Formatter
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
@@ -40,13 +41,36 @@ def approve_template(session: Session, template: CommunicationTemplate, approver
 
 
 def render_template(template: CommunicationTemplate, values: dict[str, object]) -> str:
-    missing = [name for name in (template.variables or []) if name not in values]
+    declared = set(template.variables or [])
+    try:
+        parsed = list(Formatter().parse(template.body))
+    except ValueError as exc:
+        raise ValueError("template format is invalid") from exc
+    if any(
+        not field_name.isidentifier()
+        or field_name not in declared
+        or ("{" in format_spec or "}" in format_spec)
+        for _, field_name, format_spec, _ in parsed
+        if field_name is not None
+    ):
+        raise ValueError("template contains an undeclared or unsafe variable")
+    missing = [name for name in declared if name not in values]
     if missing:
         raise ValueError(f"missing template variables: {', '.join(missing)}")
     return template.body.format_map(values)
 
 
 def set_consent(session: Session, *, tenant_id: str, recipient: str, channel: CommunicationChannel, purpose: str, granted: bool, source: str = "api") -> CommunicationConsent:
+    if not isinstance(tenant_id, str) or not tenant_id.strip():
+        raise ValueError("tenant_id is required")
+    if not isinstance(recipient, str) or not recipient.strip():
+        raise ValueError("recipient is required")
+    if not isinstance(channel, CommunicationChannel):
+        raise ValueError("unsupported communication channel")
+    if not isinstance(purpose, str) or not purpose.strip():
+        raise ValueError("consent purpose is required")
+    if not isinstance(granted, bool):
+        raise ValueError("granted must be a boolean")
     consent = session.query(CommunicationConsent).filter_by(tenant_id=tenant_id, recipient=recipient, channel=channel.value).one_or_none()
     if consent is None:
         consent = CommunicationConsent(id=f"consent_{uuid.uuid4().hex}", tenant_id=tenant_id, recipient=recipient, channel=channel.value, purpose=purpose)
@@ -57,8 +81,19 @@ def set_consent(session: Session, *, tenant_id: str, recipient: str, channel: Co
 
 
 def is_allowed_now(preference: CommunicationPreference | None, *, now: datetime | None = None) -> bool:
-    if preference is None or not preference.quiet_hours_start or not preference.quiet_hours_end:
+    if preference is None:
         return True
+    if not preference.quiet_hours_start and not preference.quiet_hours_end:
+        return True
+    if not preference.quiet_hours_start or not preference.quiet_hours_end:
+        raise ValueError("quiet hours start and end must be configured together")
+    for value in (preference.quiet_hours_start, preference.quiet_hours_end):
+        try:
+            datetime.strptime(value, "%H:%M")
+        except ValueError as exc:
+            raise ValueError("quiet hours must use HH:MM format") from exc
+        if len(value) != 5:
+            raise ValueError("quiet hours must use HH:MM format")
     current = (now or utc_now()).astimezone(ZoneInfo(preference.timezone)).strftime("%H:%M")
     start, end = preference.quiet_hours_start, preference.quiet_hours_end
     return not (start <= current < end if start < end else current >= start or current < end)

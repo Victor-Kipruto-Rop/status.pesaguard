@@ -1,0 +1,19 @@
+# Never bake deployment configuration or repository history into images.
+.env
+.env.*
+**/.env
+**/.env.*
+.git
+**/.venv
+**/node_modules
+**/__pycache__
+**/.pytest_cache
+**/.next
+*.log
+_docker_build*.log
+_docker_build*.err
+_verify*.sh
+_stdout*.txt
+_stderr*.txt
+_junit*.xml
+_full_run*.txt

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
+import threading
 from copy import deepcopy
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 class TenantSettingsStore:
@@ -14,6 +16,7 @@ class TenantSettingsStore:
     def __init__(self, path: Optional[str] = None):
         self.path = path or os.getenv("TENANT_SETTINGS_FILE", "tenant_settings.json")
         self._data: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.RLock()
         self._load()
 
     def _load(self) -> None:
@@ -30,40 +33,69 @@ class TenantSettingsStore:
     def _save(self) -> None:
         directory = os.path.dirname(self.path) or "."
         os.makedirs(directory, exist_ok=True)
-        with open(self.path, "w", encoding="utf-8") as fh:
-            json.dump(self._data, fh, indent=2, sort_keys=True)
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=directory,
+                prefix=".tenant-settings-",
+                suffix=".tmp",
+                delete=False,
+            ) as fh:
+                temporary_path = fh.name
+                json.dump(self._data, fh, indent=2, sort_keys=True)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(temporary_path, self.path)
+        finally:
+            if temporary_path and os.path.exists(temporary_path):
+                os.unlink(temporary_path)
 
     def get(self, tenant_id: str, default: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         tenant_key = str(tenant_id or "default")
-        value = self._data.get(tenant_key, {})
-        if not isinstance(value, dict):
-            value = {}
-        if default is not None:
-            merged = deepcopy(default)
-            merged.update(value)
-            return merged
-        return deepcopy(value)
+        with self._lock:
+            value = self._data.get(tenant_key, {})
+            if not isinstance(value, dict):
+                value = {}
+            if default is not None:
+                merged = deepcopy(default)
+                merged.update(value)
+                return merged
+            return deepcopy(value)
 
     def update(self, tenant_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(patch, dict):
             raise ValueError("Tenant settings update requires a dictionary payload.")
         tenant_key = str(tenant_id or "default")
-        existing = self.get(tenant_key)
-        merged = deepcopy(existing)
-        for key, value in patch.items():
-            if isinstance(value, dict) and isinstance(merged.get(key), dict):
-                merged[key] = {**merged[key], **value}
-            else:
-                merged[key] = value
-        if "preferred_locale" in merged and merged["preferred_locale"]:
-            merged["preferred_locale"] = str(merged["preferred_locale"]).strip().lower()
-            if "-" in merged["preferred_locale"]:
-                locale_root = merged["preferred_locale"].split("-", 1)[0]
-                if locale_root in {"en", "sw"}:
-                    merged["preferred_locale"] = locale_root
-        self._data[tenant_key] = merged
-        self._save()
-        return deepcopy(merged)
+        with self._lock:
+            existing = self.get(tenant_key)
+            merged = deepcopy(existing)
+            for key, value in patch.items():
+                if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                    merged[key] = {**merged[key], **value}
+                else:
+                    merged[key] = value
+            if "preferred_locale" in merged and merged["preferred_locale"]:
+                merged["preferred_locale"] = str(merged["preferred_locale"]).strip().lower()
+                if "-" in merged["preferred_locale"]:
+                    locale_root = merged["preferred_locale"].split("-", 1)[0]
+                    if locale_root in {"en", "sw"}:
+                        merged["preferred_locale"] = locale_root
+            self._data[tenant_key] = merged
+            self._save()
+            return deepcopy(merged)
+
+    def replace_section(self, tenant_id: str, section: str, values: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(section, str) or not section.strip() or not isinstance(values, dict):
+            raise ValueError("Tenant settings section replacement requires a section and dictionary payload.")
+        tenant_key = str(tenant_id or "default")
+        with self._lock:
+            settings = deepcopy(self._data.get(tenant_key, {}))
+            settings[section] = deepcopy(values)
+            self._data[tenant_key] = settings
+            self._save()
+            return deepcopy(self._data[tenant_key])
 
     def resolve_locale(self, tenant_id: str, user_id: Optional[str] = None, fallback_locale: str = "en") -> str:
         tenant_cfg = self.get(str(tenant_id or "default"), {})
@@ -87,8 +119,9 @@ class TenantSettingsStore:
         }
 
     def list_tenant_ids(self) -> List[str]:
-        return sorted(str(key) for key in self._data.keys())
+        with self._lock:
+            return sorted(str(key) for key in self._data.keys())
 
     def get_all_tenants(self) -> Dict[str, Dict[str, Any]]:
-        return deepcopy(self._data)
-
+        with self._lock:
+            return deepcopy(self._data)

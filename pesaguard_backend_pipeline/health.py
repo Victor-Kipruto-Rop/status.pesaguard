@@ -11,9 +11,8 @@ import time
 from typing import Any, Dict, Optional
 
 import requests
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.pool import StaticPool
 
 logger = logging.getLogger("pesaguard.health")
 
@@ -51,21 +50,13 @@ def _get_or_create_engine(database_url: str, timeout: int):
     with _db_engine_lock:
         engine = _db_engines.get(cache_key)
         if engine is None:
-            engine_kwargs = {
-                "pool_pre_ping": True,
-                "connect_args": _database_connect_args(database_url, timeout),
-            }
-            if database_url.startswith("sqlite"):
-                if database_url in {"sqlite://", "sqlite:///:memory:"}:
-                    engine_kwargs["poolclass"] = StaticPool
-            else:
-                engine_kwargs.update({"pool_size": 2, "max_overflow": 0})
-            engine = create_engine(database_url, **engine_kwargs)
-            try:
-                from metrics import instrument_engine_query_timing
-                instrument_engine_query_timing(engine)
-            except Exception:
-                logger.debug("Health engine query timing instrumentation skipped.", exc_info=True)
+            from database_service import create_database_engine
+
+            engine = create_database_engine(
+                database_url,
+                connect_args=_database_connect_args(database_url, timeout),
+                **({"pool_size": 2, "max_overflow": 0} if not database_url.startswith("sqlite") else {}),
+            )
             _db_engines[cache_key] = engine
         return engine
 
@@ -136,31 +127,37 @@ def _get_or_create_redis_client(redis_url: str, timeout: int):
     """Reuse cached Redis connection instances."""
     cache_key = f"{redis_url}::{timeout}"
     with _redis_client_lock:
-        client = _redis_client_cache.get(cache_key)
-        if client is None:
-            import redis
-            client = redis.from_url(redis_url, socket_connect_timeout=timeout, socket_timeout=timeout)
-            _redis_client_cache[cache_key] = client
-        return client
+        service = _redis_client_cache.get(cache_key)
+        if service is None:
+            from redis_service import RedisService
+
+            service = RedisService(
+                redis_url,
+                socket_connect_timeout=timeout,
+                socket_timeout=timeout,
+            )
+            _redis_client_cache[cache_key] = service
+        return service
 
 
 def check_redis_connectivity(timeout: int = 5) -> Dict[str, Any]:
     """Verify Redis server availability via ping."""
     try:
-        import redis  # noqa: F401
-    except ImportError:
+        service = _get_or_create_redis_client(REDIS_URL, timeout)
+    except RuntimeError:
         return {
             "status": "failed",
             "redis": {"status": "failed", "error": "redis package not installed"},
         }
 
     try:
-        client = _get_or_create_redis_client(REDIS_URL, timeout)
-        client.ping()
+        service.ping()
         return {"status": "ok", "redis": {"status": "ok"}}
     except Exception as exc:
         with _redis_client_lock:
-            _redis_client_cache.pop(f"{REDIS_URL}::{timeout}", None)
+            service = _redis_client_cache.pop(f"{REDIS_URL}::{timeout}", None)
+        if service is not None:
+            service.close()
         return {
             "status": "failed",
             "redis": {"status": "failed", "error": str(exc)},
@@ -249,3 +246,19 @@ def build_health_payload() -> Dict[str, Any]:
         },
     }
 
+
+def sanitize_health_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove dependency details before returning health data to unauthenticated callers."""
+    checks = payload.get("checks")
+    if not isinstance(checks, dict):
+        return {"status": payload.get("status", "unknown"), "service": "pesaguard", "checks": {}}
+    return {
+        "status": payload.get("status", "unknown"),
+        "service": "pesaguard",
+        "checks": {
+            name: {"status": check.get("status", "unknown")}
+            if isinstance(check, dict)
+            else {"status": "unknown"}
+            for name, check in checks.items()
+        },
+    }

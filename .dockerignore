@@ -1,12 +1,83 @@
-# Never bake deployment configuration or repository history into images.
+# Build context root is the repository root (see .github/workflows/*.yml context: ..).
+# Docker only reads .dockerignore from the context root, so this file MUST live here.
+
+# --- Secrets: never bake credentials or deployment config into images ---
 .env
 .env.*
 **/.env
 **/.env.*
+*.pem
+*.key
+secrets/
+**/secrets/
+
+# --- Version control & history ---
 .git
-**/.venv
-**/node_modules
+.gitignore
+.github
+**/.git
+
+# --- Python caches, virtualenvs, test artifacts ---
 **/__pycache__
+**/*.pyc
+**/*.pyo
 **/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.venv
+**/venv
+**/*.egg-info
+
+# --- Node / frontend build outputs ---
+**/node_modules
 **/.next
+**/dist
+**/build
+
+# --- Logs, temp files, local databases ---
 *.log
+**/*.log
+*.sqlite3
+*.db
+**/*.sqlite3
+
+# --- Local dev / scratch files (enumerated to avoid matching __init__.py, etc.) ---
+_runner.py
+_run_full.ps1
+_dbg_main.py
+_resp_main.py
+_apply_schema.py
+**/.DS_Store
+
+# --- Docs & reports not needed at runtime ---
+**/*.md
+docs/
+
+# --- Non-backend trees that are part of the same build context (repo root) ---
+# The runtime image only needs pesaguard_backend_pipeline/ (see infra/docker/Dockerfile).
+# Everything below is frontend apps, deploy snapshots, tooling, or stray dirs that
+# only bloat the image and slow builds. Keeping them out also prevents accidental
+# leakage of unrelated project files into production image layers.
+_backend-status-deploy
+pesauguard_backend_pipeline
+infra
+administration.pesaguard
+dashboard.pesaguard.victorkipruto.com
+developers.pesaguard.victorkipruto.com
+docs.pesaguard.victorkipruto.com
+status.pesaguard.victorkipruto.com
+pesaguard.co.ke
+package-lock.json
+package.json
+yarn.lock
+pnpm-lock.yaml
+
+# Local build/debug artifacts from this workspace (globbed so numbered variants
+# like _docker_build2.err / _docker_build3.log cannot leak into image layers)
+_docker_build*.log
+_docker_build*.err
+_verify*.sh
+_stdout*.txt
+_stderr*.txt
+_junit*.xml
+_full_run*.txt

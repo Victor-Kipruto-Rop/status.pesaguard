@@ -51,6 +51,52 @@ def test_duplicate_transaction_does_not_create_second_outbox_row(tmp_path):
         assert session.query(TransactionOutbox).count() == 1
 
 
+def test_reusing_transaction_identity_with_different_content_is_a_conflict(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'idempotency_conflict.db'}"
+    engine = create_engine(database_url)
+    Base.metadata.create_all(engine)
+    store = EventStore(database_url=database_url)
+
+    assert store.mark_processed(
+        _payload(),
+        tenant_id="tenant-a",
+        idempotency_key_override="client-request-1",
+    ) is ProcessResult.STORED
+
+    altered = _payload()
+    altered["TransAmount"] = "99.00"
+    assert store.mark_processed(
+        altered,
+        tenant_id="tenant-a",
+        idempotency_key_override="client-request-1",
+    ) is ProcessResult.CONFLICT
+    assert store.mark_processed(
+        altered,
+        tenant_id="tenant-a",
+        idempotency_key_override="different-client-key",
+    ) is ProcessResult.CONFLICT
+
+    with sessionmaker(bind=engine)() as session:
+        assert session.query(Transaction).count() == 1
+        assert session.query(TransactionOutbox).count() == 1
+
+    with sessionmaker(bind=engine)() as session:
+        session_payload = _payload("session-tx")
+        assert store.mark_processed_in_session(
+            session,
+            session_payload,
+            tenant_id="tenant-a",
+        ) is ProcessResult.STORED
+        session.commit()
+        session_payload["TransAmount"] = "99.00"
+        assert store.mark_processed_in_session(
+            session,
+            session_payload,
+            tenant_id="tenant-a",
+        ) is ProcessResult.CONFLICT
+        session.rollback()
+
+
 def test_outbox_claim_and_failure_release_are_replayable(tmp_path):
     database_url = f"sqlite:///{tmp_path / 'retry.db'}"
     engine = create_engine(database_url)
@@ -121,3 +167,30 @@ def test_reconciliation_outbox_claim_publish_and_retry_are_durable(tmp_path):
     store.mark_reconciliation_outbox_published("recon-outbox-1")
     with Session() as session:
         assert session.get(ReconciliationOutbox, "recon-outbox-1").status == "published"
+
+
+def test_outbox_drain_releases_claims_when_producer_initialization_fails(tmp_path, monkeypatch):
+    database_url = f"sqlite:///{tmp_path / 'producer_failure.db'}"
+    engine = create_engine(database_url)
+    Base.metadata.create_all(engine)
+    store = EventStore(database_url=database_url)
+    assert store.mark_processed(_payload(), tenant_id="tenant-a") is ProcessResult.STORED
+
+    import background_tasks
+    import producer
+
+    monkeypatch.setattr(background_tasks, "DATABASE_URL", database_url)
+    monkeypatch.setattr(
+        producer,
+        "publish_transaction_batch_results",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("producer unavailable")),
+    )
+
+    result = background_tasks.drain_transaction_outbox()
+
+    assert result == {"status": "partial_failure", "claimed": 1, "published": 0, "failed": 1}
+    with sessionmaker(bind=engine)() as session:
+        row = session.query(TransactionOutbox).one()
+        assert row.status == "failed"
+        assert row.locked_until is None
+        assert row.last_error == "producer unavailable"

@@ -11,13 +11,14 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from flask import Flask, Response, abort, jsonify, request
-from sqlalchemy import and_, create_engine, func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import sessionmaker
 from werkzeug.exceptions import HTTPException
 
 # Ensure storage models can be located cleanly
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "..", "storage", "models"))
 from models import Base, Discrepancy, Transaction  # noqa: E402
+from database_service import create_database_engine  # noqa: E402
 
 # Configure structured logging
 logging.basicConfig(
@@ -31,25 +32,11 @@ DATABASE_URL = required_env("DATABASE_URL")
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
 
-# Production-grade SQLAlchemy engine with robust pooling and pre-ping
-if DATABASE_URL.startswith("sqlite"):
-    engine = create_engine(
-        DATABASE_URL,
-        connect_args={"check_same_thread": False},
-    )
-else:
-    engine = create_engine(
-        DATABASE_URL,
-        pool_pre_ping=True,
-        pool_size=int(os.getenv("DB_POOL_SIZE", "5")),
-        max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "10")),
-        connect_args={"connect_timeout": 5} if "postgresql" in DATABASE_URL else {},
-    )
-try:
-    from metrics import instrument_engine_query_timing
-    instrument_engine_query_timing(engine)
-except Exception:
-    logger.debug("app_1 engine query timing instrumentation skipped.", exc_info=True)
+# Production-grade SQLAlchemy engine with shared bounded pool settings.
+engine = create_database_engine(
+    DATABASE_URL,
+    connect_args={"connect_timeout": 5} if "postgresql" in DATABASE_URL else {},
+)
 Session = sessionmaker(bind=engine, expire_on_commit=False)
 
 # Statuses representing genuine blocking reconciliation issues

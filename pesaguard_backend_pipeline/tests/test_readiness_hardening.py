@@ -1,9 +1,11 @@
 import builtins
 import importlib
 import os
+import subprocess
 import sys
 import tempfile
 import types
+from pathlib import Path
 
 import pytest
 
@@ -176,27 +178,194 @@ def test_webhook_accepts_valid_source_and_replays_are_ignored(webhook_client):
     assert "duplicate ignored" in duplicate_response.get_json()["ResultDesc"].lower()
 
 
-def test_webhook_health_returns_ok_when_services_available(webhook_client, monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", "sqlite:///:memory:")
-    monkeypatch.setenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
-    import health as health_module
-    importlib.reload(health_module)
+@pytest.mark.parametrize(
+    ("signature", "expected_status"),
+    [
+        ("valid", 200),
+        ("invalid", 403),
+    ],
+)
+def test_webhook_verifies_daraja_signature(
+    webhook_client, monkeypatch, signature, expected_status
+):
+    import json
+
+    from shared.daraja.validator import compute_hmac
+
+    monkeypatch.setenv("DARAJA_CONSUMER_SECRET", "consumer-secret")
+    payload = {
+        "TransactionType": "Pay Bill",
+        "TransID": f"signature-{signature}",
+        "TransTime": "20240101120000",
+        "TransAmount": "10",
+        "BusinessShortCode": "123456",
+        "MSISDN": "254700000000",
+    }
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    daraja_signature = (
+        compute_hmac("consumer-secret", body).hex()
+        if signature == "valid"
+        else "00" * 32
+    )
+
+    response = webhook_client.post(
+        "/webhook/mpesa/confirmation",
+        data=body,
+        content_type="application/json",
+        headers={
+            "X-Daraja-Shared-Secret": "test-secret",
+            "X-Daraja-Signature": daraja_signature,
+        },
+    )
+
+    assert response.status_code == expected_status
+
+
+def test_webhook_health_redacts_dependency_diagnostics(webhook_client, monkeypatch):
+    import app as webhook_app
+
+    monkeypatch.setattr(webhook_app, "build_health_payload", lambda: {
+        "status": "degraded",
+        "service": "pesaguard",
+        "checks": {
+            "database": {"status": "ok"},
+            "redis": {"status": "failed", "error": "private redis connection detail"},
+        },
+    })
 
     response = webhook_client.get("/health")
-    assert response.status_code in (200, 503)
-    assert "status" in response.json
+    assert response.status_code == 503
+    assert response.json["checks"] == {
+        "database": {"status": "ok"},
+        "redis": {"status": "failed"},
+    }
+    assert b"private redis connection detail" not in response.data
 
 
 def test_dashboard_health_returns_ok_when_services_available(dashboard_client, monkeypatch):
-    client, _ = dashboard_client
-    monkeypatch.setenv("DATABASE_URL", "sqlite:///:memory:")
-    monkeypatch.setenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
-    import health as health_module
-    importlib.reload(health_module)
+    client, dashboard_app = dashboard_client
+    monkeypatch.setattr(dashboard_app, "build_health_payload", lambda: {
+        "status": "ok",
+        "service": "pesaguard",
+        "checks": {
+            "database": {"status": "ok", "dsn": "postgres://private"},
+        },
+    })
 
     response = client.get("/health")
-    assert response.status_code in (200, 503)
-    assert "checks" in response.json
+    assert response.status_code == 200
+    assert response.json["checks"] == {"database": {"status": "ok"}}
+    assert b"private" not in response.data
+
+
+def test_auth_requires_explicit_jwt_secret_even_with_dev_fallback_flag():
+    environment = os.environ.copy()
+    environment.pop("JWT_SECRET_KEY", None)
+    environment["PESAGUARD_ALLOW_INSECURE_DEV_SECRET"] = "1"
+    environment["PYTHON_DOTENV_DISABLED"] = "1"
+    backend_root = Path(__file__).resolve().parents[1]
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import auth_rbac"],
+        cwd=backend_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    assert "JWT_SECRET_KEY environment variable is required" in result.stderr
+
+
+def test_public_status_is_sanitized_and_allows_public_and_status_sites(dashboard_client, monkeypatch):
+    client, dashboard_app = dashboard_client
+    monkeypatch.delenv("PESAGUARD_CORS_ALLOWED_ORIGINS", raising=False)
+    import health as health_module
+    import public_status
+
+    monkeypatch.setattr(health_module, "check_database_connection", lambda: {
+        "status": "ok",
+        "database": {"status": "ok"},
+    })
+    monkeypatch.setattr(health_module, "check_kafka_connectivity", lambda: {
+        "status": "failed",
+        "kafka": {"status": "failed", "error": "private broker detail"},
+    })
+    monkeypatch.setattr(health_module, "check_redis_connectivity", lambda: {
+        "status": "ok",
+        "redis": {"status": "ok"},
+    })
+    monkeypatch.setattr(health_module, "check_daraja_connectivity", lambda: {
+        "status": "degraded",
+        "daraja": {"status": "degraded", "reason": "private provider detail"},
+    })
+    monkeypatch.setattr(public_status, "_site_services", lambda: [
+        {"id": "public-website", "name": "Public website", "status": "operational"},
+        {"id": "dashboard-site", "name": "Dashboard", "status": "operational"},
+        {"id": "documentation-site", "name": "Documentation", "status": "operational"},
+        {"id": "status-site", "name": "Status website", "status": "operational"},
+    ])
+    monkeypatch.setattr(dashboard_app, "build_health_payload", health_module.build_health_payload)
+
+    for origin in (
+        "https://pesaguard.co.ke",
+        "https://status.pesaguard.victorkipruto.com",
+        "https://public.pesaguard.victorkipruto.com",
+    ):
+        response = client.get("/public/status", headers={"Origin": origin})
+
+        assert response.status_code == 503
+        assert response.headers["Access-Control-Allow-Origin"] == origin
+        assert response.headers["Cache-Control"] == "no-store"
+        assert "private broker detail" not in response.get_data(as_text=True)
+        assert "private provider detail" not in response.get_data(as_text=True)
+        payload = response.get_json()
+
+    assert payload["verified"] is True
+    assert payload["overall"]["status"] == "outage"
+    assert payload["generatedAt"].endswith("Z")
+    assert {service["id"]: service["status"] for service in payload["services"]} == {
+        "api": "degraded",
+        "database": "operational",
+        "kafka": "outage",
+        "redis": "operational",
+        "daraja": "degraded",
+        "public-website": "operational",
+        "dashboard-site": "operational",
+        "documentation-site": "operational",
+        "status-site": "operational",
+    }
+
+
+def test_public_status_cors_preflight_accepts_public_and_status_sites(dashboard_client, monkeypatch):
+    client, _ = dashboard_client
+    monkeypatch.delenv("PESAGUARD_CORS_ALLOWED_ORIGINS", raising=False)
+
+    for origin in (
+        "https://pesaguard.co.ke",
+        "https://status.pesaguard.victorkipruto.com",
+        "https://public.pesaguard.victorkipruto.com",
+    ):
+        for endpoint, method in (
+            ("/public/status", "GET"),
+            ("/public/status/subscriptions", "POST"),
+        ):
+            response = client.options(
+                endpoint,
+                headers={
+                    "Origin": origin,
+                    "Access-Control-Request-Method": method,
+                    "Access-Control-Request-Headers": "content-type",
+                },
+            )
+
+            assert response.status_code == 200
+            assert response.headers["Access-Control-Allow-Origin"] == origin
+            assert "POST" in response.headers["Access-Control-Allow-Methods"]
+            assert "Content-Type" in response.headers["Access-Control-Allow-Headers"]
+
 
 def test_check_kafka_connectivity_returns_failed_when_kafka_dependency_is_missing(monkeypatch):
     monkeypatch.setitem(sys.modules, "kafka", types.ModuleType("kafka"))

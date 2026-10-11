@@ -1,5 +1,8 @@
 {
     "python-envs.defaultEnvManager": "ms-python.python:system",
     "chat.byokUtilityModelDefault": "mainAgent",
-    "liveServer.settings.port": 5501
+    "liveServer.settings.port": 5501,
+    "java.compile.nullAnalysis.mode": "automatic",
+    "java.configuration.updateBuildConfiguration": "automatic",
+    "java.debug.settings.onBuildFailureProceed": true
 }

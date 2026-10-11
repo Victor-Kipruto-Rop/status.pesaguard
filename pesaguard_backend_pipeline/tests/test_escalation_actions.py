@@ -49,10 +49,14 @@ def test_webhook_action_triggers_http_post(monkeypatch):
         status_code = 200
         text = "ok"
 
-    def fake_post(url, json=None, headers=None, timeout=None):
-        calls.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
+    def fake_post(url, json=None, headers=None, timeout=None, allow_redirects=True):
+        calls.append({"url": url, "json": json, "headers": headers, "timeout": timeout, "allow_redirects": allow_redirects})
         return DummyResponse()
 
+    # The URL validator is covered separately. This unit isolates the action's
+    # request construction and successful HTTP response handling.
+    monkeypatch.setenv("WEBHOOK_SECRET_KEY", "test-webhook-signing-secret")
+    monkeypatch.setattr("escalation_engine._validate_webhook_url", lambda url: None)
     monkeypatch.setattr("escalation_engine.requests.post", fake_post)
 
     result = engine.evaluate_and_escalate("tenant-a", incident)
@@ -68,7 +72,7 @@ def test_notify_action_sends_email(monkeypatch, tmp_path):
         trans_id="txn-2",
         tenant_id="tenant-a",
         anomaly_type="suspicious_amount",
-        severity="high",
+        severity="critical",
         details="Large transfer above threshold",
         status="needs_review",
     )
@@ -89,7 +93,7 @@ def test_notify_action_sends_email(monkeypatch, tmp_path):
         description="Email on-call operator",
         condition_field="severity",
         condition_operator="equals",
-        condition_value="high",
+        condition_value="critical",
         action="notify",
         target="ops@example.com",
         priority=5,

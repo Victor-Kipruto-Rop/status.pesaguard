@@ -1,16 +1,11 @@
 version: 2
 updates:
-  - package-ecosystem: "pip"
-    directory: "/"
+  - package-ecosystem: npm
+    directory: /public.pesaguard.victorkipruto.com
     schedule:
-      interval: "weekly"
-    target-branch: "main"
-    ignore:
-      - dependency-name: "*"
-        update-types: ["version-update:semver-major"]
-
-  - package-ecosystem: "npm"
-    directory: "/frontend"
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: github-actions
+    directory: /
     schedule:
-      interval: "weekly"
-    target-branch: "main"
+      interval: weekly

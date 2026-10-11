@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import logging
 import time
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Set, Iterable
 
 from event_store import ProcessResult
+from normalization import NormalizationError, normalize_amount
 from reconciliation_scoring import score_match
 
 # Import normalization helpers (added in feat/phase1-reconciliation-systematic)
@@ -115,12 +116,12 @@ class ReconciliationEngine:
 
         tolerant = [record for record in records if self._amount_matches(transaction, record) and self._time_matches(transaction, record)]
         if tolerant:
-            candidate = max(tolerant, key=lambda record: self._score(transaction, record))
+            candidate = self._best_candidate(transaction, tolerant)
             return self._result("PARTIAL", candidate, ["amount_within_tolerance", "timestamp_within_window"], self._score(transaction, candidate), started, now)
 
         amount_match = [record for record in records if self._amount_matches(transaction, record)]
         if amount_match:
-            candidate = max(amount_match, key=lambda record: self._score(transaction, record))
+            candidate = self._best_candidate(transaction, amount_match)
             return self._result("MISMATCH", candidate, ["amount_match", "timestamp_mismatch_or_reference_mismatch"], self._score(transaction, candidate), started, now)
 
         return self._result("UNMATCHED", None, ["no_matching_candidate"], 0.0, started, now)
@@ -169,12 +170,9 @@ class ReconciliationEngine:
     @staticmethod
     def _amount(value: Any) -> Decimal:
         try:
-            amount = Decimal(str(value)).quantize(Decimal("0.01"))
-        except (InvalidOperation, TypeError, ValueError) as exc:
-            raise ValueError("invalid monetary amount") from exc
-        if amount <= 0:
-            raise ValueError("amount must be greater than zero")
-        return amount
+            return Decimal(normalize_amount(value))
+        except NormalizationError as exc:
+            raise ValueError(str(exc)) from exc
 
     def _tolerance(self, amount: Decimal) -> Decimal:
         return max(Decimal("0.01"), abs(amount) * self.tolerance_percent / Decimal("100"))
@@ -216,6 +214,25 @@ class ReconciliationEngine:
         score += Decimal("0.15") if self._time_matches(transaction, record) else Decimal("0")
         score += Decimal("0.10") if transaction["phone"] and transaction["phone"] == record["phone"] else Decimal("0")
         return float(min(Decimal("1"), score))
+
+    def _best_candidate(self, transaction: Dict[str, Any], records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+        """Select the highest-scoring candidate deterministically.
+
+        Multiple internal records can tie on match score (e.g. two records with the
+        same amount, time and reference). Plain ``max`` would then return whichever
+        appears first in the input list, so reordering the records would change which
+        transaction a callback is reconciled against -- a non-deterministic,
+        non-explainable financial decision (Rule #26/#27).
+
+        We therefore break score ties with a stable secondary key: the record's
+        ``internal_ref`` (ascending, string order). When scores differ this changes
+        nothing (the higher score still wins); it only makes ties reproducible so the
+        same inputs always reconcile to the same record regardless of input order.
+        """
+        return min(
+            records,
+            key=lambda record: (-self._score(transaction, record), str(record.get("internal_ref") or "")),
+        )
 
     def _result(self, status: str, record: Optional[Dict[str, Any]], rules: List[str], score: float, started: float, now: datetime, *, reason: Optional[str] = None) -> Dict[str, Any]:
         evidence = {
@@ -324,6 +341,10 @@ def evaluate_transaction(
     Returns:
         Structured evaluation outcome dict
     """
+    original_amount = event.get("TransAmount")
+    if original_amount is None:
+        original_amount = event.get("amount")
+
     # Normalize incoming event into canonical keys without discarding original keys.
     # This preserves backwards compatibility while centralizing parsing/format logic.
     try:
@@ -333,6 +354,9 @@ def evaluate_transaction(
     # Merge normalized canonical keys into the event for the rest of the engine to use.
     merged_event = dict(event or {})
     merged_event.update(norm or {})
+    if original_amount is not None:
+        merged_event["TransAmount"] = original_amount
+        merged_event["amount"] = original_amount
     event = merged_event
 
     trans_id = str(event.get("TransID") or event.get("trans_id") or "unknown").strip()
@@ -488,9 +512,8 @@ def _coerce_amount(value: Any) -> Optional[Decimal]:
     if value is None:
         return None
     try:
-        val = Decimal(str(value)).quantize(Decimal("0.01"))
-        return val if val >= 0 else None
-    except (InvalidOperation, TypeError, ValueError):
+        return Decimal(normalize_amount(value))
+    except NormalizationError:
         return None
 
 
@@ -589,9 +612,9 @@ def reconcile_with_idempotency(
                 "anomalies": ["duplicate_transaction_id"],
             }
 
-        if result == ProcessResult.ERROR:
+        if result in {ProcessResult.ERROR, ProcessResult.CONFLICT}:
             session.rollback()
-            raise RuntimeError(f"mark_processed_in_session failed validation for trans_id={trans_id}")
+            raise RuntimeError(f"mark_processed_in_session returned {result.value} for trans_id={trans_id}")
 
         # Record discrepancy for non-matched or anomalous transactions
         if evaluation.get("status") in {"needs_review", "missing_payment"} or evaluation.get("anomalies"):

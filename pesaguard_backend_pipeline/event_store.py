@@ -1,7 +1,7 @@
-"""A lightweight durable event store for idempotency and replay.
+"""A durable event store for transaction idempotency and replay.
 
-Uses ProcessedTransaction table as the idempotency source of truth.
-Each webhook callback from Daraja is recorded exactly once via unique constraint.
+IdempotencyRecord preserves request identity and payload hashes; unique
+constraints on transaction records close concurrent duplicate-write races.
 """
 
 from __future__ import annotations
@@ -14,18 +14,19 @@ import threading
 import uuid
 import hashlib
 import json
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, Optional
 
-from sqlalchemy import create_engine, or_
+from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from lifecycle import transition_data_lifecycle, transition_transaction
 from event_bus import build_event
 from idempotency import derive_idempotency_key
+from normalization import normalize_amount
 from models import AuditEvent, Base, IdempotencyRecord, ProcessedTransaction, ReconciliationOutbox, Transaction, TransactionEvent, TransactionOutbox
 from transformation_store import record_transformation_stage
 from lineage import record_lineage
@@ -54,10 +55,7 @@ VALID_PROVIDERS = frozenset(
 
 def _money(value: Any) -> Decimal:
     """Normalize provider amounts without binary floating-point conversion."""
-    try:
-        amount = Decimal(str(value)).quantize(Decimal("0.01"))
-    except (InvalidOperation, TypeError, ValueError):
-        raise ValueError("transaction amount must be a valid decimal")
+    amount = Decimal(normalize_amount(value))
     if amount <= 0:
         raise ValueError("transaction amount must be greater than zero")
     return amount
@@ -103,8 +101,19 @@ def _provider(value: Any) -> str:
     return provider
 
 
+# Bookkeeping fields injected during normalization (not provider content).
+# They carry fresh timestamps on every request, so they must not participate
+# in replay-detection hashes: a byte-identical provider retry normalizes to a
+# new envelope whose created_at/updated_at differ, which would otherwise be
+# misclassified as a conflicting replay (409) instead of a duplicate (200).
+# A genuine conflict (same transaction identity, different financial content)
+# still changes a hashed field and remains a CONFLICT.
+_VOLATILE_HASH_FIELDS = frozenset({"created_at", "updated_at"})
+
+
 def _payload_hash(payload: Dict[str, Any]) -> str:
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    stable = {key: value for key, value in payload.items() if key not in _VOLATILE_HASH_FIELDS}
+    canonical = json.dumps(stable, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -121,16 +130,40 @@ def provider_account_id(payload: Dict[str, Any]) -> str:
 class ProcessResult(str, Enum):
     """Outcome of attempting to record a webhook callback.
 
-    The webhook handler MUST branch on this, not treat it as a plain boolean â€”
-    STORED and DUPLICATE both mean "return 200 to Daraja, no retry needed".
-    ERROR means "return 5xx so Daraja retries" â€” a genuine failure must never
-    be indistinguishable from a benign duplicate, or real transactions can be
-    silently dropped.
+    Conflicts mean a request identity was reused for different financial
+    content and must not be acknowledged as a duplicate. Errors indicate a
+    genuine persistence failure that callers should retry or investigate.
     """
 
     STORED = "stored"        # new transaction, successfully recorded
-    DUPLICATE = "duplicate"  # already processed before â€” safe no-op
-    ERROR = "error"          # genuine failure â€” caller should signal retry
+    DUPLICATE = "duplicate"  # identical request already recorded
+    CONFLICT = "conflict"    # request identity reused with different content
+    ERROR = "error"          # genuine failure; callers should retry
+
+
+def _existing_request_result(
+    session: Session,
+    *,
+    tenant_id: str,
+    provider: str,
+    idempotency_key: str,
+    trans_id: str,
+    request_hash: str,
+) -> Optional[ProcessResult]:
+    existing = session.query(IdempotencyRecord).filter(
+        IdempotencyRecord.tenant_id == tenant_id,
+        IdempotencyRecord.provider == provider,
+        IdempotencyRecord.idempotency_key == idempotency_key,
+    ).one_or_none()
+    if existing is None:
+        existing = session.query(IdempotencyRecord).filter(
+            IdempotencyRecord.tenant_id == tenant_id,
+            IdempotencyRecord.provider == provider,
+            IdempotencyRecord.provider_transaction_id == trans_id,
+        ).one_or_none()
+    if existing is None:
+        return None
+    return ProcessResult.DUPLICATE if existing.request_hash == request_hash else ProcessResult.CONFLICT
 
 
 class EventStore:
@@ -164,21 +197,13 @@ class EventStore:
             if "postgresql" in self.database_url:
                 connect_args["connect_timeout"] = int(os.getenv("DB_CONNECT_TIMEOUT", "5"))
 
-            if self.database_url.startswith("sqlite"):
-                self.engine = create_engine(
-                    self.database_url,
-                    connect_args={"check_same_thread": False},
-                    isolation_level=self.isolation_level if "postgresql" in self.database_url else None,
-                )
-            else:
-                self.engine = create_engine(
-                    self.database_url,
-                    pool_pre_ping=True,
-                    pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
-                    max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "20")),
-                    isolation_level=self.isolation_level if "postgresql" in self.database_url else None,
-                    connect_args=connect_args,
-                )
+            from database_service import create_database_engine
+
+            self.engine = create_database_engine(
+                self.database_url,
+                isolation_level=self.isolation_level if "postgresql" in self.database_url else None,
+                connect_args=connect_args,
+            )
             # Production PostgreSQL schemas are owned by Alembic. SQLite is
             # retained as an explicit test/development convenience only.
             from observability import instrument_sqlalchemy_engine
@@ -277,13 +302,28 @@ class EventStore:
         if not trans_id or not provider or provider == "unknown" or not account_id:
             logger.error("mark_processed() called with missing TransID in payload")
             return ProcessResult.ERROR
+        request_hash = _payload_hash(payload)
+        from logging_utils import get_observability_context
+        from observability import extract_trace_context
+
+        event_context = get_observability_context()
+        candidate_traceparent = str(event_context.get("traceparent") or "").strip()
+        event_metadata = {}
+        if extract_trace_context({"traceparent": candidate_traceparent}):
+            event_metadata["traceparent"] = candidate_traceparent
+        event_correlation_id = str(
+            payload.get("correlation_id")
+            or event_context.get("correlation_id")
+            or idempotency_key
+        )
         event_payload = build_event(
             "transaction.received",
             tenant_id,
             trans_id,
             payload,
             event_id=idempotency_key,
-            correlation_id=str(payload.get("correlation_id") or idempotency_key),
+            correlation_id=event_correlation_id,
+            metadata=event_metadata,
         ).to_dict()
         event_payload["TransID"] = trans_id
         from logging_utils import bind_observability_context
@@ -302,13 +342,16 @@ class EventStore:
 
         try:
             with self.Session() as session:
-                existing_identity = session.query(IdempotencyRecord).filter(
-                    IdempotencyRecord.tenant_id == tenant_id,
-                    IdempotencyRecord.provider == provider,
-                    IdempotencyRecord.idempotency_key == idempotency_key,
-                ).one_or_none()
-                if existing_identity is not None:
-                    return ProcessResult.DUPLICATE
+                existing_result = _existing_request_result(
+                    session,
+                    tenant_id=tenant_id,
+                    provider=provider,
+                    idempotency_key=idempotency_key,
+                    trans_id=trans_id,
+                    request_hash=request_hash,
+                )
+                if existing_result is not None:
+                    return existing_result
                 pt_record = ProcessedTransaction(
                     id=f"pt_{uuid.uuid4().hex[:12]}",
                     daraja_trans_id=trans_id,
@@ -350,7 +393,7 @@ class EventStore:
                     event_type="transaction.received",
                     to_state="RECEIVED",
                     actor="event_store",
-                    payload_hash=_payload_hash(payload),
+                    payload_hash=request_hash,
                     correlation_id=str(payload.get("correlation_id") or "") or None,
                     details={"provider_account_id": account_id},
                     created_at=datetime.now(timezone.utc),
@@ -395,7 +438,7 @@ class EventStore:
                     idempotency_key=idempotency_key,
                     external_reference=str(payload.get("BillRefNumber") or payload.get("external_reference") or "").strip() or None,
                     provider_transaction_id=trans_id,
-                    request_hash=_payload_hash(payload),
+                    request_hash=request_hash,
                 ))
                 session.add(AuditEvent(
                     id=f"audit_{uuid.uuid4().hex[:12]}",
@@ -405,7 +448,7 @@ class EventStore:
                     aggregate_type="transaction",
                     aggregate_id=t_record.id,
                     actor="event_store",
-                    payload_hash=_payload_hash(payload),
+                    payload_hash=request_hash,
                     details={"provider": provider, "provider_transaction_id": trans_id},
                 ))
 
@@ -417,6 +460,24 @@ class EventStore:
                 return ProcessResult.STORED
 
         except IntegrityError:
+            with self.Session() as session:
+                existing_result = _existing_request_result(
+                    session,
+                    tenant_id=tenant_id,
+                    provider=provider,
+                    idempotency_key=idempotency_key,
+                    trans_id=trans_id,
+                    request_hash=request_hash,
+                )
+            if existing_result is not None:
+                logger.info(
+                    "Concurrent idempotency replay resolved as %s for tenant=%s provider=%s key=%s",
+                    existing_result.value,
+                    tenant_id,
+                    provider,
+                    idempotency_key,
+                )
+                return existing_result
             if self.already_processed(trans_id, tenant_id=tenant_id, provider_account=account_id):
                 logger.info(
                     "Duplicate webhook callback ignored for trans_id=%s idempotency_key=%s",
@@ -467,15 +528,41 @@ class EventStore:
         if not trans_id or not provider or provider == "unknown" or not account_id:
             logger.error("mark_processed_in_session() called with missing TransID in payload")
             return ProcessResult.ERROR
+        request_hash = _payload_hash(payload)
+        from logging_utils import get_observability_context
+        from observability import extract_trace_context
+
+        event_context = get_observability_context()
+        candidate_traceparent = str(event_context.get("traceparent") or "").strip()
+        event_metadata = {}
+        if extract_trace_context({"traceparent": candidate_traceparent}):
+            event_metadata["traceparent"] = candidate_traceparent
+        event_correlation_id = str(
+            payload.get("correlation_id")
+            or event_context.get("correlation_id")
+            or idempotency_key
+        )
         event_payload = build_event(
             "transaction.received",
             tenant_id,
             trans_id,
             payload,
             event_id=idempotency_key,
-            correlation_id=str(payload.get("correlation_id") or idempotency_key),
+            correlation_id=event_correlation_id,
+            metadata=event_metadata,
         ).to_dict()
         event_payload["TransID"] = trans_id
+
+        existing_request_result = _existing_request_result(
+            session,
+            tenant_id=tenant_id,
+            provider=provider,
+            idempotency_key=idempotency_key,
+            trans_id=trans_id,
+            request_hash=request_hash,
+        )
+        if existing_request_result is not None:
+            return existing_request_result
 
         existing = session.query(ProcessedTransaction).filter(
             ProcessedTransaction.daraja_trans_id == trans_id,
@@ -531,7 +618,7 @@ class EventStore:
                 event_type="transaction.received",
                 to_state="RECEIVED",
                 actor="event_store",
-                payload_hash=_payload_hash(payload),
+                payload_hash=request_hash,
                 correlation_id=str(payload.get("correlation_id") or "") or None,
                 details={"provider_account_id": account_id},
                 created_at=datetime.now(timezone.utc),
@@ -554,7 +641,7 @@ class EventStore:
                 idempotency_key=idempotency_key,
                 external_reference=str(payload.get("BillRefNumber") or payload.get("external_reference") or "").strip() or None,
                 provider_transaction_id=trans_id,
-                request_hash=_payload_hash(payload),
+                request_hash=request_hash,
             ))
             session.add(AuditEvent(
                 id=f"audit_{uuid.uuid4().hex[:12]}",
@@ -564,7 +651,7 @@ class EventStore:
                 aggregate_type="transaction",
                 aggregate_id=t_record.id,
                 actor="event_store",
-                payload_hash=_payload_hash(payload),
+                payload_hash=request_hash,
                 details={"provider": provider, "provider_transaction_id": trans_id},
             ))
 
@@ -573,6 +660,16 @@ class EventStore:
 
         except IntegrityError:
             savepoint.rollback()
+            existing_request_result = _existing_request_result(
+                session,
+                tenant_id=tenant_id,
+                provider=provider,
+                idempotency_key=idempotency_key,
+                trans_id=trans_id,
+                request_hash=request_hash,
+            )
+            if existing_request_result is not None:
+                return existing_request_result
             existing = session.query(ProcessedTransaction).filter(
                 ProcessedTransaction.daraja_trans_id == trans_id,
                 ProcessedTransaction.tenant_id == tenant_id,

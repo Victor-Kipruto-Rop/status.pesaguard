@@ -1,0 +1,340 @@
+name: PesaGuard Data Contract Pipeline
+
+# One job per stage of the contract pipeline:
+#
+#   1. Schema linting            ->  schema-linting
+#   2. Schema validation         ->  schema-validation
+#   3. Compatibility checking    ->  compatibility-checking
+#   4. Breaking-change detection ->  breaking-change-detection
+#   5. Producer contract tests   ->  producer-contract-tests
+#   6. Consumer contract tests   ->  consumer-contract-tests
+#   7. Integration tests         ->  integration-tests
+#   8. Contract gate             ->  contract-gate  (the single required check)
+#
+# Human review, merge, and deploy stay outside this workflow: review is enforced
+# by .github/CODEOWNERS plus branch protection, and deploy by release.yml. See
+# docs/testing/CONTRACT_CI_PIPELINE.md for the stage-to-command mapping.
+#
+# No `paths:` filter is used deliberately. A required status check that is
+# filtered out never reports, which leaves pull requests permanently blocked.
+
+on:
+  pull_request:
+    branches: [main, staging]
+  push:
+    branches: [main, staging]
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.12"
+  PYTHONPATH: "."
+
+concurrency:
+  group: contract-pipeline-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  schema-linting:
+    name: 1. Schema linting
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install schema tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install "jsonschema==4.23.0" "PyYAML==6.0.2"
+
+      - name: Lint contracts and registry consistency
+        run: |
+          python pesaguard_backend_pipeline/contract_lint.py \
+            --json-report contract-lint-report.json
+
+      - name: Archive lint report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-lint-report
+          path: contract-lint-report.json
+          if-no-files-found: ignore
+
+  schema-validation:
+    name: 2. Schema validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pesaguard_backend_pipeline/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r pesaguard_backend_pipeline/requirements.txt
+          pip install "jsonschema==4.23.0"
+
+      - name: Validate payloads against every registered contract
+        run: |
+          pytest -v --tb=short \
+            pesaguard_backend_pipeline/tests/test_schema_registry.py \
+            pesaguard_backend_pipeline/tests/test_schema_validation.py \
+            pesaguard_backend_pipeline/tests/test_api_schema_validation.py
+
+      - name: Validate the contract tooling itself
+        run: pytest -v --tb=short pesaguard_backend_pipeline/tests/test_contract_lint.py
+
+  compatibility-checking:
+    name: 3. Compatibility checking
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pesaguard_backend_pipeline/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r pesaguard_backend_pipeline/requirements.txt
+          pip install "jsonschema==4.23.0"
+
+      - name: Enforce the declared compatibility policy
+        run: |
+          pytest -v --tb=short \
+            pesaguard_backend_pipeline/tests/test_schema_compatibility.py \
+            pesaguard_backend_pipeline/tests/test_contract_versioning.py \
+            pesaguard_backend_pipeline/tests/test_backward_compatibility.py
+
+      - name: Validate the compatibility tooling itself
+        run: pytest -v --tb=short pesaguard_backend_pipeline/tests/test_contract_diff.py
+
+  breaking-change-detection:
+    name: 4. Breaking-change detection
+    runs-on: ubuntu-latest
+    steps:
+      # The comparison needs history: a shallow checkout cannot read the base
+      # revision of a contract file.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pesaguard_backend_pipeline/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r pesaguard_backend_pipeline/requirements.txt
+          pip install "jsonschema==4.23.0"
+
+      - name: Resolve the comparison base
+        id: base
+        shell: bash
+        run: |
+          BASE_SHA="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            BASE_SHA="$(git rev-parse --verify --quiet HEAD~1 || true)"
+          fi
+          if [ -z "$BASE_SHA" ]; then
+            echo "compare=false" >> "$GITHUB_OUTPUT"
+            echo "No comparable base revision exists yet; skipping the diff for this revision."
+          else
+            echo "compare=true" >> "$GITHUB_OUTPUT"
+            echo "base=$BASE_SHA" >> "$GITHUB_OUTPUT"
+            echo "Comparing against $BASE_SHA"
+          fi
+
+      - name: Diff event, source, and OpenAPI contracts against the base
+        if: steps.base.outputs.compare == 'true'
+        shell: bash
+        env:
+          BASE_SHA: ${{ steps.base.outputs.base }}
+        run: |
+          OPENAPI_ARGS=""
+          if git cat-file -e "$BASE_SHA:docs/api/openapi.json" 2>/dev/null; then
+            git show "$BASE_SHA:docs/api/openapi.json" > /tmp/openapi-base.json
+            OPENAPI_ARGS="--old-openapi /tmp/openapi-base.json --new-openapi docs/api/openapi.json"
+          else
+            echo "No OpenAPI document at the base revision; comparing JSON Schemas only."
+          fi
+          # shellcheck disable=SC2086
+          python pesaguard_backend_pipeline/contract_diff.py \
+            --base-ref "$BASE_SHA" \
+            $OPENAPI_ARGS \
+            --json-report contract-diff-report.json
+
+      - name: Archive diff report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-diff-report
+          path: contract-diff-report.json
+          if-no-files-found: ignore
+
+  producer-contract-tests:
+    name: 5. Producer contract tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pesaguard_backend_pipeline/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r pesaguard_backend_pipeline/requirements.txt
+          pip install "jsonschema==4.23.0"
+
+      - name: Published envelope and topic routing
+        run: |
+          pytest -v --tb=short \
+            pesaguard_backend_pipeline/tests/test_contract_testing.py -k "not consumer"
+
+      - name: Provider (source) payload contracts
+        run: pytest -v --tb=short pesaguard_backend_pipeline/tests/test_source_contracts.py
+
+  consumer-contract-tests:
+    name: 6. Consumer contract tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pesaguard_backend_pipeline/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r pesaguard_backend_pipeline/requirements.txt
+          pip install "jsonschema==4.23.0"
+
+      - name: Envelope acceptance, dead-lettering, and idempotent persistence
+        run: |
+          pytest -v --tb=short \
+            pesaguard_backend_pipeline/tests/test_contract_testing.py -k "consumer"
+
+      - name: Audit and cross-version consumer compatibility
+        run: |
+          pytest -v --tb=short \
+            pesaguard_backend_pipeline/tests/test_audit_event_contract.py \
+            pesaguard_backend_pipeline/tests/test_backward_compatibility.py
+
+  integration-tests:
+    name: 7. Integration tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: pesaguard
+          POSTGRES_PASSWORD: pesaguard
+          POSTGRES_DB: pesaguard_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pesaguard_backend_pipeline/requirements.txt
+
+      - name: Install system build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libpq-dev gcc
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r pesaguard_backend_pipeline/requirements.txt
+          pip install "jsonschema==4.23.0"
+
+      - name: Compile Python modules
+        run: python -m compileall -q pesaguard_backend_pipeline
+
+      - name: Run the integration suite against real PostgreSQL and Redis
+        env:
+          DATABASE_URL: postgresql://pesaguard:pesaguard@localhost:5432/pesaguard_test
+          REDIS_URL: redis://localhost:6379/0
+          DARAJA_SHARED_SECRET: test_ci_secret_key_12345
+          PESAGUARD_ALLOW_UNRESTRICTED_WEBHOOK_SOURCE: 1
+          # Application startup rejects JWT secrets shorter than 32 bytes.
+          JWT_SECRET_KEY: test_ci_jwt_secret_key_12345_min32bytes
+        run: pytest -v --tb=short --durations=10
+
+  contract-gate:
+    name: 8. Contract gate
+    if: always()
+    needs:
+      - schema-linting
+      - schema-validation
+      - compatibility-checking
+      - breaking-change-detection
+      - producer-contract-tests
+      - consumer-contract-tests
+      - integration-tests
+    runs-on: ubuntu-latest
+    steps:
+      # Make this the single required status check in branch protection so that
+      # human review is only requested once every contract stage is green.
+      - name: Require every contract stage to have succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq .
+          if ! echo "$NEEDS" | jq -e 'all(.[]; .result == "success")' > /dev/null; then
+            echo "::error::One or more contract stages did not succeed."
+            exit 1
+          fi
+          echo "All contract stages succeeded."

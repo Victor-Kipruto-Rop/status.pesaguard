@@ -1,0 +1,29 @@
+# Review routing for PesaGuard contracts and the pipeline that guards them.
+#
+# GitHub requires every owner listed here to have write access to this
+# repository. The account below is the repository owner taken from the origin
+# remote. The responsible teams named in docs/architecture/CONTRACT_OWNERSHIP.md
+# (Payments & Ingestion, Data Platform, Reconciliation & Anomaly, Security &
+# Compliance, Platform Engineering) should replace it as soon as those GitHub
+# team handles exist, for example "@pesaguard/data-platform".
+
+# Fallback reviewer for every change not matched below.
+*                                                   @Victor-Kipruto-Rop
+
+# --- Contract definitions -------------------------------------------------
+# Schema changes are contract changes: they require owner review.
+/pesaguard_backend_pipeline/schemas/                @Victor-Kipruto-Rop
+/infra/redpanda/schemas/                            @Victor-Kipruto-Rop
+/infra/redpanda/topics.yaml                         @Victor-Kipruto-Rop
+/docs/api/openapi.json                              @Victor-Kipruto-Rop
+
+# --- Contract code and the pipeline that enforces it ----------------------
+/pesaguard_backend_pipeline/event_bus.py             @Victor-Kipruto-Rop
+/pesaguard_backend_pipeline/event_consumer.py        @Victor-Kipruto-Rop
+/pesaguard_backend_pipeline/topics.py                @Victor-Kipruto-Rop
+/pesaguard_backend_pipeline/schema_validation.py     @Victor-Kipruto-Rop
+/pesaguard_backend_pipeline/schema_compatibility.py  @Victor-Kipruto-Rop
+/pesaguard_backend_pipeline/contract_versioning.py   @Victor-Kipruto-Rop
+/pesaguard_backend_pipeline/contract_lint.py         @Victor-Kipruto-Rop
+/pesaguard_backend_pipeline/contract_diff.py         @Victor-Kipruto-Rop
+/.github/workflows/contracts.yml                     @Victor-Kipruto-Rop

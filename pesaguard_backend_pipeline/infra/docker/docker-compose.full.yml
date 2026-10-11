@@ -1,0 +1,141 @@
+version: "3.8"
+
+x-residency-env: &residency-env
+  DEPLOYMENT_REGION: ${DEPLOYMENT_REGION:?Set the approved provider deployment region}
+  BACKUP_REGION: ${BACKUP_REGION:?Set the approved backup region}
+  LOG_REGION: ${LOG_REGION:?Set the approved log region}
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      <<: *residency-env
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB must be set}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--maxmemory-policy", "noeviction"]
+    environment:
+      <<: *residency-env
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    restart: unless-stopped
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      <<: *residency-env
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: ${KAFKA_ADVERTISED_LISTENERS_FULL:?KAFKA_ADVERTISED_LISTENERS_FULL must be set}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 40s
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    restart: unless-stopped
+    environment:
+      <<: *residency-env
+      ZOOKEEPER_CLIENT_PORT: 2181
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_log:/var/lib/zookeeper/log
+    healthcheck:
+      test: ["CMD", "cub", "zk-ready", "localhost", "2181", "5"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  backend:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+    command: python pesaguard_backend_pipeline/app.py
+    restart: unless-stopped
+    env_file:
+      - ${PESAGUARD_COMPOSE_ENV_FILE:-../../.env}
+    environment:
+      <<: *residency-env
+      DATABASE_URL: ${DATABASE_URL_DOCKER:?DATABASE_URL_DOCKER must be set}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS_FULL:?KAFKA_BOOTSTRAP_SERVERS_FULL must be set}
+      REDIS_URL: ${REDIS_URL_DOCKER:?REDIS_URL_DOCKER must be set}
+      PESAGUARD_API_URL: ${PESAGUARD_API_URL:?PESAGUARD_API_URL must be set}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
+    ports:
+      - "127.0.0.1:5000:5000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/live', timeout=4).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  dashboard:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+    command: uvicorn pesaguard_backend_pipeline.fastapi_app:app --host 0.0.0.0 --port 5001
+    restart: unless-stopped
+    env_file:
+      - ${PESAGUARD_COMPOSE_ENV_FILE:-../../.env}
+    environment:
+      <<: *residency-env
+      DATABASE_URL: ${DATABASE_URL_DOCKER:?DATABASE_URL_DOCKER must be set}
+      REDIS_URL: ${REDIS_URL_DOCKER:?REDIS_URL_DOCKER must be set}
+      PESAGUARD_API_URL: ${PESAGUARD_API_URL:?PESAGUARD_API_URL must be set}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5001/live', timeout=4).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  redis_data:
+  kafka_data:
+  zookeeper_data:
+  zookeeper_log:

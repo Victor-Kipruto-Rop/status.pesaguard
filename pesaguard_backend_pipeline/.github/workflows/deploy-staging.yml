@@ -1,0 +1,108 @@
+name: Deploy to Staging
+
+on:
+  push:
+    branches: [ staging ]
+
+jobs:
+  test-and-deploy:
+    runs-on: ubuntu-latest
+    env:
+      RENDER_STAGING_DEPLOY_HOOK: ${{ secrets.RENDER_STAGING_DEPLOY_HOOK }}
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: pesaguard
+          POSTGRES_PASSWORD: pesaguard
+          POSTGRES_DB: pesaguard_staging
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y libpq-dev gcc
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          elif [ -f pesaguard_backend_pipeline/requirements.txt ]; then
+            pip install -r pesaguard_backend_pipeline/requirements.txt
+          else
+            pip install Flask==3.1.0 SQLAlchemy==2.0.38 psycopg2-binary==2.9.10 redis==5.2.1 rq==2.1.0 pytest==8.3.4 requests==2.32.3
+          fi
+
+      - name: Run backend integration tests
+        env:
+          PYTHONPATH: .
+          DATABASE_URL: postgresql://pesaguard:pesaguard@localhost:5432/pesaguard_staging
+          REDIS_URL: redis://localhost:6379/0
+          DARAJA_SHARED_SECRET: staging_ci_secret_key
+          PESAGUARD_ALLOW_UNRESTRICTED_WEBHOOK_SOURCE: 1
+        run: |
+          pytest -v --tb=short
+
+      - name: Trigger Staging Deployment (Render / Webhook / SSH)
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ env.RENDER_STAGING_DEPLOY_HOOK }}
+        run: |
+          if [ -n "$RENDER_DEPLOY_HOOK_URL" ]; then
+            echo "Triggering Render deployment webhook..."
+            curl -X POST "$RENDER_DEPLOY_HOOK_URL"
+          else
+            echo "Staging deployment check passed for commit ${{ github.sha }} (No deploy hook configured)."
+          fi
+
+      - name: Wait for Staging Health Check
+        if: ${{ env.RENDER_STAGING_DEPLOY_HOOK != '' }}
+        env:
+          STAGING_HEALTH_URL: ${{ secrets.STAGING_HEALTH_URL }}
+        run: |
+          if [ -z "$STAGING_HEALTH_URL" ]; then
+            echo "STAGING_HEALTH_URL must be configured when a staging deploy hook is used."
+            exit 1
+          fi
+          for attempt in $(seq 1 30); do
+            response=$(curl --fail --silent --show-error --max-time 10 "$STAGING_HEALTH_URL" || true)
+            if [ -n "$response" ] && python -c 'import json, sys; sys.exit(0 if json.load(sys.stdin).get("status") == "ok" else 1)' <<< "$response"; then
+              echo "Staging health check passed on attempt $attempt."
+              exit 0
+            fi
+            echo "Staging is not healthy yet (attempt $attempt/30)."
+            sleep 10
+          done
+          echo "Staging health check did not reach status=ok."
+          exit 1
+
+      - name: Notify Deployment Success
+        if: success()
+        run: |
+          echo "Staging deployment passed health checks for commit ${{ github.sha }} on branch staging."

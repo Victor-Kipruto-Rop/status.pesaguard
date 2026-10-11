@@ -105,6 +105,7 @@ def test_alerting_consumer_processes_discrepancy_messages():
 
 def test_reconciliation_job_publishes_discrepancies_to_topic(monkeypatch):
     published = []
+    closed = []
 
     class DummyProducer:
         def send(self, topic, key=None, value=None):
@@ -120,7 +121,7 @@ def test_reconciliation_job_publishes_discrepancies_to_topic(monkeypatch):
             return None
 
         def close(self, timeout=None):
-            return None
+            closed.append("producer")
 
     class DummyConsumer:
         """Poll-shaped consumer (kafka-python-ng contract) that yields one batch."""
@@ -140,19 +141,21 @@ def test_reconciliation_job_publishes_discrepancies_to_topic(monkeypatch):
                 )
                 return {("mpesa.transactions.raw", 0): [message]}
             # Stop the run loop on the second poll, after the batch was processed.
-            reconciliation_job._RUNNING = False
+            reconciliation_job._signal_handler(reconciliation_job.signal.SIGTERM, None)
             return {}
 
         def commit(self, offsets=None):
             return None
 
         def close(self):
-            return None
+            closed.append("consumer")
 
-    monkeypatch.setattr(reconciliation_job, "KafkaConsumer", lambda *args, **kwargs: DummyConsumer())
-    monkeypatch.setattr(reconciliation_job, "KafkaProducer", lambda *args, **kwargs: DummyProducer())
+    consumer = DummyConsumer()
+    producer = DummyProducer()
+    monkeypatch.setattr(reconciliation_job, "KafkaConsumer", lambda *args, **kwargs: consumer)
+    monkeypatch.setattr(reconciliation_job, "KafkaProducer", lambda *args, **kwargs: producer)
     monkeypatch.setattr(reconciliation_job, "ConnectorRegistry", type("DummyRegistry", (), {"from_env": staticmethod(lambda: type("Dummy", (), {"get_connector": lambda self, tenant_id: None})())}))
-    monkeypatch.setattr(reconciliation_job, "check_for_anomalies", lambda event, seen: ["missing_payment"])
+    monkeypatch.setattr(reconciliation_job, "check_for_anomalies", lambda event, seen, tenant_settings=None: ["missing_payment"])
     monkeypatch.setattr(reconciliation_job, "_RUNNING", True)
 
     # Persist reconciliation outcomes into an isolated database so the audit
@@ -175,4 +178,24 @@ def test_reconciliation_job_publishes_discrepancies_to_topic(monkeypatch):
     reconciliation_job.run()
 
     assert any(topic == reconciliation_job.TOPIC_DISCREPANCIES for topic, _ in published)
+    assert closed == ["consumer", "producer"]
+    assert reconciliation_job._RUNNING is False
     engine.dispose()
+
+
+def test_reconciliation_shutdown_closes_producer_when_consumer_close_fails(caplog):
+    closed = []
+
+    class Consumer:
+        def close(self):
+            closed.append("consumer")
+            raise OSError("consumer close failed")
+
+    class Producer:
+        def close(self, timeout=None):
+            closed.append(("producer", timeout))
+
+    reconciliation_job._close_worker_resources(Consumer(), Producer())
+
+    assert closed == ["consumer", ("producer", 5)]
+    assert "consumer close failed" in caplog.text

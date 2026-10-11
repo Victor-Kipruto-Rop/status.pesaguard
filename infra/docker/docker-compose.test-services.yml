@@ -1,0 +1,62 @@
+# Minimal data-services stack for running the PesaGuard test suite against
+# real PostgreSQL / Redis / Kafka (Redpanda). No application images are built;
+# this exists purely so the opt-in integration tests can exercise real backends
+# instead of SQLite / fakes.
+#
+#   docker compose -f infra/docker/docker-compose.test-services.yml up -d
+#   # wait for health, then run the suite with the env vars printed below
+#   docker compose -f infra/docker/docker-compose.test-services.yml down -v
+#
+# Ports (host): postgres 5433, redis 6379, kafka 19092.
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: pesaguard-test-postgres
+    environment:
+      POSTGRES_USER: pesaguard
+      POSTGRES_PASSWORD: pesaguard
+      POSTGRES_DB: pesaguard_test
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pesaguard -d pesaguard_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    tmpfs:
+      - /var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    container_name: pesaguard-test-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v25.2.2
+    container_name: pesaguard-test-redpanda
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp=1
+      - --memory=1G
+      - --reserve-memory=0M
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://localhost:19092
+    ports:
+      - "19092:9092"
+      - "9644:9644"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30

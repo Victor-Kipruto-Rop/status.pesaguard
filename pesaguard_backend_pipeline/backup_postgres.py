@@ -327,6 +327,9 @@ def _cleanup_old_backups() -> None:
             if file_time < cutoff:
                 logger.info("Pruning expired backup: %s", backup_file)
                 backup_file.unlink()
+                manifest = _manifest_path(backup_file)
+                if manifest.exists():
+                    manifest.unlink()
         except Exception as e:
             logger.warning("Could not parse timestamp for backup cleanup on %s: %s", backup_file, e)
 
@@ -509,4 +512,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

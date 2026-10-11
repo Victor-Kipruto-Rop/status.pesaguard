@@ -1,0 +1,565 @@
+openapi: 3.1.0
+info:
+  title: PesaGuard Private Internal API
+  version: 1.0.0
+  description: |
+    Private service-to-service contract for the Developer Platform and Core API.
+    This specification is an internal artifact and must not be published with
+    customer-facing Developer Platform documentation. The configured service
+    authentication mode determines whether HMAC, RS256 service JWT, or both are
+    required. Network location alone never authorizes a request.
+servers:
+  - url: https://core-api.internal
+    description: Private Core API service address
+paths:
+  /internal/v1/tenants/resolve:
+    get:
+      operationId: resolveDeveloperTenant
+      summary: Resolve the canonical Core tenant partition
+      description: |
+        Requires exactly one of each UUID query parameter and no request body.
+        The response contains only the derived tenant ID. HMAC signs the exact
+        raw request target, including the raw query string, and an empty body.
+      security:
+        - ServiceJwt: []
+        - HmacSignature: []
+        - ServiceJwt: []
+          HmacSignature: []
+      x-pesaguard-required-service-scope: service:tenant:read
+      x-pesaguard-authentication-modes:
+        HMAC_ONLY: HmacSignature
+        DUAL_REQUIRED: ServiceJwt and HmacSignature
+        JWT_PRIMARY: ServiceJwt
+      x-pesaguard-rate-limit:
+        identity: authenticated service subject and operation, in addition to the global IP limiter
+        defaultPerMinute: 120
+        configuration: PESAGUARD_INTERNAL_TENANT_RESOLVE_LIMIT_PER_MINUTE
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/Traceparent"
+        - $ref: "#/components/parameters/HmacTimestamp"
+        - name: organization_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: project_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: environment_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Canonical tenant partition resolved.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tenant_id]
+                properties:
+                  tenant_id:
+                    type: string
+                    pattern: "^dp_[0-9a-f]{64}$"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/AuthenticationFailed"
+        "403":
+          $ref: "#/components/responses/InsufficientScope"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /internal/v1/developer-api-keys/sync:
+    post:
+      operationId: synchronizeDeveloperApiKey
+      summary: Synchronize a Developer Platform API-key digest
+      description: |
+        Synchronizes key metadata and a one-way verification digest; the raw
+        API-key secret must never be sent. HMAC signs the exact raw request
+        body. Idempotency is scoped to service subject, operation, key ID, and
+        Idempotency-Key. Matching retries replay the original response; a
+        different request with the same key returns 409. Records expire after
+        24 hours. The caller uses a 3-second connect timeout and 5-second
+        request timeout.
+      security:
+        - ServiceJwt: []
+        - HmacSignature: []
+        - ServiceJwt: []
+          HmacSignature: []
+      x-pesaguard-required-service-scope: service:sync
+      x-pesaguard-authentication-modes:
+        HMAC_ONLY: HmacSignature
+        DUAL_REQUIRED: ServiceJwt and HmacSignature
+        JWT_PRIMARY: ServiceJwt
+      x-pesaguard-rate-limit:
+        identity: authenticated service subject and operation, in addition to the global IP limiter
+        defaultPerMinute: 600
+        configuration: PESAGUARD_INTERNAL_KEY_SYNC_LIMIT_PER_MINUTE
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/Traceparent"
+        - $ref: "#/components/parameters/HmacTimestamp"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KeySyncRequest"
+      responses:
+        "200":
+          description: Synchronized, unchanged, or idempotently replayed.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    required: [status, source_version]
+                    properties:
+                      status:
+                        const: synchronized
+                      source_version:
+                        type: integer
+                  - type: object
+                    required: [status, source_version]
+                    properties:
+                      status:
+                        const: unchanged
+                      source_version:
+                        type: integer
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/AuthenticationFailed"
+        "403":
+          $ref: "#/components/responses/InsufficientScope"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /internal/v1/keys/{key_id}/revoke:
+    post:
+      operationId: revokeDeveloperApiKey
+      summary: Terminally revoke a synchronized API key
+      description: |
+        Requires a strictly newer source_version and a tenant/context match
+        against the key's persisted organization, project, and environment.
+        Revoke is terminal. Matching Idempotency-Key retries replay the
+        original result for 24 hours; changed requests conflict.
+      security:
+        - ServiceJwt: []
+        - HmacSignature: []
+        - ServiceJwt: []
+          HmacSignature: []
+      x-pesaguard-required-service-scope: service:key:revoke
+      x-pesaguard-authentication-modes:
+        HMAC_ONLY: HmacSignature
+        DUAL_REQUIRED: ServiceJwt and HmacSignature
+        JWT_PRIMARY: ServiceJwt
+      x-pesaguard-rate-limit:
+        identity: authenticated service subject and operation, in addition to the global IP limiter
+        defaultPerMinute: 120
+        configuration: PESAGUARD_INTERNAL_KEY_LIFECYCLE_LIMIT_PER_MINUTE
+      parameters:
+        - $ref: "#/components/parameters/KeyId"
+        - $ref: "#/components/parameters/RequestId"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/Traceparent"
+        - $ref: "#/components/parameters/HmacTimestamp"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KeyLifecycleRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/KeyRevoked"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/AuthenticationFailed"
+        "403":
+          $ref: "#/components/responses/InsufficientScope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /internal/v1/keys/{key_id}/suspend:
+    post:
+      operationId: suspendDeveloperApiKey
+      summary: Temporarily suspend a synchronized API key
+      description: |
+        Requires a strictly newer source_version and a tenant/context match
+        against the key's persisted organization, project, and environment.
+        Suspension is nonterminal; a later authorized synchronization with a
+        newer source_version may reactivate the key. Idempotency behavior is
+        the same as the revoke operation.
+      security:
+        - ServiceJwt: []
+        - HmacSignature: []
+        - ServiceJwt: []
+          HmacSignature: []
+      x-pesaguard-required-service-scope: service:key:suspend
+      x-pesaguard-authentication-modes:
+        HMAC_ONLY: HmacSignature
+        DUAL_REQUIRED: ServiceJwt and HmacSignature
+        JWT_PRIMARY: ServiceJwt
+      x-pesaguard-rate-limit:
+        identity: authenticated service subject and operation, in addition to the global IP limiter
+        defaultPerMinute: 120
+        configuration: PESAGUARD_INTERNAL_KEY_LIFECYCLE_LIMIT_PER_MINUTE
+      parameters:
+        - $ref: "#/components/parameters/KeyId"
+        - $ref: "#/components/parameters/RequestId"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/Traceparent"
+        - $ref: "#/components/parameters/HmacTimestamp"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KeyLifecycleRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/KeySuspended"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/AuthenticationFailed"
+        "403":
+          $ref: "#/components/responses/InsufficientScope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /internal/v1/service-jwt/jwks.json:
+    get:
+      servers:
+        - url: https://developer-platform.internal
+          description: Private Developer Platform service address
+      operationId: readServiceJwtJwks
+      summary: Retrieve public verification keys for service JWTs
+      description: |
+        Returns public RS256 verification keys only. The endpoint is intended
+        for private service-to-service access; it does not accept signing
+        credentials and must not be published through customer documentation.
+        Responses may be cached for at most 60 seconds.
+      security: []
+      responses:
+        "200":
+          description: Current and overlapping public signing keys.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: public, max-age=60
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Jwks"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+components:
+  securitySchemes:
+    ServiceJwt:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        RS256 JWT with issuer developer-platform, audience core-api,
+        subject svc-developer-platform, kid, jti, iat, exp, and exactly one
+        route-specific service scope. Maximum lifetime is 300 seconds; Core
+        accepts 30 seconds of clock skew and atomically consumes jti for
+        mutating operations using shared Redis.
+    HmacSignature:
+      type: apiKey
+      in: header
+      name: X-PesaGuard-Signature
+      description: |
+        Lowercase hex HMAC-SHA256 over UTF-8 bytes:
+        timestamp + LF + HTTP method + LF + exact raw request target + LF +
+        exact raw body. Pair with X-PesaGuard-Timestamp, a Unix-seconds value
+        accepted for at most 300 seconds of skew. This channel remains enabled
+        during the staged JWT migration.
+  parameters:
+    RequestId:
+      name: X-Request-ID
+      in: header
+      required: false
+      schema:
+        type: string
+        maxLength: 128
+    CorrelationId:
+      name: X-Correlation-ID
+      in: header
+      required: false
+      schema:
+        type: string
+        maxLength: 128
+    Traceparent:
+      name: traceparent
+      in: header
+      required: false
+      schema:
+        type: string
+        maxLength: 128
+    HmacTimestamp:
+      name: X-PesaGuard-Timestamp
+      in: header
+      required: false
+      description: Required when HMAC authentication is required by the configured service-auth mode.
+      schema:
+        type: string
+        pattern: "^[0-9]{1,12}$"
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+        pattern: "^[\\x21-\\x7E]+$"
+    KeyId:
+      name: key_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  schemas:
+    KeySyncRequest:
+      type: object
+      required:
+        - key_id
+        - tenant_id
+        - organization_id
+        - project_id
+        - environment_id
+        - source_version
+        - key_prefix
+        - scopes
+        - ip_allowlist
+        - status
+      properties:
+        key_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          pattern: "^dp_[0-9a-f]{64}$"
+        organization_id:
+          type: string
+          format: uuid
+        project_id:
+          type: string
+          format: uuid
+        environment_id:
+          type: string
+          format: uuid
+        source_version:
+          type: integer
+          minimum: 0
+        key_hash:
+          type: [string, "null"]
+          pattern: "^[0-9a-f]{64}$"
+          description: SHA-256 verification digest; never a raw API-key secret.
+        key_prefix:
+          type: string
+          pattern: "^pgk_"
+          maxLength: 32
+        scopes:
+          type: array
+          items:
+            type: string
+        ip_allowlist:
+          type: array
+          description: IP addresses or CIDR networks allowed to use the key.
+          items:
+            type: string
+        status:
+          type: string
+          enum: [ACTIVE, SUSPENDED, REVOKED, COMPROMISED, EXPIRED]
+        expires_at:
+          type: [string, "null"]
+          format: date-time
+    KeyLifecycleRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - organization_id
+        - project_id
+        - environment_id
+        - tenant_id
+        - source_version
+      properties:
+        organization_id:
+          type: string
+          format: uuid
+        project_id:
+          type: string
+          format: uuid
+        environment_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          pattern: "^dp_[0-9a-f]{64}$"
+        source_version:
+          type: integer
+          minimum: 1
+    Jwks:
+      type: object
+      required: [keys]
+      properties:
+        keys:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items:
+            type: object
+            required: [kty, use, alg, kid, n, e]
+            properties:
+              kty:
+                const: RSA
+              use:
+                const: sig
+              alg:
+                const: RS256
+              kid:
+                type: string
+                maxLength: 128
+              n:
+                type: string
+              e:
+                type: string
+            not:
+              anyOf:
+                - required: [d]
+                - required: [p]
+                - required: [q]
+                - required: [dp]
+                - required: [dq]
+                - required: [qi]
+    Error:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+    KeyLifecycleResponse:
+      type: object
+      required: [status, key_id, source_version, active]
+      properties:
+        status:
+          type: string
+          enum: [revoked, suspended]
+        key_id:
+          type: string
+          format: uuid
+        source_version:
+          type: integer
+        active:
+          const: false
+  responses:
+    InvalidRequest:
+      description: Invalid request, schema, or idempotency header.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    AuthenticationFailed:
+      description: Missing, invalid, expired, or replayed service authentication.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InsufficientScope:
+      description: The authenticated service lacks the required operation scope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: Tenant binding, source version, lifecycle state, or idempotency conflict.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Key identity does not exist in Core.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RateLimited:
+      description: Internal service request rate exceeded.
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ServiceUnavailable:
+      description: Authentication dependency or Core persistence is unavailable.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    KeyRevoked:
+      description: Key is terminally revoked.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/KeyLifecycleResponse"
+              - type: object
+                properties:
+                  status:
+                    const: revoked
+    KeySuspended:
+      description: Key is suspended and can be reactivated by a later sync.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/KeyLifecycleResponse"
+              - type: object
+                properties:
+                  status:
+                    const: suspended

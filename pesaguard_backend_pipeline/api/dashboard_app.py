@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
-from environment import required_env
+from environment import required_env, runtime_environment
 
 import csv
+import hashlib
+import hmac
 import io
+import ipaddress
 import json
 import logging
 import math
 import os
 import threading
 import time
+import uuid
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -22,32 +26,55 @@ from typing import Any, Dict, List, Optional
 from flask import Flask, Response, g, has_request_context, jsonify, request, send_file
 from werkzeug.exceptions import BadRequest, HTTPException
 
+from api_governance import (
+    ApiContractService,
+    ApiDeprecationService,
+    ApiVersioningService,
+    OpenAPISpecService,
+    standardize_error_response,
+)
 from action_audit import ActionAuditRecord, AuditOutboxEntry, Base as AuditBase, persist_audit_event
-from auth_rbac import AuthenticationUnavailable, AuthRBAC, TENANT_ID_PATTERN, assert_auth_configuration, auth_required, configure_revocation_store, get_current_user, parse_bearer_token, require_auth
+from auth_rbac import AuthenticationUnavailable, AuthRBAC, TENANT_ID_PATTERN, assert_auth_configuration, auth_required, configure_revocation_store, developer_scope_tenant_id, get_current_user, parse_bearer_token, require_auth
 from batch_ingestion import BatchImportError, BatchImportService
 from data_catalog import CatalogError, load_catalog
 from event_store import EventStore
-from export_routes import bp as export_bp
+from export_routes import bp as export_bp, sanitize_csv_cell
 from ingestion import IngestionService
-from health import build_health_payload
-from logging_utils import configure_logging, get_correlation_id, set_correlation_id
+from health import build_health_payload, sanitize_health_payload
+from public_status import create_public_status_blueprint
+from logging_utils import (
+    bind_observability_context,
+    clear_observability_context,
+    configure_logging,
+    get_correlation_id,
+    get_observability_context,
+    set_correlation_id,
+)
 from metrics import build_metrics_payload, record_security_event
+from prometheus_auth import prometheus_token_matches
 from models import Base, DeadLetter, Discrepancy, ImportJob, LineageRecord, MerchantMetric, Transaction, UserAccount
 from provider_management_service import ProviderManagementService
-from rate_limiter import RateLimiter
+from rate_limiter import RateLimiter, redis_rate_limiting_enabled
 from runtime_config import RuntimeConfig
 from security_helpers import get_client_ip, is_allowed_source, is_payload_within_limit
-from sqlalchemy import create_engine, func, text
-from sqlalchemy.exc import DBAPIError, DisconnectionError, InterfaceError, InvalidRequestError, OperationalError, SQLAlchemyError
+from request_context import RequestContextService
+from version_service import VersionService
+from sqlalchemy import func, text
+from sqlalchemy.exc import DBAPIError, DisconnectionError, IntegrityError, InterfaceError, InvalidRequestError, OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.sql.selectable import SelectBase
 from sqlalchemy.sql.elements import TextClause
-from sqlalchemy.pool import NullPool, StaticPool
 from tenant_org_routes import bp as tenant_org_bp
 from tenant_settings import TenantSettingsStore
+from transaction_routes import create_transaction_blueprint
+from database_service import create_database_engine
 
 configure_logging()
 logger = logging.getLogger("pesaguard.dashboard")
+api_versioning_service = ApiVersioningService()
+api_deprecation_service = ApiDeprecationService()
+api_contract_service = ApiContractService()
+openapi_spec_service = OpenAPISpecService()
 
 
 def _env_int(name: str, default: int) -> int:
@@ -68,6 +95,26 @@ app = Flask(__name__)
 app.register_blueprint(tenant_org_bp)
 runtime_config = RuntimeConfig.from_env()
 PUBLIC_API_URL = runtime_config.public_api_url
+DEFAULT_CORS_ALLOWED_ORIGINS = ",".join((
+    PUBLIC_API_URL,
+    "https://app.pesaguard.co.ke",
+    "https://dashboard.pesaguard.victorkipruto.com",
+    "https://docs.pesaguard.co.ke",
+    "https://developers.pesaguard.co.ke",
+    "https://pesaguard.co.ke",
+    "https://public.pesaguard.victorkipruto.com",
+    "https://status.pesaguard.co.ke",
+    "https://status.pesaguard.victorkipruto.com",
+))
+DEFAULT_CORS_ALLOWED_HEADERS = (
+    "Authorization, Content-Type, Idempotency-Key, traceparent, "
+    "X-Correlation-ID, X-Request-ID"
+)
+DEFAULT_CORS_EXPOSED_HEADERS = (
+    "Retry-After, X-Correlation-ID, X-RateLimit-Limit, "
+    "X-RateLimit-Remaining, X-RateLimit-Reset, X-Request-ID, "
+    "X-API-Version, Deprecation, Sunset"
+)
 assert_auth_configuration()
 app.config["MAX_CONTENT_LENGTH"] = runtime_config.api_body_limit
 app.config["PESAGUARD_WEBHOOK_MAX_BODY_BYTES"] = runtime_config.webhook_body_limit
@@ -88,7 +135,70 @@ def create_app() -> Flask:
 api_rate_limiter = RateLimiter()
 api_rate_limiter.set_limits(runtime_config.api_rate_limit_per_minute)
 
-_environment = os.getenv("FLASK_ENV", os.getenv("ENVIRONMENT", os.getenv("PESAGUARD_ENV", "development"))).lower()
+_environment = runtime_environment()
+_internal_service_rate_limits = {
+    "resolve": ("PESAGUARD_INTERNAL_TENANT_RESOLVE_LIMIT_PER_MINUTE", 120),
+    "sync": ("PESAGUARD_INTERNAL_KEY_SYNC_LIMIT_PER_MINUTE", 600),
+    "revoke": ("PESAGUARD_INTERNAL_KEY_LIFECYCLE_LIMIT_PER_MINUTE", 120),
+    "suspend": ("PESAGUARD_INTERNAL_KEY_LIFECYCLE_LIMIT_PER_MINUTE", 120),
+}
+
+
+def _internal_limit_value(operation: str) -> int:
+    setting, default = _internal_service_rate_limits[operation]
+    raw_value = os.getenv(setting, str(default))
+    try:
+        value = int(raw_value)
+    except ValueError as error:
+        raise RuntimeError(f"{setting} must be a positive integer") from error
+    if not 1 <= value <= 100_000:
+        raise RuntimeError(f"{setting} must be between 1 and 100000")
+    return value
+
+
+internal_service_rate_limiters: dict[str, RateLimiter] = {}
+for _operation in _internal_service_rate_limits:
+    _internal_limiter = RateLimiter(fail_closed=True)
+    _internal_limiter.set_limits(_internal_limit_value(_operation))
+    internal_service_rate_limiters[_operation] = _internal_limiter
+
+
+def _internal_service_rate_limit_response(operation: str, service_claims):
+    if _environment in {"prod", "production"} and not redis_rate_limiting_enabled():
+        logger.error("Distributed rate limiting is not configured for internal operation %s", operation)
+        return jsonify({
+            "error": "rate_limiter_unavailable",
+            "message": "Internal service protection is temporarily unavailable.",
+        }), 503
+
+    subject = (
+        service_claims.get("sub")
+        if isinstance(service_claims, dict)
+        else "svc-developer-platform-hmac"
+    )
+    allowed, status = internal_service_rate_limiters[operation].is_allowed(
+        f"service:{subject}",
+        f"internal_v1_{operation}",
+    )
+    if status.get("unavailable"):
+        logger.error("Distributed rate limiter unavailable for internal operation %s", operation)
+        return jsonify({
+            "error": "rate_limiter_unavailable",
+            "message": "Internal service protection is temporarily unavailable.",
+        }), 503
+    if not allowed:
+        record_security_event()
+        retry_after = max(1, int(status.get("retry_after", 1)))
+        response = jsonify({
+            "error": "rate_limit_exceeded",
+            "message": "Internal service request rate exceeded.",
+        })
+        response.status_code = 429
+        response.headers["Retry-After"] = str(retry_after)
+        return response
+    return None
+
+
 if not os.getenv("DATABASE_URL") and _environment not in {"development", "dev", "test", "testing"}:
     raise RuntimeError("DATABASE_URL must be configured outside development and test environments")
 DATABASE_URL = required_env("DATABASE_URL")
@@ -97,21 +207,7 @@ READ_REPLICA_DATABASE_URL = os.getenv("READ_REPLICA_DATABASE_URL")
 engine = None
 
 def _create_engine(database_url: str, **kwargs):
-    if database_url.startswith("sqlite"):
-        kwargs["connect_args"] = {"check_same_thread": False}
-        if database_url in {"sqlite://", "sqlite:///:memory:"}:
-            kwargs["poolclass"] = StaticPool
-        else:
-            kwargs.setdefault("poolclass", NullPool)
-        engine = create_engine(database_url, **kwargs)
-    else:
-        engine = create_engine(database_url, **kwargs)
-    try:
-        from metrics import instrument_engine_query_timing
-        instrument_engine_query_timing(engine)
-    except Exception:
-        pass
-    return engine
+    return create_database_engine(database_url, **kwargs)
 
 
 if DATABASE_URL.startswith("sqlite"):
@@ -238,10 +334,11 @@ class _ReadOnlySession(Session):
     def execute(self, statement, params=None, *, execution_options=None, bind_arguments=None, **kwargs):
         if not self._is_read_statement(statement):
             raise InvalidRequestError("Read-only sessions only support SELECT statements")
+        read_options = {**(execution_options or {}), "autoflush": False}
         return super().execute(
             statement,
             params,
-            execution_options=execution_options,
+            execution_options=read_options,
             bind_arguments=bind_arguments,
             **kwargs,
         )
@@ -362,13 +459,16 @@ class _SessionLocalCompat:
             if engine_target is replica_engine:
                 factory_kwargs["fallback_bind"] = primary_engine
         factory = sessionmaker(**factory_kwargs)
-        return factory()
+        session = factory()
+        _bind_developer_key_query_scope(session)
+        return session
 
 
 SessionLocal = _SessionLocalCompat()
 configure_revocation_store(primary_engine, sessionmaker(bind=primary_engine, expire_on_commit=False))
 provider_management = ProviderManagementService(SessionLocal)
-batch_import_service = BatchImportService(IngestionService(EventStore(database_url=DATABASE_URL)))
+transaction_event_store = EventStore(database_url=DATABASE_URL)
+batch_import_service = BatchImportService(IngestionService(transaction_event_store))
 data_catalog = load_catalog()
 from pesaguard_backend_pipeline.communications.routes import create_webhook_blueprint
 from pesaguard_backend_pipeline.communications.product_routes import create_product_blueprint
@@ -395,6 +495,9 @@ app.register_blueprint(
         current_user_fn=get_current_user,
     )
 )
+app.register_blueprint(
+    create_public_status_blueprint(SessionLocal, build_health_payload)
+)
 
 
 def _open_session(read_only: Optional[bool] = None):
@@ -403,6 +506,46 @@ def _open_session(read_only: Optional[bool] = None):
         return SessionLocal(read_only=read_only)
     except TypeError:
         return SessionLocal()
+
+
+app.register_blueprint(
+    create_transaction_blueprint(
+        transaction_event_store,
+        lambda: _open_session(read_only=True),
+        lambda: _open_session(read_only=False),
+    )
+)
+
+
+def _bind_developer_key_query_scope(session: Session) -> None:
+    """Attach project/environment tenant filtering only to this API-key request's session."""
+    if not has_request_context():
+        return
+    user = getattr(g, "user", None)
+    if user is None or getattr(user, "principal_type", "") != "developer_api_key":
+        return
+
+    from sqlalchemy import event
+    from sqlalchemy.orm import with_loader_criteria
+
+    tenant_id = user.tenant_id
+    scoped_models = [
+        mapper.class_ for mapper in Base.registry.mappers
+        if hasattr(mapper.class_, "tenant_id")
+    ]
+
+    @event.listens_for(session, "do_orm_execute")
+    def apply_tenant_scope(execute_state):
+        statement = execute_state.statement
+        for model in scoped_models:
+            statement = statement.options(
+                with_loader_criteria(
+                    model,
+                    lambda entity, tenant_id=tenant_id: entity.tenant_id == tenant_id,
+                    include_aliases=True,
+                )
+            )
+        execute_state.statement = statement
 
 
 def _current_tenant_id() -> Optional[str]:
@@ -892,12 +1035,59 @@ def provider_health(provider_id: str):
 
 @app.before_request
 def establish_correlation_context():
-    set_correlation_id(request.headers.get("X-Correlation-ID") or request.headers.get("X-Request-ID") or "")
+    clear_observability_context()
+    context = RequestContextService.create(request.headers)
+    set_correlation_id(context.correlation_id)
+    bind_observability_context(**context.as_dict())
+
+
+@app.before_request
+def enforce_supported_api_version():
+    try:
+        api_versioning_service.validate_path(request.path)
+    except ValueError as exc:
+        return jsonify({"error": "unsupported_api_version", "message": str(exc)}), 400
+
+
+def _error_instance_path() -> str:
+    """Return a non-identifying RFC 9457 ``instance`` value for error bodies.
+
+    Echoing ``request.path`` verbatim would leak caller-supplied resource and
+    tenant identifiers (e.g. ``/v1/customers/tenant-b/transactions/tx-b-secret``)
+    into error responses -- an information-exposure / existence-oracle risk on a
+    financial API (PesaGuard Rule #18). When a route matched, use its URL rule
+    template (placeholders such as ``<tenant_id>``/``<trans_id>``) so the error
+    identifies *which endpoint* failed without disclosing *which resource* was
+    requested. Fall back to the raw path only when no rule matched (e.g. 404s).
+    """
+    try:
+        url_rule = getattr(request, "url_rule", None)
+    except RuntimeError:  # outside request context (defensive)
+        return ""
+    if url_rule is not None and getattr(url_rule, "rule", None):
+        return str(url_rule.rule)
+    return request.path
 
 
 @app.after_request
 def inject_correlation_id(response: Response) -> Response:
     response.headers["X-Correlation-ID"] = get_correlation_id()
+    context = get_observability_context()
+    if context.get("request_id"):
+        response.headers["X-Request-ID"] = context["request_id"]
+    response = standardize_error_response(
+        response,
+        instance=_error_instance_path(),
+        request_id=context.get("request_id"),
+        json_dumps=app.json.dumps,
+    )
+    api_versioning_service.apply_response_headers(response.headers, request.path)
+    response_version = api_versioning_service.version_for_path(request.path)
+    api_deprecation_service.apply_response_headers(response.headers, response_version)
+    if context.get("trace_id"):
+        response.headers["X-Trace-ID"] = context["trace_id"]
+    if context.get("traceparent"):
+        response.headers["traceparent"] = context["traceparent"]
     if request.method in {"POST", "PUT", "PATCH", "DELETE"} and response.status_code < 400:
         try:
             consistency_seconds = max(0, int(os.getenv("PESAGUARD_READ_AFTER_WRITE_SECONDS", "5")))
@@ -913,6 +1103,11 @@ def inject_correlation_id(response: Response) -> Response:
                 secure=request.is_secure,
             )
     return response
+
+
+@app.teardown_request
+def clear_dashboard_observability_context(_error=None):
+    clear_observability_context()
 
 
 def _ensure_test_tables() -> None:
@@ -935,7 +1130,9 @@ def enforce_api_security():
     """Enforce payload size checks, strict IP security, distributed rate limiting, and RBAC."""
     if request.method == "OPTIONS":
         allowed_origins = {
-            origin.strip() for origin in os.getenv("PESAGUARD_CORS_ALLOWED_ORIGINS", PUBLIC_API_URL).split(",")
+            origin.strip() for origin in os.getenv(
+                "PESAGUARD_CORS_ALLOWED_ORIGINS", DEFAULT_CORS_ALLOWED_ORIGINS
+            ).split(",")
             if origin.strip() and origin.strip() != "*"
         }
         origin = request.headers.get("Origin")
@@ -969,6 +1166,12 @@ def enforce_api_security():
     client_identity = client_ip
     auth_header = request.headers.get("Authorization", "")
     token = _bearer_token(auth_header)
+    api_key = request.headers.get("X-API-Key", "").strip()
+    if token and token.startswith("pgk_"):
+        if api_key:
+            return jsonify({"error": "ambiguous_authentication", "message": "Use either bearer or API-key authentication, not both."}), 400
+        api_key = token
+        token = None
     user = getattr(g, "user", None)
     if token and user is None:
         try:
@@ -979,13 +1182,85 @@ def enforce_api_security():
                 "error": "authentication_unavailable",
                 "message": "Authentication state is temporarily unavailable.",
             }), 503
-    if _api_auth_required():
-        if not token:
+    if token and api_key:
+        return jsonify({"error": "ambiguous_authentication", "message": "Use either bearer or API-key authentication, not both."}), 400
+    if api_key and user is None:
+        try:
+            user = AuthRBAC.verify_api_key(api_key)
+        except AuthenticationUnavailable:
             record_security_event()
-            return jsonify({"error": "authentication_failed", "message": "Valid bearer authentication is required."}), 401
+            return jsonify({
+                "error": "authentication_unavailable",
+                "message": "API-key authentication state is temporarily unavailable.",
+            }), 503
+        if user is None:
+            record_security_event()
+            return jsonify({"error": "authentication_failed", "message": "API key is invalid, expired, or revoked."}), 401
+        g.developer_api_key = getattr(user, "principal_type", "") == "developer_api_key"
+        if g.developer_api_key:
+            if user.api_key_ip_allowlist:
+                try:
+                    client_ip = ipaddress.ip_address(get_client_ip(request))
+                    permitted = any(
+                        client_ip in ipaddress.ip_network(network, strict=False)
+                        for network in user.api_key_ip_allowlist
+                    )
+                except ValueError:
+                    permitted = False
+                if not permitted:
+                    record_security_event()
+                    return jsonify({"error": "ip_not_allowed", "message": "This API key is not allowed from this IP address."}), 403
+            allowed_endpoints = {
+                "list_providers", "providers", "get_provider", "provider_detail",
+                "provider_connection", "provider_health", "get_settings", "update_settings",
+                "create_import", "get_import", "merchant_metrics", "transaction_lineage",
+                "catalog_datasets", "catalog_dataset", "operations_outbox",
+                "replay_dead_letter", "discrepancies", "activity_feed", "assignment_queue",
+                "resolve_discrepancy", "bulk_resolve_discrepancies", "save_notes",
+                "assign_discrepancy", "analytics_sla_metrics", "analytics_resolution_times",
+                "analytics_operator_stats", "export_discrepancies_csv",
+                "analytics_incident_trends", "reconciliation_report",
+                "bulk_assign_incidents", "search_incidents",
+            }
+            if request.endpoint not in allowed_endpoints:
+                record_security_event()
+                return jsonify({
+                    "error": "project_environment_scope_required",
+                    "message": "This endpoint is not enabled for project/environment-scoped API keys.",
+                }), 403
+            requested_tenants = [
+                request.headers.get("X-Tenant-ID"),
+                request.args.get("tenant"),
+                request.args.get("tenant_id"),
+                (request.view_args or {}).get("tenant_id"),
+                (request.get_json(silent=True) or {}).get("tenant_id")
+                if request.is_json else None,
+                request.form.get("tenant_id"),
+            ]
+            if any(value and value != user.tenant_id for value in requested_tenants):
+                record_security_event()
+                return jsonify({"error": "tenant_access_denied", "message": "The API key is bound to another tenant scope."}), 403
+            g.user = user
+    internal_key_sync = request.path == "/internal/v1/developer-api-keys/sync"
+    internal_tenant_resolve = request.path == "/internal/v1/tenants/resolve"
+    internal_key_lifecycle = bool(
+        re.fullmatch(r"/internal/v1/keys/[^/]+/(?:revoke|suspend)", request.path)
+    )
+    if (
+        _api_auth_required()
+        and not request.path.startswith("/public/status")
+        and not internal_key_sync
+        and not internal_tenant_resolve
+        and not internal_key_lifecycle
+    ):
+        if not token and not api_key:
+            record_security_event()
+            return jsonify({"error": "authentication_failed", "message": "Bearer or API-key authentication is required."}), 401
         if not user:
             record_security_event()
-            return jsonify({"error": "authentication_failed", "message": "Valid bearer authentication is required."}), 401
+            return jsonify({"error": "authentication_failed", "message": "Valid bearer or API-key authentication is required."}), 401
+        g.user = user
+    elif user is not None:
         g.user = user
     if user:
         client_identity = user.user_id
@@ -1000,13 +1275,585 @@ def enforce_api_security():
         return response
 
 
+class _InvalidDeveloperApiKeySyncPayload(ValueError):
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
+@app.get("/internal/v1/tenants/resolve")
+def resolve_developer_platform_tenant():
+    """Resolve the canonical Core tenant ID for a signed Developer Platform request."""
+    raw_body = request.get_data(cache=True)
+    signed_target = request.path.encode("ascii")
+    if request.query_string:
+        signed_target += b"?" + request.query_string
+    from internal_service_auth import ServiceAuthError, authenticate_internal_request
+
+    try:
+        service_jwt_claims = authenticate_internal_request(
+            method="GET",
+            raw_target=signed_target,
+            raw_body=raw_body,
+            required_scope="service:tenant:read",
+            operation="resolve",
+        )
+    except ServiceAuthError as error:
+        return jsonify({"error": error.code, "message": error.message}), error.status_code
+
+    limit_response = _internal_service_rate_limit_response("resolve", service_jwt_claims)
+    if limit_response is not None:
+        return limit_response
+
+    required_fields = {"organization_id", "project_id", "environment_id"}
+    if (
+        set(request.args.keys()) != required_fields
+        or any(len(request.args.getlist(field)) != 1 for field in required_fields)
+        or raw_body
+    ):
+        return jsonify({
+            "error": "invalid_request",
+            "message": "Exactly one organization_id, project_id, and environment_id are required.",
+        }), 400
+
+    try:
+        organization_id, project_id, environment_id = (
+            str(uuid.UUID(request.args[field]))
+            for field in ("organization_id", "project_id", "environment_id")
+        )
+        tenant_id = developer_scope_tenant_id(
+            organization_id, project_id, environment_id
+        )
+    except (AttributeError, TypeError, ValueError):
+        return jsonify({
+            "error": "invalid_request",
+            "message": "Organization, project, and environment IDs must be valid UUIDs.",
+        }), 400
+
+    return jsonify({"tenant_id": tenant_id}), 200
+
+
+def _validated_internal_idempotency_key() -> Optional[str]:
+    value = request.headers.get("Idempotency-Key", "")
+    if (
+        not value
+        or len(value) > 255
+        or not value.isascii()
+        or value.strip() != value
+        or any(ord(character) < 33 or ord(character) > 126 for character in value)
+    ):
+        return None
+    return value
+
+
+@app.post("/internal/v1/developer-api-keys/sync")
+def sync_developer_api_key():
+    """Synchronize a Developer Platform key using the mutually configured HMAC secret."""
+    raw_body = request.get_data(cache=True)
+    from internal_service_auth import (
+        ServiceAuthError,
+        authenticate_internal_request,
+        consume_service_jwt_replay,
+    )
+
+    try:
+        service_jwt_claims = authenticate_internal_request(
+            method="POST",
+            raw_target=b"/internal/v1/developer-api-keys/sync",
+            raw_body=raw_body,
+            required_scope="service:sync",
+            operation="sync",
+        )
+    except ServiceAuthError as error:
+        return jsonify({"error": error.code, "message": error.message}), error.status_code
+
+    limit_response = _internal_service_rate_limit_response("sync", service_jwt_claims)
+    if limit_response is not None:
+        return limit_response
+
+    idempotency_key = _validated_internal_idempotency_key()
+    if idempotency_key is None:
+        return jsonify({
+            "error": "invalid_idempotency_key",
+            "message": "A valid Idempotency-Key header is required.",
+        }), 400
+
+    try:
+        payload = request.get_json(force=True)
+        key_id = str(uuid.UUID(payload["key_id"]))
+        tenant_id = payload["tenant_id"]
+        organization_id = str(uuid.UUID(payload["organization_id"]))
+        project_id = str(uuid.UUID(payload["project_id"]))
+        environment_id = str(uuid.UUID(payload["environment_id"]))
+        source_version = payload["source_version"]
+        key_hash = payload.get("key_hash")
+        key_prefix = payload["key_prefix"]
+        scopes = payload["scopes"]
+        ip_allowlist = payload["ip_allowlist"]
+        status = payload["status"]
+        expires_at = payload.get("expires_at")
+        if isinstance(source_version, bool) or not isinstance(source_version, int) or source_version < 0:
+            raise _InvalidDeveloperApiKeySyncPayload("invalid_source_version")
+        if not isinstance(tenant_id, str) or not TENANT_ID_PATTERN.fullmatch(tenant_id):
+            raise _InvalidDeveloperApiKeySyncPayload("invalid_tenant_id")
+        if not isinstance(key_prefix, str) or not key_prefix.startswith("pgk_") or len(key_prefix) > 32:
+            raise _InvalidDeveloperApiKeySyncPayload("invalid_key_prefix")
+        if not isinstance(scopes, list) or not all(isinstance(scope, str) for scope in scopes):
+            raise _InvalidDeveloperApiKeySyncPayload("invalid_scopes")
+        if not isinstance(ip_allowlist, list) or not all(isinstance(item, str) for item in ip_allowlist):
+            raise _InvalidDeveloperApiKeySyncPayload("invalid_ip_allowlist")
+        for network in ip_allowlist:
+            try:
+                ipaddress.ip_network(network, strict=False)
+            except ValueError:
+                raise _InvalidDeveloperApiKeySyncPayload("invalid_ip_allowlist") from None
+        if status not in {"ACTIVE", "SUSPENDED", "REVOKED", "COMPROMISED", "EXPIRED"}:
+            raise _InvalidDeveloperApiKeySyncPayload("invalid_status")
+        if key_hash is not None and (
+            not isinstance(key_hash, str) or len(key_hash) != 64
+            or any(character not in "0123456789abcdef" for character in key_hash)
+        ):
+            raise _InvalidDeveloperApiKeySyncPayload("invalid_key_digest")
+        if expires_at is not None:
+            if not isinstance(expires_at, str):
+                raise _InvalidDeveloperApiKeySyncPayload("invalid_expiry")
+            try:
+                expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+            except ValueError:
+                raise _InvalidDeveloperApiKeySyncPayload("invalid_expiry") from None
+            if expires_at.tzinfo is None:
+                raise _InvalidDeveloperApiKeySyncPayload("invalid_expiry")
+            expires_at = expires_at.astimezone(timezone.utc)
+        try:
+            normalized_scopes = AuthRBAC.normalize_machine_scopes(scopes)
+        except (TypeError, ValueError):
+            raise _InvalidDeveloperApiKeySyncPayload("invalid_scopes") from None
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        reason = getattr(error, "reason", "invalid_payload_fields")
+        return jsonify({
+            "error": "invalid_sync_payload",
+            "message": "The synchronization payload is invalid.",
+            "reason": reason,
+        }), 400
+    if tenant_id != developer_scope_tenant_id(organization_id, project_id, environment_id):
+        return jsonify({"error": "invalid_tenant_scope", "message": "Tenant scope does not match project/environment binding."}), 400
+
+    try:
+        consume_service_jwt_replay(service_jwt_claims)
+    except ServiceAuthError as error:
+        return jsonify({"error": error.code, "message": error.message}), error.status_code
+
+    requested_status = status
+    now = datetime.now(timezone.utc)
+    if status == "ACTIVE" and expires_at is not None and expires_at <= now:
+        status = "EXPIRED"
+    canonical_request = json.dumps(
+        {
+            "key_id": key_id,
+            "tenant_id": tenant_id,
+            "organization_id": organization_id,
+            "project_id": project_id,
+            "environment_id": environment_id,
+            "source_version": source_version,
+            "key_hash": key_hash,
+            "key_prefix": key_prefix,
+            "scopes": normalized_scopes,
+            "ip_allowlist": sorted(ip_allowlist),
+            "status": requested_status,
+            "expires_at": expires_at.isoformat() if expires_at is not None else None,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    request_hash = hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()
+    service_subject = (
+        service_jwt_claims.get("sub")
+        if service_jwt_claims is not None
+        else "svc-developer-platform"
+    )
+    session = _open_session(read_only=False)
+    try:
+        from models import ApiKeyLifecycleIdempotencyRecord, ApiKeyRecord
+
+        session.query(ApiKeyLifecycleIdempotencyRecord).filter(
+            ApiKeyLifecycleIdempotencyRecord.expires_at <= now
+        ).delete(synchronize_session=False)
+        session.commit()
+        prior_request = (
+            session.query(ApiKeyLifecycleIdempotencyRecord)
+            .filter_by(
+                service_subject=service_subject,
+                operation="sync",
+                key_id=key_id,
+                idempotency_key=idempotency_key,
+            )
+            .first()
+        )
+        if prior_request is not None:
+            if prior_request.request_hash != request_hash:
+                return jsonify({
+                    "error": "idempotency_key_reused",
+                    "message": "Idempotency-Key was already used for a different request.",
+                }), 409
+            return jsonify(prior_request.response), 200
+
+        record = session.query(ApiKeyRecord).filter_by(id=key_id).with_for_update().first()
+        if record is not None and record.tenant_id != tenant_id:
+            return jsonify({"error": "tenant_mismatch", "message": "Key identity is already bound to another tenant."}), 409
+        if record is not None and record.source_version >= source_version:
+            return jsonify({"status": "unchanged", "source_version": record.source_version}), 200
+
+        existing_status = (record.api_metadata or {}).get("source_status") if record is not None else None
+        terminal_statuses = {"REVOKED", "COMPROMISED", "EXPIRED"}
+        if existing_status in terminal_statuses and status != existing_status:
+            return jsonify({"error": "terminal_key_state", "message": "A terminal API key cannot be changed or reactivated."}), 409
+        if record is None:
+            if key_hash is None and status == "ACTIVE":
+                return jsonify({"error": "missing_key_digest", "message": "Initial active-key synchronization requires its digest."}), 400
+            record = ApiKeyRecord(
+                id=key_id,
+                tenant_id=tenant_id,
+                key_hash=key_hash or hashlib.sha256(f"revoked:{key_id}".encode("utf-8")).hexdigest(),
+                key_prefix=key_prefix,
+                role="admin",
+                scopes=normalized_scopes,
+                expires_at=expires_at,
+                active=False,
+                api_metadata={},
+            )
+            session.add(record)
+        elif key_hash is not None:
+            record.key_hash = key_hash
+
+        record.key_prefix = key_prefix
+        record.role = "admin"
+        record.scopes = normalized_scopes
+        record.expires_at = expires_at
+        record.active = status == "ACTIVE"
+        record.revoked_at = now if status in terminal_statuses else None
+        record.source_version = source_version
+        record.api_metadata = {
+            **(record.api_metadata or {}),
+            "source": "developer-platform",
+            "source_status": status,
+            "organization_id": organization_id,
+            "project_id": project_id,
+            "environment_id": environment_id,
+            "source_version": source_version,
+            "ip_allowlist": ip_allowlist,
+        }
+        response_body = {"status": "synchronized", "source_version": source_version}
+        session.add(ApiKeyLifecycleIdempotencyRecord(
+            id=str(uuid.uuid4()),
+            service_subject=service_subject,
+            operation="sync",
+            key_id=key_id,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            response=response_body,
+            created_at=now,
+            expires_at=now + timedelta(hours=24),
+        ))
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            raced_request = (
+                session.query(ApiKeyLifecycleIdempotencyRecord)
+                .filter_by(
+                    service_subject=service_subject,
+                    operation="sync",
+                    key_id=key_id,
+                    idempotency_key=idempotency_key,
+                )
+                .first()
+            )
+            if raced_request is None:
+                raise
+            if raced_request.request_hash != request_hash:
+                return jsonify({
+                    "error": "idempotency_key_reused",
+                    "message": "Idempotency-Key was already used for a different request.",
+                }), 409
+            return jsonify(raced_request.response), 200
+        return jsonify(response_body), 200
+    except Exception:
+        session.rollback()
+        logger.exception("Developer API-key synchronization failed for key id %s", key_id)
+        return jsonify({"error": "key_sync_failed", "message": "The key could not be synchronized."}), 503
+    finally:
+        session.close()
+
+
+def _apply_developer_api_key_lifecycle(key_id: str, operation: str):
+    raw_body = request.get_data(cache=True)
+    try:
+        raw_target = request.path.encode("ascii")
+    except UnicodeEncodeError:
+        return jsonify({
+            "error": "invalid_request",
+            "message": "The key lifecycle request target is invalid.",
+        }), 400
+    if request.query_string:
+        raw_target += b"?" + request.query_string
+
+    from internal_service_auth import (
+        SERVICE_JWT_SUBJECT,
+        ServiceAuthError,
+        authenticate_internal_request,
+        consume_service_jwt_replay,
+    )
+
+    required_scope = f"service:key:{operation}"
+    try:
+        service_jwt_claims = authenticate_internal_request(
+            method="POST",
+            raw_target=raw_target,
+            raw_body=raw_body,
+            required_scope=required_scope,
+            operation=f"key_{operation}",
+        )
+    except ServiceAuthError as error:
+        return jsonify({"error": error.code, "message": error.message}), error.status_code
+
+    limit_response = _internal_service_rate_limit_response(operation, service_jwt_claims)
+    if limit_response is not None:
+        return limit_response
+
+    idempotency_key = _validated_internal_idempotency_key()
+    if idempotency_key is None:
+        return jsonify({
+            "error": "invalid_idempotency_key",
+            "message": "A valid Idempotency-Key header is required.",
+        }), 400
+
+    try:
+        payload = request.get_json(force=True)
+        required_fields = {
+            "organization_id",
+            "project_id",
+            "environment_id",
+            "tenant_id",
+            "source_version",
+        }
+        if (
+            request.query_string
+            or not isinstance(payload, dict)
+            or set(payload) != required_fields
+        ):
+            raise ValueError("invalid_lifecycle_payload")
+        normalized_key_id = str(uuid.UUID(key_id))
+        organization_id = str(uuid.UUID(payload["organization_id"]))
+        project_id = str(uuid.UUID(payload["project_id"]))
+        environment_id = str(uuid.UUID(payload["environment_id"]))
+        tenant_id = payload["tenant_id"]
+        source_version = payload["source_version"]
+        if (
+            not isinstance(tenant_id, str)
+            or not TENANT_ID_PATTERN.fullmatch(tenant_id)
+            or isinstance(source_version, bool)
+            or not isinstance(source_version, int)
+            or source_version < 1
+            or source_version > 2_147_483_647
+        ):
+            raise ValueError("invalid_lifecycle_payload")
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return jsonify({
+            "error": "invalid_lifecycle_payload",
+            "message": "The key lifecycle payload is invalid.",
+        }), 400
+
+    expected_tenant_id = developer_scope_tenant_id(
+        organization_id, project_id, environment_id
+    )
+    if tenant_id != expected_tenant_id:
+        return jsonify({
+            "error": "invalid_tenant_scope",
+            "message": "Tenant scope does not match project/environment binding.",
+        }), 400
+
+    try:
+        consume_service_jwt_replay(service_jwt_claims)
+    except ServiceAuthError as error:
+        return jsonify({"error": error.code, "message": error.message}), error.status_code
+
+    canonical_request = json.dumps(
+        {
+            "operation": operation,
+            "key_id": normalized_key_id,
+            "organization_id": organization_id,
+            "project_id": project_id,
+            "environment_id": environment_id,
+            "tenant_id": tenant_id,
+            "source_version": source_version,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    request_hash = hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()
+    service_subject = (
+        service_jwt_claims.get("sub")
+        if service_jwt_claims is not None
+        else SERVICE_JWT_SUBJECT
+    )
+    now = datetime.now(timezone.utc)
+    session = _open_session(read_only=False)
+    try:
+        from models import ApiKeyLifecycleIdempotencyRecord, ApiKeyRecord
+
+        session.query(ApiKeyLifecycleIdempotencyRecord).filter(
+            ApiKeyLifecycleIdempotencyRecord.expires_at <= now
+        ).delete(synchronize_session=False)
+        session.commit()
+        record = (
+            session.query(ApiKeyRecord)
+            .filter_by(id=normalized_key_id)
+            .with_for_update()
+            .first()
+        )
+        if record is None:
+            return jsonify({"error": "key_not_found", "message": "API key was not found."}), 404
+
+        metadata = record.api_metadata or {}
+        if (
+            record.tenant_id != tenant_id
+            or metadata.get("source") != "developer-platform"
+            or metadata.get("organization_id") != organization_id
+            or metadata.get("project_id") != project_id
+            or metadata.get("environment_id") != environment_id
+        ):
+            return jsonify({
+                "error": "tenant_mismatch",
+                "message": "Key identity is not bound to the supplied tenant scope.",
+            }), 409
+
+        prior_request = (
+            session.query(ApiKeyLifecycleIdempotencyRecord)
+            .filter_by(
+                service_subject=service_subject,
+                operation=operation,
+                key_id=normalized_key_id,
+                idempotency_key=idempotency_key,
+            )
+            .first()
+        )
+        if prior_request is not None:
+            if prior_request.request_hash != request_hash:
+                return jsonify({
+                    "error": "idempotency_key_reused",
+                    "message": "Idempotency-Key was already used for a different request.",
+                }), 409
+            return jsonify(prior_request.response), 200
+
+        if source_version <= record.source_version:
+            return jsonify({
+                "error": "stale_source_version",
+                "message": "The key lifecycle source version must be newer.",
+                "source_version": record.source_version,
+            }), 409
+
+        source_status = metadata.get("source_status")
+        is_terminal = source_status in {"REVOKED", "COMPROMISED", "EXPIRED"} or record.revoked_at is not None
+        if operation == "suspend" and is_terminal:
+            return jsonify({
+                "error": "terminal_key_state",
+                "message": "A terminal API key cannot be suspended or reactivated.",
+            }), 409
+
+        previous_status = source_status or ("ACTIVE" if record.active else "INACTIVE")
+        record.active = False
+        record.source_version = source_version
+        if operation == "revoke":
+            record.revoked_at = record.revoked_at or now
+            metadata["source_status"] = "REVOKED"
+            result_status = "revoked"
+        else:
+            metadata["source_status"] = "SUSPENDED"
+            result_status = "suspended"
+        record.api_metadata = {
+            **metadata,
+            "source": "developer-platform",
+            "organization_id": organization_id,
+            "project_id": project_id,
+            "environment_id": environment_id,
+            "source_version": source_version,
+        }
+        response_body = {
+            "status": result_status,
+            "key_id": normalized_key_id,
+            "source_version": source_version,
+            "active": False,
+        }
+        idempotency_record_id = str(uuid.uuid4())
+        session.add(ApiKeyLifecycleIdempotencyRecord(
+            id=idempotency_record_id,
+            service_subject=service_subject,
+            operation=operation,
+            key_id=normalized_key_id,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            response=response_body,
+            created_at=now,
+            expires_at=now + timedelta(hours=24),
+        ))
+        persist_audit_event(session, ActionAuditRecord(
+            tenant_id=tenant_id,
+            actor=service_subject,
+            actor_type="service",
+            actor_id=service_subject,
+            actor_authentication_method="service_jwt" if service_jwt_claims else "hmac",
+            action=f"api_key.{operation}",
+            category="security",
+            resource_type="api_key",
+            resource_id=normalized_key_id,
+            outcome="success",
+            details={
+                "previous_status": previous_status,
+                "status": result_status.upper(),
+                "source_version": source_version,
+                "idempotency_key_sha256": hashlib.sha256(
+                    idempotency_key.encode("ascii")
+                ).hexdigest(),
+            },
+            idempotency_key=f"api-key-lifecycle:{idempotency_record_id}",
+        ))
+        session.commit()
+        return jsonify(response_body), 200
+    except Exception:
+        session.rollback()
+        logger.exception(
+            "Developer API-key %s operation failed for key id %s",
+            operation,
+            normalized_key_id,
+        )
+        return jsonify({
+            "error": "key_lifecycle_failed",
+            "message": "The key lifecycle operation could not be completed.",
+        }), 503
+    finally:
+        session.close()
+
+
+@app.post("/internal/v1/keys/<key_id>/revoke")
+def revoke_developer_api_key(key_id: str):
+    """Terminally revoke a Developer Platform API key."""
+    return _apply_developer_api_key_lifecycle(key_id, "revoke")
+
+
+@app.post("/internal/v1/keys/<key_id>/suspend")
+def suspend_developer_api_key(key_id: str):
+    """Temporarily suspend a Developer Platform API key."""
+    return _apply_developer_api_key_lifecycle(key_id, "suspend")
+
 
 @app.after_request
 def _inject_security_headers(response: Response) -> Response:
     """Inject robust security and CORS headers into all API responses."""
     allowed_origins = {
         origin.strip()
-        for origin in os.getenv("PESAGUARD_CORS_ALLOWED_ORIGINS", PUBLIC_API_URL).split(",")
+        for origin in os.getenv(
+            "PESAGUARD_CORS_ALLOWED_ORIGINS", DEFAULT_CORS_ALLOWED_ORIGINS
+        ).split(",")
         if origin.strip() and origin.strip() != "*"
     }
     origin = request.headers.get("Origin")
@@ -1017,7 +1864,8 @@ def _inject_security_headers(response: Response) -> Response:
     if origin in allowed_origins:
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Correlation-ID"
+        response.headers["Access-Control-Allow-Headers"] = DEFAULT_CORS_ALLOWED_HEADERS
+        response.headers["Access-Control-Expose-Headers"] = DEFAULT_CORS_EXPOSED_HEADERS
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
@@ -1025,7 +1873,7 @@ def _inject_security_headers(response: Response) -> Response:
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     if request.path == "/docs":
         response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; connect-src 'self'"
-    if request.path.startswith(("/v1/", "/tenant/", "/tenants/", "/providers", "/metrics", "/discrepancies", "/incidents")):
+    if request.path.startswith(("/v1/", "/tenant/", "/tenants/", "/providers", "/metrics", "/discrepancies", "/incidents", "/public/status")):
         response.headers["Cache-Control"] = "no-store"
     if _request_is_https():
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
@@ -1063,8 +1911,26 @@ def handle_internal_error(error: Exception) -> Response:
 @app.route("/health", methods=["GET"])
 def health():
     payload = build_health_payload()
+    payload = sanitize_health_payload(payload)
     status_code = 200 if payload.get("status") == "ok" else 503
     return jsonify(payload), status_code
+
+
+@app.route("/live", methods=["GET"])
+def liveness():
+    return jsonify({"status": "ok"}), 200, {"Cache-Control": "no-store"}
+
+
+@app.route("/ready", methods=["GET"])
+def readiness():
+    payload = sanitize_health_payload(build_health_payload())
+    status_code = 200 if payload.get("status") == "ok" else 503
+    return jsonify(payload), status_code, {"Cache-Control": "no-store"}
+
+
+@app.route("/version", methods=["GET"])
+def version():
+    return jsonify(VersionService().snapshot()), 200, {"Cache-Control": "no-store"}
 
 
 @app.route("/v1/settings", methods=["GET"])
@@ -1111,95 +1977,70 @@ def update_settings():
 
 @app.route("/openapi.json", methods=["GET"])
 def openapi_spec():
-    contract_path = Path(__file__).resolve().parents[2] / "docs" / "api" / "openapi.json"
-    return jsonify(json.loads(contract_path.read_text(encoding="utf-8"))), 200
-
-    spec = {
-        "openapi": "3.0.3",
-        "info": {
-            "title": "PesaGuard Dashboard & Reconciliation API",
-            "version": "2.0.0",
-            "description": "Enterprise-grade operational telemetry and reconciliation endpoints.",
+    contract_path = Path(__file__).resolve().parents[1] / "docs" / "api" / "openapi.json"
+    spec = openapi_spec_service.load(contract_path)
+    spec.setdefault("info", {})["title"] = "PesaGuard API and Operations Dashboard"
+    spec["x-api-contract-version"] = api_contract_service.metadata()
+    spec["x-api-versioning"] = {
+        "strategy": "URL major version",
+        "versioned_path_patterns": ["/api/v{major}", "/v{major}"],
+        "response_header": "X-API-Version",
+        "breaking_change_policy": "Introduce a new major version and retain supported prior versions.",
+    }
+    dashboard_paths = {
+        "/public/status": {
+            "get": {
+                "summary": "Get sanitized public platform status",
+                "description": (
+                    "Unauthenticated read-only status for the API and its reported "
+                    "dependencies. A degraded or failed health check returns HTTP 503 "
+                    "with the status payload."
+                ),
+                "security": [],
+                "responses": {
+                    "200": {"description": "Covered health checks are operational."},
+                    "503": {"description": "A covered health check is degraded or failed."},
+                },
+            },
         },
-        "security": [{"bearerAuth": []}],
-        "components": {
-            "securitySchemes": {
-                "bearerAuth": {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"},
-            },
-            "responses": {
-                "BadRequest": {"description": "Invalid request or query parameter."},
-                "Unauthorized": {"description": "Authentication failed."},
-                "Forbidden": {"description": "Insufficient permissions or tenant scope."},
-                "RateLimited": {"description": "Rate limit exceeded."},
-            },
+        "/tenant/current": {
+            "get": {"summary": "Get current tenant configuration", "responses": {"200": {"description": "Tenant configuration"}}},
         },
-        "paths": {
-            "/tenant/current": {
-                "get": {"summary": "Get current tenant configuration", "responses": {"200": {"description": "Tenant configuration"}}},
-            },
-            "/tenant/current/locale": {
-                "get": {"summary": "Get effective tenant locale", "responses": {"200": {"description": "Locale configuration"}}},
-                "post": {"summary": "Update tenant locale", "responses": {"200": {"description": "Locale updated"}}},
-            },
-            "/tenant/current/user-locale": {
-                "post": {"summary": "Set or clear a user locale override", "responses": {"200": {"description": "User locale updated"}}},
-            },
-            "/providers": {
-                "get": {"summary": "List payment providers", "responses": {"200": {"description": "Provider list"}}},
-                "post": {"summary": "Register a payment provider", "responses": {"201": {"description": "Provider registered"}}},
-            },
-            "/providers/{provider_id}": {
-                "get": {"summary": "Get provider details", "responses": {"200": {"description": "Provider details"}}},
-                "patch": {"summary": "Update provider configuration", "responses": {"200": {"description": "Provider updated"}}},
-            },
-            "/providers/{provider_id}/connection": {
-                "post": {"summary": "Update provider connection status", "responses": {"200": {"description": "Connection status updated"}}},
-            },
-            "/providers/{provider_id}/health": {
-                "post": {"summary": "Update provider health status", "responses": {"200": {"description": "Health status updated"}}},
-            },
-            "/discrepancies": {
-                "get": {"summary": "List discrepancies with advanced filters", "responses": {"200": {"description": "Paginated list"}}},
-            },
-            "/discrepancies/{discrepancy_id}/resolve": {
-                "post": {"summary": "Resolve single discrepancy", "responses": {"200": {"description": "Successfully resolved"}}},
-            },
-            "/discrepancies/bulk-resolve": {
-                "post": {"summary": "Bulk resolve discrepancies", "responses": {"200": {"description": "Batch operation completed"}}},
-            },
-            "/api/v1/communications/templates": {
-                "get": {"summary": "List tenant communication templates", "responses": {"200": {"description": "Template versions"}}},
-                "post": {"summary": "Create a draft communication template", "responses": {"201": {"description": "Template created"}}},
-            },
-            "/api/v1/communications/templates/{template_id}/approve": {
-                "post": {"summary": "Approve a communication template version", "responses": {"200": {"description": "Template approved"}}},
-            },
-            "/api/v1/communications/preferences/{recipient}": {
-                "put": {"summary": "Update recipient preferences and quiet hours", "responses": {"200": {"description": "Preferences updated"}}},
-            },
-            "/api/v1/communications/consent/{recipient}": {
-                "put": {"summary": "Grant or revoke channel consent", "responses": {"200": {"description": "Consent updated"}}},
-            },
-            "/api/v1/communications/otp": {
-                "post": {"summary": "Issue an OTP challenge", "responses": {"202": {"description": "Challenge queued"}}},
-            },
-            "/api/v1/communications/otp/{challenge_id}/verify": {
-                "post": {"summary": "Verify an OTP challenge", "responses": {"200": {"description": "OTP verified"}, "401": {"description": "OTP rejected"}}},
-            },
-            "/api/v1/communications/campaigns": {
-                "post": {"summary": "Create a bulk or scheduled campaign", "responses": {"202": {"description": "Campaign queued"}}},
-            },
-            "/api/v1/communications/analytics": {
-                "get": {"summary": "Get tenant communication delivery analytics", "responses": {"200": {"description": "Status and channel counts"}}},
-            },
-            "/api/v1/communications/search": {
-                "get": {"summary": "Search tenant notifications", "responses": {"200": {"description": "Matching notifications"}}},
-            },
-            "/api/v1/communications/export": {
-                "get": {"summary": "Export tenant communications as CSV", "responses": {"200": {"description": "CSV export"}}},
-            },
+        "/tenant/current/locale": {
+            "get": {"summary": "Get effective tenant locale", "responses": {"200": {"description": "Locale configuration"}}},
+            "post": {"summary": "Update tenant locale", "responses": {"200": {"description": "Locale updated"}}},
+        },
+        "/tenant/current/user-locale": {
+            "post": {"summary": "Set or clear a user locale override", "responses": {"200": {"description": "User locale updated"}}},
+        },
+        "/providers": {
+            "get": {"summary": "List payment providers", "responses": {"200": {"description": "Provider list"}}},
+            "post": {"summary": "Register a payment provider", "responses": {"201": {"description": "Provider registered"}}},
+        },
+        "/providers/{provider_id}": {
+            "get": {"summary": "Get provider details", "responses": {"200": {"description": "Provider details"}}},
+            "patch": {"summary": "Update provider configuration", "responses": {"200": {"description": "Provider updated"}}},
+        },
+        "/providers/{provider_id}/connection": {
+            "post": {"summary": "Update provider connection status", "responses": {"200": {"description": "Connection status updated"}}},
+        },
+        "/providers/{provider_id}/health": {
+            "post": {"summary": "Update provider health status", "responses": {"200": {"description": "Health status updated"}}},
+        },
+        "/discrepancies": {
+            "get": {"summary": "List discrepancies with advanced filters", "responses": {"200": {"description": "Paginated list"}}},
+        },
+        "/discrepancies/{discrepancy_id}/resolve": {
+            "post": {"summary": "Resolve single discrepancy", "responses": {"200": {"description": "Successfully resolved"}}},
+        },
+        "/discrepancies/bulk-resolve": {
+            "post": {"summary": "Bulk resolve discrepancies", "responses": {"200": {"description": "Batch operation completed"}}},
         },
     }
+    for path_item in dashboard_paths.values():
+        path_item["servers"] = [{"url": "/"}]
+    spec.setdefault("paths", {}).update(dashboard_paths)
+    openapi_spec_service.validate(spec)
     return jsonify(spec), 200
 
 
@@ -1230,9 +2071,8 @@ def docs():
     return Response(html, mimetype="text/html"), 200
 
 
-@app.route("/metrics", methods=["GET"])
 @require_auth("read:metrics")
-def metrics():
+def _authenticated_metrics():
     if "text/plain" in request.headers.get("Accept", ""):
         return Response(build_metrics_payload(), mimetype="text/plain; version=0.0.4")
 
@@ -1277,8 +2117,15 @@ def metrics():
         session.close()
 
 
+@app.route("/metrics", methods=["GET"])
+def metrics():
+    if prometheus_token_matches(request):
+        return Response(build_metrics_payload(), mimetype="text/plain; version=0.0.4")
+    return _authenticated_metrics()
+
+
 @app.route("/api/v1/imports", methods=["POST"])
-@require_auth(required_permission="read:analytics")
+@require_auth(required_permission="write:transactions")
 def create_import():
     """Store a tenant-scoped import object and create a queued batch job."""
     tenant_id = get_current_user().tenant_id
@@ -1314,7 +2161,7 @@ def create_import():
 
 
 @app.route("/api/v1/imports/<import_id>", methods=["GET"])
-@require_auth(required_permission="read:analytics")
+@require_auth(required_permission="read:transactions")
 def get_import(import_id: str):
     """Return tenant-scoped import progress and validation counters."""
     tenant_id = get_current_user().tenant_id
@@ -2050,17 +2897,17 @@ def export_discrepancies_csv():
         writer.writeheader()
         for item in items:
             writer.writerow({
-                "id": item.id,
-                "trans_id": item.trans_id,
-                "anomaly_type": item.anomaly_type,
-                "severity": item.severity,
-                "status": item.status,
+                "id": sanitize_csv_cell(item.id),
+                "trans_id": sanitize_csv_cell(item.trans_id),
+                "anomaly_type": sanitize_csv_cell(item.anomaly_type),
+                "severity": sanitize_csv_cell(item.severity),
+                "status": sanitize_csv_cell(item.status),
                 "resolved": "Yes" if item.resolved else "No",
-                "tenant_id": item.tenant_id or "N/A",
-                "assignee": item.assignee or "Unassigned",
-                "detected_at": item.detected_at.isoformat() if item.detected_at else "",
-                "resolved_at": item.resolved_at.isoformat() if item.resolved_at else "",
-                "notes": item.notes or "",
+                "tenant_id": sanitize_csv_cell(item.tenant_id or "N/A"),
+                "assignee": sanitize_csv_cell(item.assignee or "Unassigned"),
+                "detected_at": sanitize_csv_cell(item.detected_at.isoformat() if item.detected_at else ""),
+                "resolved_at": sanitize_csv_cell(item.resolved_at.isoformat() if item.resolved_at else ""),
+                "notes": sanitize_csv_cell(item.notes or ""),
             })
 
         buffer = io.BytesIO(text_buf.getvalue().encode("utf-8"))
@@ -2337,4 +3184,3 @@ if __name__ == "__main__":
     port = runtime_config.port
     debug_mode = os.getenv("FLASK_DEBUG", "false").lower() in {"true", "1", "yes"}
     app.run(host=os.getenv("PESAGUARD_BIND_HOST", "127.0.0.1"), port=port, debug=debug_mode)
-

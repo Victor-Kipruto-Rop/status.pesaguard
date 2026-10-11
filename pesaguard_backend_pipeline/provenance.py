@@ -299,7 +299,9 @@ class DataProvenance:
                 "provider_id": quality.provider_id,
                 "quality": quality.to_dict(),
             }
-        schema_compat = assess_schema_compatibility(raw, self.schema_version)
+        schema_compat, _note = assess_schema_compatibility(
+            self.schema_version, schema_version_from_payload(raw) or DEFAULT_SCHEMA_VERSION
+        )
         if schema_compat == "incompatible":
             quarantine_record(
                 session,
