@@ -113,7 +113,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build backend image
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: pesaguard_backend_pipeline/infra/docker/Dockerfile
