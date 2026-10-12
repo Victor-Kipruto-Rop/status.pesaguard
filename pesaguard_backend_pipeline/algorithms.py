@@ -15,12 +15,17 @@ import hashlib
 import hmac
 import importlib
 import json
+import logging
 import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Dict, Iterable, List, Tuple
+
+
+logger = logging.getLogger("pesaguard.algorithms")
 
 
 def _normalize_name(value: str) -> str:
@@ -69,6 +74,19 @@ def _coerce_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _finite_decimal(value: Any) -> Decimal | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = Decimal(str(value))
+        representable = math.isfinite(float(number))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    except OverflowError:
+        return None
+    return number if number.is_finite() and representable else None
 
 
 def _hash_value(value: Any) -> str:
@@ -236,17 +254,72 @@ def _evaluate_daraja_payload(payload: Any, *, algorithm_name: str, category: str
         str(transaction.get("reference") or ""),
     ])
 
-    if secret:
-        expected = hmac.new(secret.encode("utf-8"), body.encode("utf-8"), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(expected, signature):
+    # If no secret was supplied in the payload, attempt to load a tenant-scoped Daraja secret
+    if not secret:
+        tenant_id = str(transaction.get("tenant_id") or transaction.get("tenant") or "default")
+        daraja_config_module = _load_module("shared.daraja.config")
+        try:
+            if daraja_config_module is not None and hasattr(daraja_config_module, "DarajaConfig"):
+                cfg = daraja_config_module.DarajaConfig(tenant_id)
+                creds = cfg.get_credentials()
+                secret = str(creds.get("consumer_secret") or "").strip()
+        except Exception:
+            secret = ""
+
+    if not secret:
+        return AlgorithmResult(
+            algorithm=algorithm_name,
+            category=category,
+            status="failed",
+            confidence=0.0,
+            evidence="Daraja callback verification failed: no consumer secret configured.",
+            metadata={"input_hash": _hash_value(transaction)},
+        )
+
+    # Prefer the shared Daraja validator helper when available for canonical handling
+    validator = _load_module("shared.daraja.validator")
+    try:
+        if validator is not None:
+            # If a raw signed payload is provided, pass it as bytes; otherwise pass headers/body form
+            signed = transaction.get("signed_payload")
+            headers = transaction.get("headers") or {}
+            if isinstance(signed, (bytes, bytearray)):
+                ok = validator.validate_daraja_callback(signed, signature, consumer_secret=secret)
+            else:
+                # Pass headers first to allow header-based checks; fallback to body/signature
+                header_name = transaction.get("signature_header_name") or "X-MPESA-SIGNATURE"
+                ok = validator.validate_daraja_callback(headers or transaction, signed or signature, consumer_secret=secret, header_name=header_name)
+            if not ok:
+                return AlgorithmResult(
+                    algorithm=algorithm_name,
+                    category=category,
+                    status="failed",
+                    confidence=1.0,
+                    evidence="Daraja callback signature verification failed.",
+                    metadata={"received_signature": signature},
+                )
             return AlgorithmResult(
                 algorithm=algorithm_name,
                 category=category,
-                status="failed",
-                confidence=1.0,
-                evidence="Daraja callback signature verification failed.",
-                metadata={"expected_signature": expected, "received_signature": signature},
+                status="passed",
+                confidence=0.97,
+                evidence="Daraja callback payload and signature passed the verification checks.",
+                metadata={"merchant_id": transaction.get("merchant_id"), "input_hash": _hash_value(transaction)},
             )
+    except Exception:  # pragma: no cover - defensive fallback to internal computation
+        pass
+
+    # Fallback to local HMAC check (defensive)
+    expected = hmac.new(secret.encode("utf-8"), (body if isinstance(body, (bytes, bytearray)) else str(body).encode("utf-8")), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, signature):
+        return AlgorithmResult(
+            algorithm=algorithm_name,
+            category=category,
+            status="failed",
+            confidence=1.0,
+            evidence="Daraja callback signature verification failed.",
+            metadata={"received_signature": signature},
+        )
 
     return AlgorithmResult(
         algorithm=algorithm_name,
@@ -334,28 +407,55 @@ def _evaluate_ledger_payload(payload: Any, *, algorithm_name: str, category: str
             metadata={"input_hash": _hash_value(payload)},
         )
 
-    debit = _coerce_float(entry.get("debit"), 0.0)
-    credit = _coerce_float(entry.get("credit"), 0.0)
-    balance = _coerce_float(entry.get("balance"), 0.0)
+    required_fields = ("debit", "credit", "balance")
+    missing_fields = [field for field in required_fields if field not in entry]
+    if missing_fields:
+        return AlgorithmResult(
+            algorithm=algorithm_name,
+            category=category,
+            status="failed",
+            confidence=1.0,
+            evidence="Ledger entry is missing values required to validate its balance invariant.",
+            metadata={"missing_fields": missing_fields, "input_hash": _hash_value(entry)},
+        )
+
+    values = {field: _finite_decimal(entry[field]) for field in required_fields}
+    invalid_fields = [field for field, value in values.items() if value is None]
+    if invalid_fields:
+        return AlgorithmResult(
+            algorithm=algorithm_name,
+            category=category,
+            status="failed",
+            confidence=1.0,
+            evidence="Ledger values must be finite numeric amounts.",
+            metadata={"invalid_fields": invalid_fields, "input_hash": _hash_value(entry)},
+        )
+
+    debit, credit, balance = (values[field] for field in required_fields)
     if debit < 0 or credit < 0 or balance < 0:
         return AlgorithmResult(
             algorithm=algorithm_name,
             category=category,
-            status="needs_review",
-            confidence=0.8,
+            status="failed",
+            confidence=1.0,
             evidence="Ledger values must remain non-negative.",
-            metadata={"debit": debit, "credit": credit, "balance": balance},
+            metadata={"invalid_fields": [field for field, value in values.items() if value < 0]},
         )
 
     expected_balance = credit - debit
-    if abs(balance - expected_balance) > 0.01:
+    if abs(balance - expected_balance) > Decimal("0.01"):
         return AlgorithmResult(
             algorithm=algorithm_name,
             category=category,
             status="failed",
             confidence=0.98,
             evidence=f"Ledger balance mismatch: expected {expected_balance}, got {balance}.",
-            metadata={"debit": debit, "credit": credit, "balance": balance, "expected_balance": expected_balance},
+            metadata={
+                "debit": float(debit),
+                "credit": float(credit),
+                "balance": float(balance),
+                "expected_balance": float(expected_balance),
+            },
         )
 
     return AlgorithmResult(
@@ -364,8 +464,30 @@ def _evaluate_ledger_payload(payload: Any, *, algorithm_name: str, category: str
         status="passed",
         confidence=0.98,
         evidence="Ledger entry preserves a consistent debit/credit balance invariant.",
-        metadata={"debit": debit, "credit": credit, "balance": balance, "expected_balance": expected_balance},
+        metadata={
+            "debit": float(debit),
+            "credit": float(credit),
+            "balance": float(balance),
+            "expected_balance": float(expected_balance),
+        },
     )
+
+
+def _valid_risk_timestamp(value: Any) -> bool:
+    if isinstance(value, datetime):
+        return True
+    text = str(value or "").strip()
+    if len(text) == 14 and text.isdigit():
+        try:
+            datetime.strptime(text, "%Y%m%d%H%M%S")
+            return True
+        except ValueError:
+            return False
+    try:
+        datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return bool(text)
+    except ValueError:
+        return False
 
 
 def _evaluate_fraud_payload(payload: Any, *, algorithm_name: str, category: str) -> AlgorithmResult:
@@ -380,23 +502,130 @@ def _evaluate_fraud_payload(payload: Any, *, algorithm_name: str, category: str)
             metadata={"input_hash": _hash_value(payload)},
         )
 
-    engine_module = _load_module("fraud_risk_engine")
-    if engine_module is None:
-        return _generic_algorithm_evaluation(
-            algorithm_name,
-            category,
-            transaction,
-            required_fields=["risk_score"],
-            optional_fields=["event_type", "source_ip", "merchant_id", "amount"],
-            fallback_status="needs_review",
+    transaction_id = str(
+        transaction.get("TransID")
+        or transaction.get("trans_id")
+        or transaction.get("transaction_id")
+        or ""
+    ).strip()
+    raw_amount = transaction.get("TransAmount")
+    if raw_amount is None:
+        raw_amount = transaction.get("amount")
+    amount = _finite_decimal(raw_amount)
+    timestamp = transaction.get("TransTime") or transaction.get("timestamp") or transaction.get("created_at")
+    if not transaction_id or amount is None or amount <= 0 or not _valid_risk_timestamp(timestamp):
+        return AlgorithmResult(
+            algorithm=algorithm_name,
+            category=category,
+            status="failed",
+            confidence=1.0,
+            evidence="Fraud assessment requires a transaction ID, positive finite amount, and valid timestamp.",
+            metadata={"input_hash": _hash_value(transaction)},
         )
 
     history = transaction.get("history") or transaction.get("past_transactions") or ()
     baseline = transaction.get("tenant_baseline") or transaction.get("tenant_baseline_metrics") or None
+    if (
+        not isinstance(history, Sequence)
+        or isinstance(history, (str, bytes, bytearray))
+        or any(not isinstance(item, Mapping) for item in history)
+    ):
+        return AlgorithmResult(
+            algorithm=algorithm_name,
+            category=category,
+            status="failed",
+            confidence=1.0,
+            evidence="Fraud assessment history must be a sequence of transaction records.",
+            metadata={"input_hash": _hash_value(transaction)},
+        )
+    invalid_history_indices = []
+    for index, item in enumerate(history):
+        raw_history_amount = item.get("TransAmount")
+        if raw_history_amount is None:
+            raw_history_amount = item.get("amount")
+        history_amount = _finite_decimal(raw_history_amount)
+        history_timestamp = item.get("TransTime") or item.get("timestamp") or item.get("created_at")
+        if (
+            history_amount is None
+            or history_amount <= 0
+            or (history_timestamp is not None and not _valid_risk_timestamp(history_timestamp))
+        ):
+            invalid_history_indices.append(index)
+    if invalid_history_indices:
+        return AlgorithmResult(
+            algorithm=algorithm_name,
+            category=category,
+            status="failed",
+            confidence=1.0,
+            evidence="Fraud assessment history contains invalid transaction amounts or timestamps.",
+            metadata={"invalid_history_indices": invalid_history_indices},
+        )
+    if baseline is not None and not isinstance(baseline, Mapping):
+        return AlgorithmResult(
+            algorithm=algorithm_name,
+            category=category,
+            status="failed",
+            confidence=1.0,
+            evidence="Fraud assessment baseline must be a tenant metrics object.",
+            metadata={"input_hash": _hash_value(transaction)},
+        )
+    if isinstance(baseline, Mapping):
+        baseline_fields = ("mean_amount", "std_amount", "customer_mean_amount")
+        invalid_baseline_fields = [
+            field
+            for field in baseline_fields
+            if field in baseline
+            and (
+                (value := _finite_decimal(baseline[field])) is None
+                or value < 0
+            )
+        ]
+        if invalid_baseline_fields:
+            return AlgorithmResult(
+                algorithm=algorithm_name,
+                category=category,
+                status="failed",
+                confidence=1.0,
+                evidence="Fraud assessment baseline contains invalid financial metrics.",
+                metadata={"invalid_baseline_fields": invalid_baseline_fields},
+            )
+
+    engine_module = _load_module("fraud_risk_engine")
+    if engine_module is None:
+        logger.error(
+            "Fraud algorithm cannot run because its risk engine is unavailable",
+            extra={"algorithm": algorithm_name},
+        )
+        return AlgorithmResult(
+            algorithm=algorithm_name,
+            category=category,
+            status="failed",
+            confidence=0.0,
+            evidence="Fraud risk engine is unavailable; no assessment was produced.",
+            metadata={"input_hash": _hash_value(transaction)},
+        )
     try:
         decision = engine_module.assess_transaction(transaction, history, baseline)
-        risk_score = float(decision.risk_score or 0.0)
-        if risk_score >= 0.65:
+        raw_risk_score = decision.risk_score
+        if raw_risk_score is None or isinstance(raw_risk_score, bool):
+            raise ValueError("Fraud risk engine returned no numeric risk score.")
+        risk_score = float(raw_risk_score)
+        risk_level = str(decision.risk_level or "").upper()
+        action = str(decision.action or "").lower()
+        model_version = str(decision.model_version or "").strip()
+        if (
+            not math.isfinite(risk_score)
+            or not 0.0 <= risk_score <= 1.0
+            or risk_level not in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
+            or action not in {"process", "monitor", "review", "escalate"}
+            or not model_version
+        ):
+            raise ValueError("Fraud risk engine returned an invalid decision.")
+        if (
+            risk_score >= 0.65
+            or risk_level in {"HIGH", "CRITICAL"}
+            or action in {"review", "escalate"}
+        ):
             status = "needs_review"
             evidence = "Fraud engine flagged the transaction as high risk and requires review."
         else:
@@ -410,19 +639,24 @@ def _evaluate_fraud_payload(payload: Any, *, algorithm_name: str, category: str)
             evidence=evidence,
             metadata={
                 "risk_score": risk_score,
-                "risk_level": decision.risk_level,
-                "action": decision.action,
+                "risk_level": risk_level,
+                "action": action,
+                "model_version": model_version,
                 "reason_codes": list(decision.reason_codes),
                 "rules_triggered": list(decision.rules_triggered),
             },
         )
     except Exception as exc:  # pragma: no cover - defensive branch
+        logger.error(
+            "Fraud algorithm evaluation failed",
+            extra={"algorithm": algorithm_name, "error_type": type(exc).__name__},
+        )
         return AlgorithmResult(
             algorithm=algorithm_name,
             category=category,
             status="failed",
             confidence=0.0,
-            evidence=f"Fraud assessment failed: {exc}",
+            evidence="Fraud assessment failed; no assessment was produced.",
             metadata={"input_hash": _hash_value(transaction)},
         )
 
@@ -653,12 +887,23 @@ def _evaluate_auth_payload(payload: Any, *, algorithm_name: str, category: str) 
     return result
 
 
+def _evaluate_catalog_only(payload: Any, *, algorithm_name: str, category: str) -> AlgorithmResult:
+    return AlgorithmResult(
+        algorithm=algorithm_name,
+        category=category,
+        status="needs_review",
+        confidence=0.0,
+        evidence="This algorithm is catalogued but does not have a dedicated evaluator.",
+        metadata={"implementation_status": "not_implemented"},
+    )
+
+
 CATEGORY_IMPLEMENTERS: Dict[str, Callable[[Any, str, str], AlgorithmResult]] = {
     "transaction_processing_algorithms": _evaluate_transaction_payload,
     "m_pesa_daraja_integration_algorithms": _evaluate_daraja_payload,
     "reconciliation_algorithms": _evaluate_reconciliation_payload,
-    "ledger_and_financial_integrity_algorithms": _evaluate_ledger_payload,
-    "fraud_and_anomaly_detection_algorithms": _evaluate_fraud_payload,
+    "ledger_and_financial_integrity_algorithms": _evaluate_catalog_only,
+    "fraud_and_anomaly_detection_algorithms": _evaluate_catalog_only,
     "fake_statement_and_data_tampering_detection": _evaluate_statement_payload,
     "api_gateway_and_request_management_algorithms": _evaluate_api_gateway_payload,
     "authentication_and_account_security_algorithms": _evaluate_auth_payload,
@@ -669,6 +914,7 @@ SPECIALIZED_ALGORITHM_HANDLERS: Dict[str, Callable[[Any, str, str], AlgorithmRes
     _normalize_name("Duplicate Payment Detection Algorithm"): _evaluate_duplicate_payment_detection,
     _normalize_name("Callback Replay Protection Algorithm"): _evaluate_callback_replay_protection,
     _normalize_name("Debit-Credit Balance Validation Algorithm"): _evaluate_ledger_payload,
+    _normalize_name("Risk Score Calculation Algorithm"): _evaluate_fraud_payload,
 }
 
 
