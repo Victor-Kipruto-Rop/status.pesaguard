@@ -28,7 +28,7 @@ jobs:
       name: cloudflare-pages
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Stage public status files
         run: |
