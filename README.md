@@ -1,4 +1,4 @@
-# PesaGuard Status (status.pesaguard.victorkipruto.com)
+# PesaGuard Status (status.pesaguard.co.ke)
 
 Static status page for PesaGuard. No build step: hand-written HTML plus vanilla
 CSS/JS. The home page reads current API and dependency health from
@@ -21,11 +21,11 @@ automatically and renders failed requests as unavailable instead of treating
 them as healthy.
 
 The endpoint is public and read-only. Its CORS allowlist must include
-`https://status.pesaguard.victorkipruto.com`; if
+`https://status.pesaguard.co.ke`; if
 `PESAGUARD_CORS_ALLOWED_ORIGINS` is explicitly set in the backend environment,
 include both that origin and the API's own origin in the comma-separated value.
 The full production value must include
-`https://api.pesaguard.co.ke,https://status.pesaguard.victorkipruto.com`.
+`https://api.pesaguard.co.ke,https://status.pesaguard.co.ke`.
 
 The API does not currently publish public incident, maintenance, or historical
 uptime records. Those sections remain unavailable/unknown and must not be
@@ -82,12 +82,10 @@ The `Deploy status site` workflow runs the status checks before uploading the
 public files to Cloudflare Pages. Pull requests validate without deploying.
 Configure the Cloudflare Pages project as `status-pesaguard` and add the
 repository secrets `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` (Account
-Cloudflare Pages: Edit). Bind `status.pesaguard.victorkipruto.com` to that
+Cloudflare Pages: Edit). Bind `status.pesaguard.co.ke` to that
 project in Cloudflare Pages and configure its DNS there. Disable the previous
 GitHub Pages publishing source and move the custom-domain DNS record to
-Cloudflare as part of the host cutover. The API hostname must also resolve to
-the deployed backend and pass HTTPS/CORS checks before the live status UI can
-be considered connected.
+Cloudflare as part of the host cutover. The canonical site hostname is `status.pesaguard.co.ke`; the monitor workflow and browser use `api.pesaguard.co.ke`. Verify both DNS records, HTTPS certificates, Cloudflare Pages custom-domain binding, backend route availability, and the backend CORS allowlist before calling the live status UI connected.
 
 ## Data files
 
@@ -174,7 +172,7 @@ colour (never colour alone).
 * Public incident publishing, maintenance scheduling, and historical uptime
   collection are not yet wired to backend data sources; these remain
   unavailable rather than inferred.
-* The status site still has no CSP. Its API status endpoint is subject to the
+* The repository includes a Cloudflare Pages `_headers` file with a restrictive baseline Content Security Policy (CSP), `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`, and frame protections. Validate the effective headers against the live deployment and any new third-party dependencies. Its API status endpoint is subject to the
   backend's public API rate limit.
 * `npm run check` validates data shape, page/component structure, SEO and the
   no-false-claims contract by reading files. It also runs `js/status.js` against
