@@ -151,6 +151,10 @@ structure from data.
 controls, `aria-label` on chart bars, and status conveyed by icon plus text plus
 colour (never colour alone).
 
+## Deployment smoke checks
+
+The production deployment workflow now checks the canonical status hostname after a deployment, verifies the CSP and baseline security headers, validates the API's verified status payload (including valid degraded/outage responses), and checks CORS preflight for the status GET and email-subscription POST. A failed smoke check marks the workflow failed; it does not roll back the already-uploaded static deployment automatically.
+
 ## Remaining gaps
 
 * Email subscription code and tests are implemented, but production delivery
