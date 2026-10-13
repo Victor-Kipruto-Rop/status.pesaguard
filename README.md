@@ -79,7 +79,9 @@ npm run check
 ## Deploy
 
 The `Deploy status site` workflow runs the status checks before uploading the
-public files to Cloudflare Pages. Pull requests validate without deploying.
+public files to Cloudflare Pages. Pull requests validate without deploying. The
+backend repository owns the scheduled status-email monitor to avoid duplicate
+polling; configure its `PESAGUARD_STATUS_MONITOR_TOKEN` secret there.
 Configure the Cloudflare Pages project as `status-pesaguard` and add the
 repository secrets `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` (Account
 Cloudflare Pages: Edit). Bind `status.pesaguard.co.ke` to that
@@ -169,7 +171,7 @@ The production deployment workflow now checks the canonical status hostname afte
   workflow. Ensure production `PESAGUARD_CORS_ALLOWED_ORIGINS` includes both
   API and status-site origins. Do not treat email delivery or production
   monitoring as verified until tested after deployment.
-* The monitor workflow polls every five minutes. A status change can therefore
+* The backend monitor workflow polls every five minutes. A status change can therefore
   take up to one polling interval to trigger an email, and a brief issue that
   starts and recovers between polls may not be observed. Notifications are
   sent only after a confirmed subscriber's status fingerprint changes.
