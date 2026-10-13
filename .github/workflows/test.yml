@@ -134,9 +134,26 @@ jobs:
           grep -q "Content-Security-Policy:" _headers
           grep -q "X-Content-Type-Options: nosniff" _headers
           grep -qx "status.pesaguard.co.ke" CNAME
-          if grep -nE "status.pesaguard.victorkipruto.com|api.pesaguard.victorkipruto.com" index.html incidents.html maintenance.html uptime.html 404.html robots.txt sitemap.xml README.md .github/workflows/public-status-monitor.yml; then
+          if grep -nE "status.pesaguard.victorkipruto.com|api.pesaguard.victorkipruto.com" index.html incidents.html maintenance.html uptime.html 404.html components/header.html components/footer.html robots.txt sitemap.xml README.md; then
             echo "Legacy status/API hostname remains in public config."
             exit 1
           fi
-          grep -q "https://api.pesaguard.co.ke/public/status/monitor" .github/workflows/public-status-monitor.yml
+          test ! -f .github/workflows/public-status-monitor.yml
+          grep -q "https://pesaguard.co.ke" components/footer.html
+          grep -q "https://app.pesaguard.co.ke" components/footer.html
+          node <<'NODE'
+          const fs = require("fs");
+          const crypto = require("crypto");
+          const html = fs.readFileSync("index.html", "utf8");
+          const headers = fs.readFileSync("_headers", "utf8");
+          const match = html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/i);
+          if (!match) throw new Error("Missing JSON-LD structured data");
+          const hash = crypto.createHash("sha256").update(match[1]).digest("base64");
+          if (!headers.includes("'sha256-" + hash + "'")) {
+            throw new Error("CSP hash does not match the current JSON-LD block");
+          }
+          const executableInline = [...html.matchAll(/<script\b(?![^>]*\bsrc=)(?![^>]*type=["']application\/ld\+json["'])[^>]*>/gi)];
+          if (executableInline.length) throw new Error("Unexpected inline executable script blocked by CSP");
+          console.log("CSP JSON-LD hash verified.");
+          NODE
           echo "Canonical host and baseline security header checks passed."

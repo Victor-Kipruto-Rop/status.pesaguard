@@ -13,11 +13,12 @@
 
   var UI = window.StatusUI;
   var incidentsData = [];
+  var incidentsVerified = false;
   var currentFilters = { year: "all", service: "all", status: "all" };
 
   /* --- Render active incidents -------------------------------------------- */
 
-  function renderActiveIncidents(incidents) {
+  function renderActiveIncidents(incidents, verified) {
     var container = document.getElementById("active-incidents");
     if (!container) return;
 
@@ -28,7 +29,9 @@
     if (active.length === 0) {
       container.innerHTML =
         '<div class="status-empty" style="text-align:center;padding:48px 24px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--paper-raised);">' +
-        '<p style="margin:0;color:var(--text-muted)">No active incidents. All systems operational.</p>' +
+        '<p style="margin:0;color:var(--text-muted)">' +
+        (verified ? "No active incidents are currently recorded." : "Incident records are unavailable because verified incident publishing is not connected. This does not confirm that there are no active incidents.") +
+        "</p>" +
         "</div>";
       return;
     }
@@ -93,7 +96,7 @@
 
   /* --- Render past incidents grouped by year ------------------------------ */
 
-  function renderPastIncidents(incidents) {
+  function renderPastIncidents(incidents, verified) {
     var container = document.getElementById("past-incidents");
     if (!container) return;
 
@@ -109,8 +112,10 @@
     if (yearKeys.length === 0) {
       container.innerHTML =
         '<div class="status-empty" style="text-align:center;padding:48px 24px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--paper-raised);">' +
-        "<h2>No incident history</h2>" +
-        "<p style=\"color:var(--text-muted);max-width:48ch;margin:0 auto;\">There are no past incidents recorded.</p>" +
+        "<h2>" + (verified ? "No incident history" : "Incident history unavailable") + "</h2>" +
+        "<p style=\"color:var(--text-muted);max-width:48ch;margin:0 auto;\">" +
+        (verified ? "No past incidents are recorded." : "Incident history cannot be confirmed because no verified incident source is connected.") +
+        "</p>" +
         "</div>";
       return;
     }
@@ -213,7 +218,7 @@
       if (!sel) return;
       sel.addEventListener("change", function () {
         currentFilters[names[idx]] = sel.value;
-        renderPastIncidents(incidents);
+        renderPastIncidents(incidents, incidentsVerified);
       });
     });
   }
@@ -280,14 +285,15 @@
     UI.fetchJSON("data/incidents.json", null).then(function (payload) {
       /* Payload is an object: { verified, note, incidents: [...] }.
        * An empty list is a legitimate, honest state — not an error. */
-      var data = (payload && payload.incidents) || [];
+      incidentsVerified = !!(payload && payload.verified === true);
+      var data = incidentsVerified && Array.isArray(payload.incidents) ? payload.incidents : [];
       if (data.length === 0) {
-        renderActiveIncidents([]);
-        renderPastIncidents([]);
+        renderActiveIncidents([], incidentsVerified);
+        renderPastIncidents([], incidentsVerified);
         return;
       }
-      renderActiveIncidents(data);
-      renderPastIncidents(data);
+      renderActiveIncidents(data, incidentsVerified);
+      renderPastIncidents(data, incidentsVerified);
       initFilters(data);
       handleAnchor(data);
       incidentsData = data;

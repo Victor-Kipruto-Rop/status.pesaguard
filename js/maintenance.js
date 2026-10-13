@@ -12,6 +12,7 @@
   "use strict";
 
   var UI = window.StatusUI;
+  var maintenanceVerified = false;
 
   function maintStatusLabel(status) {
     var labels = {
@@ -35,7 +36,7 @@
 
   /* --- Render active maintenance ---------------------------------------- */
 
-  function renderActiveMaintenance(items) {
+  function renderActiveMaintenance(items, verified) {
     var container = document.getElementById("active-maintenance");
     if (!container) return;
 
@@ -44,14 +45,14 @@
     if (active.length === 0) {
       container.innerHTML =
         '<div class="maintenance-empty">' +
-        "<p>No maintenance is currently in progress.</p>" +
+        "<p>" + (verified ? "No maintenance is currently in progress." : "Maintenance status is unavailable until a verified maintenance source is connected.") + "</p>" +
         "</div>";
       return;
     }
     container.innerHTML = active.map(renderMaintenanceCard).join("");
   }
 
-  function renderUpcoming(items) {
+  function renderUpcoming(items, verified) {
     var container = document.getElementById("upcoming-maintenance");
     if (!container) return;
 
@@ -60,14 +61,14 @@
     if (upcoming.length === 0) {
       container.innerHTML =
         '<div class="maintenance-empty">' +
-        "<p>No maintenance is currently scheduled.</p>" +
+        "<p>" + (verified ? "No maintenance is currently scheduled." : "Scheduled maintenance data is unavailable until a verified maintenance source is connected.") + "</p>" +
         "</div>";
       return;
     }
     container.innerHTML = upcoming.map(renderMaintenanceCard).join("");
   }
 
-  function renderHistory(items) {
+  function renderHistory(items, verified) {
     var container = document.getElementById("maintenance-history");
     if (!container) return;
 
@@ -76,8 +77,8 @@
     if (completed.length === 0) {
       container.innerHTML =
         '<div class="maintenance-empty">' +
-        "<strong>No maintenance history</strong>" +
-        "<p>There are no past maintenance windows recorded.</p>" +
+        "<strong>" + (verified ? "No maintenance history" : "Maintenance history unavailable") + "</strong>" +
+        "<p>" + (verified ? "No past maintenance windows are recorded." : "Maintenance history cannot be confirmed because no verified maintenance source is connected.") + "</p>" +
         "</div>";
       return;
     }
@@ -146,10 +147,11 @@
 
     UI.fetchJSON("data/maintenance.json", null).then(function (payload) {
       /* Payload is an object: { verified, note, maintenance: [...] }. */
-      var data = (payload && payload.maintenance) || [];
-      renderActiveMaintenance(data);
-      renderUpcoming(data);
-      renderHistory(data);
+      maintenanceVerified = !!(payload && payload.verified === true);
+      var data = maintenanceVerified && Array.isArray(payload.maintenance) ? payload.maintenance : [];
+      renderActiveMaintenance(data, maintenanceVerified);
+      renderUpcoming(data, maintenanceVerified);
+      renderHistory(data, maintenanceVerified);
     });
   }
 

@@ -35,7 +35,7 @@
   }
 
   function periodValue(data, range) {
-    if (!data || !data.periods) return null;
+    if (!isVerified(data) || !data.periods) return null;
     return data.periods[range] || null;
   }
 
@@ -69,7 +69,7 @@
     var container = document.getElementById("service-uptime-grid");
     if (!container) return;
 
-    var services = (data && data.services) || [];
+    var services = isVerified(data) ? (data.services || []) : [];
     if (services.length === 0) {
       container.innerHTML =
         '<p class="text-muted" style="padding:8px 0;">No per-service uptime data is available.</p>';
@@ -107,7 +107,7 @@
     var container = document.getElementById("uptime-bar-chart");
     if (!container) return;
 
-    var history = (data && data.history) || [];
+    var history = isVerified(data) ? (data.history || []) : [];
     var rangeMap = { "24h": 1, "7d": 7, "30d": 30, "90d": 90 };
     var days = rangeMap[currentRange] || 90;
     var measured = history.filter(function (d) {
@@ -178,11 +178,11 @@
     var container = document.getElementById("recent-downtime");
     if (!container) return;
 
-    var downtime = (data && data.recentDowntime) || [];
+    var downtime = isVerified(data) ? (data.recentDowntime || []) : [];
     if (downtime.length === 0) {
       container.innerHTML =
         '<p class="text-muted" style="padding:8px 0;">' +
-        "No downtime has been recorded by the monitoring source.</p>";
+        (isVerified(data) ? "No downtime has been recorded by the monitoring source." : "Downtime history is unavailable until a verified monitoring source is connected.") + "</p>";
       return;
     }
 

@@ -52,3 +52,52 @@ jobs:
           npx --yes wrangler@4 pages deploy "$RUNNER_TEMP/status-site" \
             --project-name=status-pesaguard \
             --branch=main
+
+      - name: Smoke-test production status site, security headers, API and CORS
+        env:
+          STATUS_URL: https://status.pesaguard.co.ke
+          API_URL: https://api.pesaguard.co.ke
+        run: |
+          set -eu
+          # Give Cloudflare a short window to propagate the new deployment.
+          curl --fail --silent --show-error --retry 5 --retry-delay 10 --retry-all-errors \
+            --max-time 30 "$STATUS_URL/" -o "$RUNNER_TEMP/status-home.html"
+          grep -q "PesaGuard System Status" "$RUNNER_TEMP/status-home.html"
+
+          curl --silent --show-error --retry 5 --retry-delay 10 --retry-all-errors \
+            --max-time 30 -D "$RUNNER_TEMP/status-headers.txt" \
+            -o "$RUNNER_TEMP/status-home-body.html" "$STATUS_URL/"
+          grep -qi '^content-security-policy:' "$RUNNER_TEMP/status-headers.txt"
+          grep -qi '^x-content-type-options: nosniff' "$RUNNER_TEMP/status-headers.txt"
+          grep -qi '^referrer-policy: strict-origin-when-cross-origin' "$RUNNER_TEMP/status-headers.txt"
+          grep -qi '^x-frame-options: DENY' "$RUNNER_TEMP/status-headers.txt"
+
+          # A 503 is acceptable only when it contains a verified degraded/outage payload.
+          status_code=$(curl --silent --show-error --max-time 30 \
+            -o "$RUNNER_TEMP/api-status.json" -w '%{http_code}' "$API_URL/public/status")
+          case "$status_code" in 200|503) ;; *) echo "Unexpected public status API HTTP $status_code"; exit 1;; esac
+          node -e '
+            const fs = require("fs");
+            const d = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            if (d.verified !== true) throw new Error("API status payload is not verified");
+            if (!d.overall || !["operational","degraded","outage","maintenance","unknown"].includes(d.overall.status)) throw new Error("Invalid overall status");
+            if (!Array.isArray(d.services)) throw new Error("Missing services array");
+          ' "$RUNNER_TEMP/api-status.json"
+
+          # Verify browser access to the status GET and subscription POST endpoints.
+          for endpoint in /public/status /public/status/subscriptions; do
+            method=GET
+            headers=""
+            if [ "$endpoint" = "/public/status/subscriptions" ]; then
+              method=POST
+              headers="-H Access-Control-Request-Headers:content-type"
+            fi
+            # shellcheck disable=SC2086
+            curl --silent --show-error --max-time 30 -D "$RUNNER_TEMP/cors-headers.txt" \
+              -o /dev/null -X OPTIONS "$API_URL$endpoint" \
+              -H 'Origin: https://status.pesaguard.co.ke' \
+              -H "Access-Control-Request-Method: $method" \
+              $headers
+            grep -qi '^access-control-allow-origin: https://status.pesaguard.co.ke' "$RUNNER_TEMP/cors-headers.txt"
+          done
+          echo "Production smoke checks passed."

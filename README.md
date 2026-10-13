@@ -79,7 +79,9 @@ npm run check
 ## Deploy
 
 The `Deploy status site` workflow runs the status checks before uploading the
-public files to Cloudflare Pages. Pull requests validate without deploying.
+public files to Cloudflare Pages. Pull requests validate without deploying. The
+backend repository owns the scheduled status-email monitor to avoid duplicate
+polling; configure its `PESAGUARD_STATUS_MONITOR_TOKEN` secret there.
 Configure the Cloudflare Pages project as `status-pesaguard` and add the
 repository secrets `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` (Account
 Cloudflare Pages: Edit). Bind `status.pesaguard.co.ke` to that
@@ -151,6 +153,10 @@ structure from data.
 controls, `aria-label` on chart bars, and status conveyed by icon plus text plus
 colour (never colour alone).
 
+## Deployment smoke checks
+
+The production deployment workflow now checks the canonical status hostname after a deployment, verifies the CSP and baseline security headers, validates the API's verified status payload (including valid degraded/outage responses), and checks CORS preflight for the status GET and email-subscription POST. A failed smoke check marks the workflow failed; it does not roll back the already-uploaded static deployment automatically.
+
 ## Remaining gaps
 
 * Email subscription code and tests are implemented, but production delivery
@@ -160,12 +166,12 @@ colour (never colour alone).
   `SMTP_FROM_EMAIL` (recommended sender: `no-reply@pesaguard.co.ke`), and TLS
   settings plus credentials when required; set
   `JWT_SECRET_KEY` and a random `PESAGUARD_STATUS_MONITOR_TOKEN` (at least 32
-  characters) in the backend environment; add the same monitor token as the
-  GitHub Actions repository secret; and deploy the backend and scheduled
-  workflow. Ensure production `PESAGUARD_CORS_ALLOWED_ORIGINS` includes both
+  characters) in the backend environment; add the same monitor token as a
+  GitHub Actions secret in the backend repository; and deploy the backend and
+  its scheduled workflow. Ensure production `PESAGUARD_CORS_ALLOWED_ORIGINS` includes both
   API and status-site origins. Do not treat email delivery or production
   monitoring as verified until tested after deployment.
-* The monitor workflow polls every five minutes. A status change can therefore
+* The backend monitor workflow polls every five minutes. A status change can therefore
   take up to one polling interval to trigger an email, and a brief issue that
   starts and recovers between polls may not be observed. Notifications are
   sent only after a confirmed subscriber's status fingerprint changes.
@@ -174,9 +180,9 @@ colour (never colour alone).
   unavailable rather than inferred.
 * The repository includes a Cloudflare Pages `_headers` file with a restrictive baseline Content Security Policy (CSP), `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`, and frame protections. Validate the effective headers against the live deployment and any new third-party dependencies. Its API status endpoint is subject to the
   backend's public API rate limit.
-* `npm run check` validates data shape, page/component structure, SEO and the
-  no-false-claims contract by reading files. It also runs `js/status.js` against
-  a mock DOM (`tests/home.test.js`), including subscription, confirmation,
-  manual refresh and timer refresh flows. This is not a browser and does not
-  cover incidents.js, maintenance.js or uptime.js — a browser smoke test is
-  therefore still required after front-end changes.
+* `npm run check` validates data shape, page/component structure, SEO, and the
+  no-false-claims contract. It runs `js/status.js` against a mock DOM
+  (`tests/home.test.js`) for subscription and refresh flows, and static regression
+  checks ensure unverified incident, maintenance, and uptime payloads are not
+  presented as measured data. It is not a real browser; browser smoke tests are
+  still required after front-end changes.
