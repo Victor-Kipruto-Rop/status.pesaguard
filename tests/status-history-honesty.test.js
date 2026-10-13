@@ -37,6 +37,25 @@ module.exports = function (ctx) {
       "unverified uptime data must not imply no downtime occurred");
   });
 
+  test("unverified incident and maintenance records are discarded before rendering", function () {
+    var incidents = read("js/incidents.js");
+    var maintenance = read("js/maintenance.js");
+    assert(/payload\.verified === true/.test(incidents),
+      "incident records must require verified source data");
+    assert(/payload\.verified === true/.test(maintenance),
+      "maintenance records must require verified source data");
+  });
+
+  test("unverified uptime values and history are suppressed", function () {
+    var source = read("js/uptime.js");
+    assert(/!isVerified\(data\) \|\| !data\.periods/.test(source),
+      "uptime percentages must require verified measurements");
+    assert(/isVerified\(data\) \? \(data\.history \|\| \[\]\) : \[\]/.test(source),
+      "uptime history must require a verified source");
+    assert(/isVerified\(data\) \? \(data\.recentDowntime \|\| \[\]\) : \[\]/.test(source),
+      "downtime records must require a verified source");
+  });
+
   test("status source files remain explicitly unverified until configured", function () {
     ["incidents", "maintenance", "uptime"].forEach(function (name) {
       var payload = JSON.parse(read("data/" + name + ".json"));
