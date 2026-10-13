@@ -90,7 +90,7 @@ jobs:
             headers=""
             if [ "$endpoint" = "/public/status/subscriptions" ]; then
               method=POST
-              headers="-H Content-Type:application/json"
+              headers="-H Access-Control-Request-Headers:content-type"
             fi
             # shellcheck disable=SC2086
             curl --silent --show-error --max-time 30 -D "$RUNNER_TEMP/cors-headers.txt" \
