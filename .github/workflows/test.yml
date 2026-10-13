@@ -138,7 +138,7 @@ jobs:
             echo "Legacy status/API hostname remains in public config."
             exit 1
           fi
-          grep -q "https://api.pesaguard.co.ke/public/status/monitor" .github/workflows/public-status-monitor.yml
+          test ! -f .github/workflows/public-status-monitor.yml
           grep -q "https://pesaguard.co.ke" components/footer.html
           grep -q "https://app.pesaguard.co.ke" components/footer.html
           node <<'NODE'
