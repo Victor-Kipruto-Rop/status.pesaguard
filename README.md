@@ -180,9 +180,9 @@ The production deployment workflow now checks the canonical status hostname afte
   unavailable rather than inferred.
 * The repository includes a Cloudflare Pages `_headers` file with a restrictive baseline Content Security Policy (CSP), `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`, and frame protections. Validate the effective headers against the live deployment and any new third-party dependencies. Its API status endpoint is subject to the
   backend's public API rate limit.
-* `npm run check` validates data shape, page/component structure, SEO and the
-  no-false-claims contract by reading files. It also runs `js/status.js` against
-  a mock DOM (`tests/home.test.js`), including subscription, confirmation,
-  manual refresh and timer refresh flows. This is not a browser and does not
-  cover incidents.js, maintenance.js or uptime.js — a browser smoke test is
-  therefore still required after front-end changes.
+* `npm run check` validates data shape, page/component structure, SEO, and the
+  no-false-claims contract. It runs `js/status.js` against a mock DOM
+  (`tests/home.test.js`) for subscription and refresh flows, and static regression
+  checks ensure unverified incident, maintenance, and uptime payloads are not
+  presented as measured data. It is not a real browser; browser smoke tests are
+  still required after front-end changes.
