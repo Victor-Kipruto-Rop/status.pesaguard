@@ -182,7 +182,7 @@
     if (downtime.length === 0) {
       container.innerHTML =
         '<p class="text-muted" style="padding:8px 0;">' +
-        "No downtime has been recorded by the monitoring source.</p>";
+        "Downtime history is unavailable until a verified monitoring source is connected.</p>";
       return;
     }
 
