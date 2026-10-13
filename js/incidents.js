@@ -28,7 +28,7 @@
     if (active.length === 0) {
       container.innerHTML =
         '<div class="status-empty" style="text-align:center;padding:48px 24px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--paper-raised);">' +
-        '<p style="margin:0;color:var(--text-muted)">No active incidents. All systems operational.</p>' +
+        '<p style="margin:0;color:var(--text-muted)">Incident records are unavailable because verified incident publishing is not connected. This does not confirm that there are no active incidents.</p>' +
         "</div>";
       return;
     }
@@ -109,8 +109,8 @@
     if (yearKeys.length === 0) {
       container.innerHTML =
         '<div class="status-empty" style="text-align:center;padding:48px 24px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--paper-raised);">' +
-        "<h2>No incident history</h2>" +
-        "<p style=\"color:var(--text-muted);max-width:48ch;margin:0 auto;\">There are no past incidents recorded.</p>" +
+        "<h2>Incident history unavailable</h2>" +
+        "<p style=\"color:var(--text-muted);max-width:48ch;margin:0 auto;\">Incident history cannot be confirmed because no verified incident source is connected.</p>" +
         "</div>";
       return;
     }
