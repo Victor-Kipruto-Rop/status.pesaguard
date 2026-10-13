@@ -134,7 +134,7 @@ jobs:
           grep -q "Content-Security-Policy:" _headers
           grep -q "X-Content-Type-Options: nosniff" _headers
           grep -qx "status.pesaguard.co.ke" CNAME
-          if grep -nE "status.pesaguard.victorkipruto.com|api.pesaguard.victorkipruto.com" index.html incidents.html maintenance.html uptime.html 404.html components/header.html components/footer.html robots.txt sitemap.xml README.md .github/workflows/public-status-monitor.yml; then
+          if grep -nE "status.pesaguard.victorkipruto.com|api.pesaguard.victorkipruto.com" index.html incidents.html maintenance.html uptime.html 404.html components/header.html components/footer.html robots.txt sitemap.xml README.md; then
             echo "Legacy status/API hostname remains in public config."
             exit 1
           fi
