@@ -25,16 +25,16 @@ module.exports = function (ctx) {
     var source = read("js/maintenance.js");
     assert(/verified maintenance source is connected/i.test(source),
       "maintenance empty states must disclose missing verified data");
-    assert(!/No maintenance is currently scheduled\./i.test(source),
-      "unverified maintenance data must not be presented as a confirmed empty schedule");
+    assert(/verified \? "No maintenance is currently scheduled\." : "Scheduled maintenance data is unavailable/i.test(source),
+      "only verified empty maintenance data may show an empty schedule");
   });
 
   test("uptime empty state does not claim no downtime occurred", function () {
     var source = read("js/uptime.js");
     assert(/Downtime history is unavailable until a verified monitoring source is connected\./i.test(source),
       "empty uptime history must disclose missing verified measurements");
-    assert(!/No downtime has been recorded by the monitoring source\./i.test(source),
-      "unverified uptime data must not imply no downtime occurred");
+    assert(/isVerified\(data\) \? "No downtime has been recorded by the monitoring source\." : "Downtime history is unavailable/i.test(source),
+      "only verified uptime data may report no recorded downtime");
   });
 
   test("unverified incident and maintenance records are discarded before rendering", function () {
