@@ -44,7 +44,7 @@
     if (active.length === 0) {
       container.innerHTML =
         '<div class="maintenance-empty">' +
-        "<p>No maintenance is currently in progress.</p>" +
+        "<p>Maintenance status is unavailable until a verified maintenance source is connected.</p>" +
         "</div>";
       return;
     }
@@ -60,7 +60,7 @@
     if (upcoming.length === 0) {
       container.innerHTML =
         '<div class="maintenance-empty">' +
-        "<p>No maintenance is currently scheduled.</p>" +
+        "<p>Scheduled maintenance data is unavailable until a verified maintenance source is connected.</p>" +
         "</div>";
       return;
     }
@@ -76,8 +76,8 @@
     if (completed.length === 0) {
       container.innerHTML =
         '<div class="maintenance-empty">' +
-        "<strong>No maintenance history</strong>" +
-        "<p>There are no past maintenance windows recorded.</p>" +
+        "<strong>Maintenance history unavailable</strong>" +
+        "<p>Maintenance history cannot be confirmed because no verified maintenance source is connected.</p>" +
         "</div>";
       return;
     }
