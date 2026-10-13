@@ -123,6 +123,11 @@ if (suite === "all" || suite === "incidents") {
   require("./incidents.test.js")({ test: test, assert: assert, assertEqual: assertEqual, fs: fs, path: path, BASE: BASE });
 }
 
+/* Status history honesty tests */
+if (suite === "all" || suite === "history") {
+  require("./status-history-honesty.test.js")({ test: test, assert: assert, fs: fs, path: path, BASE: BASE });
+}
+
 /* Uptime tests */
 if (suite === "all" || suite === "uptime") {
   require("./uptime.test.js")({ test: test, assert: assert, assertEqual: assertEqual, fs: fs, path: path, BASE: BASE });
