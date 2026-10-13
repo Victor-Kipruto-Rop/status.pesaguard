@@ -166,9 +166,9 @@ The production deployment workflow now checks the canonical status hostname afte
   `SMTP_FROM_EMAIL` (recommended sender: `no-reply@pesaguard.co.ke`), and TLS
   settings plus credentials when required; set
   `JWT_SECRET_KEY` and a random `PESAGUARD_STATUS_MONITOR_TOKEN` (at least 32
-  characters) in the backend environment; add the same monitor token as the
-  GitHub Actions repository secret; and deploy the backend and scheduled
-  workflow. Ensure production `PESAGUARD_CORS_ALLOWED_ORIGINS` includes both
+  characters) in the backend environment; add the same monitor token as a
+  GitHub Actions secret in the backend repository; and deploy the backend and
+  its scheduled workflow. Ensure production `PESAGUARD_CORS_ALLOWED_ORIGINS` includes both
   API and status-site origins. Do not treat email delivery or production
   monitoring as verified until tested after deployment.
 * The backend monitor workflow polls every five minutes. A status change can therefore
