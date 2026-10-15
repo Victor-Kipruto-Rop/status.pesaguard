@@ -68,6 +68,8 @@ At minimum, validate syntax and imports, focused unit behavior, cross-tenant iso
 ## Open work
 
 - Restore drills use `pesaguard_backend_pipeline/operations/restore_drill.py` and an isolated target database. The `restore_drill` CI job automates this with a self-contained PostgreSQL container.
-- Example: `python pesaguard_backend_pipeline/operations/run_restore_drill.py BACKUP --target-database-url postgresql://.../pesaguard_restore --sentinel-sql "SELECT count(*) FROM transactions"`.
+- Example: `python pesaguard_backend_pipeline/operations/run_restore_drill.py BACKUP --target-database-url postgresql://.../pesaguard_restore --sentinel-sql "SELECT count(*) FROM transactions" --confirm-isolated-target`.
 - The drill writes `restore_drill_result.json` and fails unless restore and sentinel verification both succeed.
+- Both restore-drill commands require explicit isolated-target confirmation and reject a target matching the configured PostgreSQL application database. Reports contain only the target host, port, and database name; they do not include connection credentials or query parameters.
+- Direct restore and PITR commands require `--confirm-restore-target`. Verify `DATABASE_URL` or `PGDATA` before confirmation because restore operations overwrite data or recovery configuration.
 - Targets are RPO near-zero for committed financial transactions and RTO < 15 minutes; record elapsed restore time and validation output with each quarterly drill and each CI run.

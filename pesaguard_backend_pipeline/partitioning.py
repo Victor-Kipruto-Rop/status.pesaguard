@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Mapping
+from urllib.parse import quote
+
+from tenant_context import is_valid_tenant_id
 
 
 def _utc(value: Any = None) -> datetime:
@@ -18,10 +21,17 @@ def _utc(value: Any = None) -> datetime:
 
 def raw_object_partition(tenant_id: str, source: str, observed_at: Any = None) -> str:
     """Return Hive-style object storage partitions for time-bounded raw files."""
+    if not is_valid_tenant_id(tenant_id):
+        raise ValueError("tenant_id must be a valid tenant identifier")
+    if not isinstance(source, str) or not source.strip() or len(source) > 255:
+        raise ValueError("source must be a non-empty string of at most 255 characters")
+
     timestamp = _utc(observed_at)
+    tenant_component = quote(tenant_id.strip(), safe="-._~")
+    source_component = quote(source.strip().lower(), safe="-._~")
     return "/".join((
-        f"tenant={tenant_id}",
-        f"source={str(source).strip().lower()}",
+        f"tenant={tenant_component}",
+        f"source={source_component}",
         f"year={timestamp.year:04d}",
         f"month={timestamp.month:02d}",
         f"day={timestamp.day:02d}",

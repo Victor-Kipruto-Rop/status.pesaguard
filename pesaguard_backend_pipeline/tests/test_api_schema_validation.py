@@ -19,7 +19,7 @@ def test_transaction_request_schema_accepts_valid_payload():
 
 def test_transaction_request_schema_rejects_bad_currency_and_body():
     invalid = _request()
-    invalid["Currency"] = "kes"
+    invalid["Currency"] = "XYZ"
     try:
         validate_transaction_create(invalid)
     except ApiContractError as exc:
@@ -37,6 +37,7 @@ def test_transaction_request_schema_rejects_bad_currency_and_body():
 
 def test_transaction_response_schema_is_checked():
     validate_transaction_response({"status": "accepted", "duplicate": False, "idempotency_key": "key-1"})
+    validate_transaction_response({"status": "quarantined", "idempotency_key": "key-2"})
 
 
 def test_transaction_request_rejects_nonpositive_and_subcent_amounts():

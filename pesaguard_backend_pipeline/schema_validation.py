@@ -6,6 +6,8 @@ from typing import Any, Mapping
 
 from jsonschema import Draft202012Validator
 
+from normalization import NormalizationError, normalize_amount, normalize_currency
+
 
 class SchemaValidationError(ValueError):
     """Raised when a boundary payload violates its JSON Schema contract."""
@@ -23,8 +25,8 @@ CANONICAL_TRANSACTION_SCHEMA: dict[str, Any] = {
         "provider": {"type": "string", "minLength": 1, "maxLength": 64},
         "provider_account_id": {"type": "string", "minLength": 1, "maxLength": 255},
         "TransID": {"type": "string", "minLength": 1, "maxLength": 255},
-        "TransAmount": {"type": ["string", "number"], "pattern": "^[+]?[0-9]+(\\.[0-9]+)?$"},
-        "Currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+        "TransAmount": {"type": ["string", "number"]},
+        "Currency": {"type": "string", "minLength": 1},
         "TransactionType": {"type": "string", "minLength": 1},
         "Status": {"type": "string", "minLength": 1},
         "TransTime": {"type": "string", "minLength": 1},
@@ -88,6 +90,15 @@ def _validate(payload: Mapping[str, Any], schema: Mapping[str, Any], boundary: s
 
 def validate_canonical_transaction(payload: Mapping[str, Any]) -> None:
     _validate(payload, CANONICAL_TRANSACTION_SCHEMA, "canonical transaction")
+    try:
+        currency = normalize_currency(payload["Currency"])
+        amount = normalize_amount(payload["TransAmount"], currency=currency)
+    except (NormalizationError, KeyError) as exc:
+        raise SchemaValidationError(f"canonical transaction monetary value is invalid: {exc}") from exc
+    if payload["Currency"] != currency:
+        raise SchemaValidationError("canonical transaction Currency must be a normalized supported ISO code")
+    if str(payload["TransAmount"]) != amount:
+        raise SchemaValidationError("canonical transaction TransAmount must already be normalized")
 
 
 def validate_event_envelope(payload: Mapping[str, Any]) -> None:

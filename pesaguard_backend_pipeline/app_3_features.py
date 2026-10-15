@@ -263,7 +263,9 @@ def create_webhook():
             action="create_webhook",
             details={"webhook_id": result.get("id"), "url": data.get("url"), "event_types": result.get("event_types")},
         )
-        return jsonify(result), 201
+        response = jsonify(result)
+        response.headers["Cache-Control"] = "no-store"
+        return response, 201
     finally:
         session.close()
 
@@ -298,17 +300,23 @@ def list_webhooks():
 
 @app.route("/webhooks/<webhook_id>", methods=["PUT"])
 @require_auth("manage:webhooks")
+@require_tenant_access()
 def update_webhook(webhook_id: str):
     """Update webhook configuration details."""
     data = request.json or {}
     tenant_id = data.get("tenant_id")
+    update_data = {key: value for key, value in data.items() if key != "tenant_id"}
     session = SessionLocal()
 
     try:
         webhook_mgr = WebhookManager(session)
-        result = webhook_mgr.update_webhook(webhook_id, tenant_id=tenant_id, **data)
+        result = webhook_mgr.update_webhook(webhook_id, tenant_id=tenant_id, **update_data)
         if result.get("error") == "webhook_not_found":
             return jsonify(result), 404
+        if result.get("error") == "signing_secret_required":
+            return jsonify(result), 409
+        if "error" in result:
+            return jsonify(result), 400
 
         current_user = get_current_user()
         _record_action_audit(
@@ -316,7 +324,10 @@ def update_webhook(webhook_id: str):
             tenant_id=tenant_id or getattr(current_user, "tenant_id", "default"),
             actor=getattr(current_user, "user_id", "system"),
             action="update_webhook",
-            details={"webhook_id": webhook_id, **data},
+            details={
+                "webhook_id": webhook_id,
+                **{key: value for key, value in update_data.items() if key != "signing_secret"},
+            },
         )
         return jsonify(result), 200
     finally:
@@ -325,6 +336,7 @@ def update_webhook(webhook_id: str):
 
 @app.route("/webhooks/<webhook_id>/deliveries", methods=["GET"])
 @require_auth("manage:webhooks")
+@require_tenant_access()
 def get_webhook_deliveries(webhook_id: str):
     """Retrieve delivery history logs for a specific webhook."""
     limit = min(max(request.args.get("limit", 50, type=int), 1), 200)
@@ -338,6 +350,52 @@ def get_webhook_deliveries(webhook_id: str):
             "webhook_id": webhook_id,
             "deliveries": deliveries,
         }), 200
+    finally:
+        session.close()
+
+
+@app.route("/webhooks/<webhook_id>/rotate-secret", methods=["POST"])
+@require_auth("manage:webhooks")
+def rotate_webhook_secret(webhook_id: str):
+    user = get_current_user()
+    tenant_id = getattr(user, "tenant_id", None)
+    session = SessionLocal()
+    try:
+        result = WebhookManager(session).rotate_signing_secret(webhook_id, tenant_id)
+        if result.get("error") == "webhook_not_found":
+            return jsonify(result), 404
+        _record_action_audit(
+            session,
+            tenant_id=tenant_id,
+            actor=getattr(user, "user_id", "system"),
+            action="rotate_webhook_secret",
+            details={"webhook_id": webhook_id},
+        )
+        response = jsonify(result)
+        response.headers["Cache-Control"] = "no-store"
+        return response, 200
+    finally:
+        session.close()
+
+
+@app.route("/webhooks/<webhook_id>/revoke-secret", methods=["POST"])
+@require_auth("manage:webhooks")
+def revoke_webhook_secret(webhook_id: str):
+    user = get_current_user()
+    tenant_id = getattr(user, "tenant_id", None)
+    session = SessionLocal()
+    try:
+        result = WebhookManager(session).revoke_signing_secret(webhook_id, tenant_id)
+        if result.get("error") == "webhook_not_found":
+            return jsonify(result), 404
+        _record_action_audit(
+            session,
+            tenant_id=tenant_id,
+            actor=getattr(user, "user_id", "system"),
+            action="revoke_webhook_secret",
+            details={"webhook_id": webhook_id},
+        )
+        return jsonify(result), 200
     finally:
         session.close()
 
@@ -357,18 +415,21 @@ def create_escalation_rule():
 
     try:
         engine_instance = EscalationEngine(session)
-        result = engine_instance.create_rule(
-            tenant_id=tenant_id,
-            name=data.get("name"),
-            description=data.get("description"),
-            condition_field=data.get("condition_field"),
-            condition_operator=data.get("condition_operator"),
-            condition_value=data.get("condition_value"),
-            action=data.get("action"),
-            target=data.get("target"),
-            webhook_url=data.get("webhook_url"),
-            priority=data.get("priority", 0),
-        )
+        try:
+            result = engine_instance.create_rule(
+                tenant_id=tenant_id,
+                name=data.get("name"),
+                description=data.get("description"),
+                condition_field=data.get("condition_field"),
+                condition_operator=data.get("condition_operator"),
+                condition_value=data.get("condition_value"),
+                action=data.get("action"),
+                target=data.get("target"),
+                webhook_url=data.get("webhook_url"),
+                priority=data.get("priority", 0),
+            )
+        except ValueError as exc:
+            return jsonify({"error": "invalid_request", "message": str(exc)}), 400
         current_user = get_current_user()
         _record_action_audit(
             session,
@@ -403,14 +464,28 @@ def list_escalation_rules():
 
 @app.route("/escalation-rules/<rule_id>", methods=["PUT"])
 @require_auth("write:escalation_rules")
+@require_tenant_access()
 def update_escalation_rule(rule_id: str):
-    """Update an existing escalation rule configuration."""
+    """Update an existing escalation rule within the caller's tenant scope."""
     data = request.json or {}
     session = SessionLocal()
 
     try:
         engine_instance = EscalationEngine(session)
-        result = engine_instance.update_rule(rule_id, **data)
+        tenant_id = data.get("tenant_id") or request.args.get("tenant_id")
+        rule_data = dict(data)
+        rule_data.pop("tenant_id", None)
+        try:
+            result = engine_instance.update_rule(rule_id, tenant_id=tenant_id, **rule_data)
+        except ValueError as exc:
+            return jsonify({"error": "invalid_request", "message": str(exc)}), 400
+        if result.get("error") == "rule_not_found":
+            logger.warning(
+                "Escalation rule update rejected: rule_id=%s tenant_id=%s outside tenant scope",
+                rule_id,
+                tenant_id,
+            )
+            return jsonify({"error": "rule_not_found", "message": "Escalation rule not found."}), 404
         return jsonify(result), 200
     finally:
         session.close()

@@ -5,7 +5,7 @@ Enterprise-grade Automated Postgres backup and restoration script with integrity
 Usage:
   python3 backup_postgres.py --help
   python3 backup_postgres.py --backup                                # Create and test a new backup
-  python3 backup_postgres.py --restore /path/to/backup.sql.gz       # Restore database from backup
+  python3 backup_postgres.py --restore /path/to/backup.sql.gz --confirm-restore-target
   python3 backup_postgres.py --test                                  # Test integrity of latest backup
   python3 backup_postgres.py --list                                  # List existing backups
 
@@ -246,8 +246,10 @@ def create_backup() -> Path:
         sys.exit(1)
 
 
-def restore_backup(backup_file: Path) -> None:
+def restore_backup(backup_file: Path, *, confirm_target: bool = False) -> None:
     """Restore database from a backup file using memory-efficient streaming."""
+    if not confirm_target:
+        raise ValueError("restore requires --confirm-restore-target")
     if not backup_file.exists():
         logger.error("Backup file not found: %s", backup_file)
         sys.exit(1)
@@ -367,7 +369,13 @@ def test_backup_integrity(backup_file: Path) -> bool:
         return False
 
 
-def pitr_restore(backup_file: Path, *, target_time: Optional[str] = None, target_xid: Optional[str] = None) -> None:
+def pitr_restore(
+    backup_file: Path,
+    *,
+    target_time: Optional[str] = None,
+    target_xid: Optional[str] = None,
+    confirm_target: bool = False,
+) -> None:
     """Restore a base backup and replay WAL archives to a specific point in time.
 
     Uses PostgreSQL's native PITR mechanism by placing recovery configuration in
@@ -394,6 +402,8 @@ def pitr_restore(backup_file: Path, *, target_time: Optional[str] = None, target
     if not target_time and not target_xid:
         logger.error("Either --target-time or --target-xid must be provided for PITR restore")
         sys.exit(1)
+    if not confirm_target:
+        raise ValueError("PITR restore requires --confirm-restore-target")
 
     try:
         db_params = parse_db_url(DATABASE_URL)
@@ -438,7 +448,7 @@ def pitr_restore(backup_file: Path, *, target_time: Optional[str] = None, target
         # for the base layer, then rely on server-side WAL replay.
         if str(backup_file).endswith((".sql.gz", ".sql.gz.enc")):
             logger.info("Base backup is dump-based; performing standard restore then WAL replay.")
-            restore_backup(backup_file)
+            restore_backup(backup_file, confirm_target=True)
             logger.info("Base restore complete. Configure recovery_target in postgresql.auto.conf and restart Postgres for WAL replay.")
 
         _write_status(
@@ -467,8 +477,16 @@ def main():
     # PITR options (used with --pitr-restore)
     parser.add_argument("--target-time", type=str, metavar="TIMESTAMP", help="Restore to the given UTC timestamp (format: YYYY-MM-DD HH:MM:SS)")
     parser.add_argument("--target-xid", type=str, metavar="XID", help="Restore to the given transaction ID")
+    parser.add_argument(
+        "--confirm-restore-target",
+        action="store_true",
+        help="confirm that DATABASE_URL or PGDATA is the intended restore target",
+    )
 
     args = parser.parse_args()
+
+    if (args.restore or args.pitr_restore) and not args.confirm_restore_target:
+        parser.error("--restore and --pitr-restore require --confirm-restore-target")
 
     if args.backup:
         backup_file = create_backup()
@@ -480,7 +498,7 @@ def main():
             sys.exit(1)
 
     elif args.restore:
-        restore_backup(Path(args.restore))
+        restore_backup(Path(args.restore), confirm_target=True)
 
     elif args.test:
         backups = _backup_artifacts()
@@ -507,7 +525,12 @@ def main():
                 logger.info("  %s (%.2f MB) - Created: %s", backup.name, size_mb, mtime.isoformat())
 
     elif args.pitr_restore:
-        pitr_restore(args.pitr_restore, target_time=args.target_time, target_xid=args.target_xid)
+        pitr_restore(
+            args.pitr_restore,
+            target_time=args.target_time,
+            target_xid=args.target_xid,
+            confirm_target=True,
+        )
 
 
 if __name__ == "__main__":

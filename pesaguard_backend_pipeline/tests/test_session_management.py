@@ -1,6 +1,6 @@
 import pytest
 
-from test_config import configure_test_database
+from test_config import configure_test_database, post_public_registration
 
 configure_test_database()
 
@@ -29,9 +29,10 @@ def test_session_creation_renewal_device_logout_and_global_logout(client):
     email = "session-user@example.com"
     tenant_id = "session-tenant"
     _clean(email, tenant_id)
-    registration = client.post(
-        "/auth/register",
-        json={"username": "session-user", "email": email, "password": "StrongPass123!", "tenant_id": tenant_id},
+    registration = post_public_registration(
+        client,
+        app,
+        {"username": "session-user", "email": email, "password": "StrongPass123!", "tenant_id": tenant_id},
     ).get_json()
     verified = client.post(
         "/auth/verify-email",

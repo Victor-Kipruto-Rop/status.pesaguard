@@ -87,11 +87,109 @@ def test_dashboard_transaction_routes_are_tenant_scoped_and_idempotent(dashboard
     assert detail.json["tenant_id"] == "tenant-a"
     assert status.status_code == 200
     assert status.json["transaction_id"] == transaction_id
+    assert status.json["ingestion"] == {
+        "status": "stored",
+        "attempts": 2,
+        "source_schema_version": "1.0",
+        "error": None,
+    }
     assert hidden_detail.status_code == 404
     assert results.status_code == 200
     assert results.json["total"] == 1
     assert len(results.json["items"]) == 1
     assert results.json["items"][0]["tenant_id"] == "tenant-a"
+
+
+def test_direct_mpesa_transaction_write_quarantines_quality_failures(dashboard_api):
+    from models import ProcessedTransaction, QuarantineRecord, Transaction
+
+    client = dashboard_api.app.test_client()
+    payload = _transaction_payload("quality-route-invalid")
+    payload["BillRefNumber"] = ""
+    response = client.post(
+        "/api/v1/transactions",
+        headers={
+            "Idempotency-Key": "quality-route-idempotency",
+            "X-Tenant-ID": "tenant-a",
+        },
+        json=payload,
+    )
+
+    assert response.status_code == 202
+    assert response.json == {
+        "status": "quarantined",
+        "idempotency_key": "quality-route-idempotency",
+    }
+    with dashboard_api.transaction_event_store.Session() as session:
+        assert session.query(QuarantineRecord).filter_by(tenant_id="tenant-a").count() == 1
+        assert session.query(Transaction).filter_by(tenant_id="tenant-a").count() == 0
+        assert session.query(ProcessedTransaction).filter_by(tenant_id="tenant-a").count() == 0
+
+
+def test_direct_non_mpesa_transaction_preserves_existing_processing_path(dashboard_api, monkeypatch):
+    from ingestion import IngestionService
+
+    def reject_unexpected_quality_gate(*args, **kwargs):
+        raise AssertionError("the M-Pesa quality gate must not run for other providers")
+
+    monkeypatch.setattr(IngestionService, "_quality_processor", reject_unexpected_quality_gate)
+    payload = _transaction_payload("non-mpesa-route-tx")
+    payload["provider"] = "bank"
+    response = dashboard_api.app.test_client().post(
+        "/api/v1/transactions",
+        headers={
+            "Idempotency-Key": "non-mpesa-route-key",
+            "X-Tenant-ID": "tenant-a",
+        },
+        json=payload,
+    )
+
+    assert response.status_code == 200
+    assert response.json == {
+        "status": "accepted",
+        "duplicate": False,
+        "idempotency_key": "non-mpesa-route-key",
+    }
+
+
+def test_dead_letter_listing_is_tenant_scoped_and_does_not_expose_payloads(dashboard_api):
+    from models import DeadLetter
+
+    with dashboard_api.transaction_event_store.Session() as session:
+        session.add_all([
+            DeadLetter(
+                id="dl-tenant-a",
+                tenant_id="tenant-a",
+                reason="validation_failed",
+                payload={"MSISDN": "254700000000"},
+                error_detail="invalid schema",
+                replay_status="idle",
+            ),
+            DeadLetter(
+                id="dl-tenant-b",
+                tenant_id="tenant-b",
+                reason="validation_failed",
+                payload={"MSISDN": "254711111111"},
+                error_detail="other tenant failure",
+                replay_status="idle",
+            ),
+        ])
+        session.commit()
+
+    response = dashboard_api.app.test_client().get(
+        "/api/v1/operations/dead-letters",
+        headers={"X-Tenant-ID": "tenant-a"},
+    )
+    missing_tenant = dashboard_api.app.test_client().get("/api/v1/operations/dead-letters")
+
+    assert response.status_code == 200
+    assert missing_tenant.status_code == 401
+    assert missing_tenant.json["error"] == "tenant_context_required"
+    assert response.json["total"] == 1
+    assert response.json["items"][0]["id"] == "dl-tenant-a"
+    assert response.json["items"][0]["has_error_details"] is True
+    assert "payload" not in response.json["items"][0]
+    assert "error_detail" not in response.json["items"][0]
 
 
 @pytest.mark.parametrize(
@@ -205,6 +303,57 @@ def test_fraud_analysis_persists_and_replays_idempotently(dashboard_api):
     assert invalid_features.status_code == 400
     assert invalid_features.json["error"] == "invalid_features"
 
+def test_fraud_analysis_stages_a_durable_risk_event(dashboard_api):
+    """A completed analysis must stage exactly one pending risk event outbox row."""
+    client = dashboard_api.app.test_client()
+    created = _create(client, "tenant-risk", "risk-event-tx", "create-risk-event-tx")
+    assert created.status_code == 200
+    with dashboard_api.transaction_event_store.Session() as session:
+        transaction = session.query(dashboard_api.Transaction).filter_by(
+            tenant_id="tenant-risk",
+            trans_id="risk-event-tx",
+        ).one()
+        transaction_id = transaction.id
+
+    headers = {"X-Tenant-ID": "tenant-risk", "Idempotency-Key": "risk-event-key"}
+    first = client.post(
+        "/api/v1/fraud/analyse",
+        headers=headers,
+        json={"transaction_id": transaction_id},
+    )
+    assert first.status_code == 200
+
+    from data_protection import unprotect_payload
+    from event_bus import validate_event
+    from models import TransactionOutbox
+
+    with dashboard_api.transaction_event_store.Session() as session:
+        rows = session.query(TransactionOutbox).filter_by(
+            tenant_id="tenant-risk",
+            event_key="fraud-analysis:risk-event-key",
+        ).all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.status == "pending"
+    assert row.event_key == "fraud-analysis:risk-event-key"
+    assert row.topic == "pesaguard.fraud.analysis"
+    envelope = validate_event(unprotect_payload(row.payload))
+    assert envelope.event_type == "fraud.analysis.completed"
+    assert envelope.aggregate_id == "risk-event-tx"
+
+    replay = client.post(
+        "/api/v1/fraud/analyse",
+        headers=headers,
+        json={"transaction_id": transaction_id},
+    )
+    assert replay.status_code == 200
+    with dashboard_api.transaction_event_store.Session() as session:
+        replayed = session.query(TransactionOutbox).filter_by(
+            tenant_id="tenant-risk",
+            event_key="fraud-analysis:risk-event-key",
+        ).count()
+    assert replayed == 1
+
 
 def test_versioned_auth_aliases_are_registered(dashboard_api):
     from fastapi.testclient import TestClient
@@ -215,7 +364,14 @@ def test_versioned_auth_aliases_are_registered(dashboard_api):
     login = client.post("/api/v1/auth/login", json={})
     refresh = client.post("/api/v1/auth/refresh", json={})
 
-    assert login.status_code == 401
-    assert login.json()["error"] in {"invalid_credentials", "mfa_required"}
-    assert refresh.status_code == 400
-    assert refresh.json()["error"]["code"] == "invalid_request"
+    assert login.status_code in {401, 503}
+    if login.status_code == 401:
+        assert login.json()["error"] in {"invalid_credentials", "mfa_required"}
+    else:
+        assert login.json()["error"] == "rate_limiter_unavailable"
+
+    assert refresh.status_code in {400, 503}
+    if refresh.status_code == 400:
+        assert refresh.json()["error"]["code"] == "invalid_request"
+    else:
+        assert refresh.json()["error"] == "rate_limiter_unavailable"

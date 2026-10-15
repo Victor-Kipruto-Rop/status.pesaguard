@@ -11,6 +11,7 @@ This directory captures the decisions that shape how PesaGuard is designed and o
 - [ADR-005: Provider adapters for payment rails](ADR-005-PROVIDER-ADAPTERS.md) — isolate provider-specific logic behind a normalized event contract.
 - [ADR-006: Multi-tenant isolation architecture](ADR-006-MULTI-TENANCY.md) — enforce tenant scoping across storage, APIs, and event processing.
 - [ADR-007: AWS-oriented deployment model](ADR-007-AWS-ARCHITECTURE.md) — define the intended deployment pattern and platform assumptions.
+- [ADR-008: External approval API for retention purges](ADR-008-RETENTION-APPROVAL-API.md) — require a scoped, policy-bound, one-time external approval before destructive retention cleanup.
 
 ## Decision review expectations
 

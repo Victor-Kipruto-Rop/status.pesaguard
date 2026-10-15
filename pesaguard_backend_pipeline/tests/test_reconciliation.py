@@ -61,3 +61,18 @@ def test_duplicate_transaction_is_flagged_without_double_alerting():
 
     assert "duplicate_transaction_id" in result["anomalies"]
     assert result["duplicate"] is True
+
+
+def test_equal_scoring_legacy_candidates_are_reviewed_not_silently_matched():
+    event = make_event(trans_id="T-500")
+    records = [
+        make_internal_record(internal_ref="ORD-B"),
+        make_internal_record(internal_ref="ORD-A"),
+    ]
+
+    result = evaluate_transaction(event, records, seen_trans_ids=set())
+
+    assert result["status"] == "needs_review"
+    assert result["severity"] == "warning"
+    assert result["match"]["match_type"] == "ambiguous"
+    assert result["match"]["ambiguous_candidate_refs"] == ["ORD-A", "ORD-B"]

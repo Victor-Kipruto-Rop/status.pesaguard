@@ -46,19 +46,44 @@ jobs:
           pip install alembic
       - name: Compile Python modules
         run: python -m compileall -q pesaguard_backend_pipeline
+      - name: Provision isolated migration roles
+        env:
+          DATABASE_URL: postgresql://pesaguard:pesaguard@localhost:5432/pesaguard_ci
+        run: |
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
+          DO $roles$
+          BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pesaguard_app') THEN
+              CREATE ROLE pesaguard_app NOLOGIN;
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pesaguard_tenant_registry') THEN
+              CREATE ROLE pesaguard_tenant_registry NOLOGIN;
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pesaguard_api_key_lookup') THEN
+              CREATE ROLE pesaguard_api_key_lookup NOLOGIN;
+            END IF;
+          END
+          $roles$;
+          SQL
       - name: Validate migrations against PostgreSQL
         env:
           DATABASE_URL: postgresql://pesaguard:pesaguard@localhost:5432/pesaguard_ci
+          PESAGUARD_APPLICATION_DB_ROLE: pesaguard_app
+          PESAGUARD_TENANT_REGISTRY_DB_ROLE: pesaguard_tenant_registry
+          PESAGUARD_API_KEY_LOOKUP_DB_ROLE: pesaguard_api_key_lookup
           PYTHONPATH: .
           JWT_SECRET_KEY: ci-jwt-secret-key-with-at-least-32-bytes
         run: alembic upgrade head
       - name: Run tests
         env:
           DATABASE_URL: postgresql://pesaguard:pesaguard@localhost:5432/pesaguard_ci
+          PYTEST_TEST_DB_URL: postgresql://pesaguard:pesaguard@localhost:5432/pesaguard_ci
+          PESAGUARD_APPLICATION_DB_ROLE: pesaguard_app
+          PESAGUARD_TENANT_REGISTRY_DB_ROLE: pesaguard_tenant_registry
+          PESAGUARD_API_KEY_LOOKUP_DB_ROLE: pesaguard_api_key_lookup
           REDIS_URL: redis://localhost:6379/0
           PYTHONPATH: .
           DARAJA_SHARED_SECRET: ci-daraja-secret
-          PESAGUARD_ALLOW_UNRESTRICTED_WEBHOOK_SOURCE: "1"
           JWT_SECRET_KEY: ci-jwt-secret-key-with-at-least-32-bytes
         run: pytest -v --tb=short --durations=10
 

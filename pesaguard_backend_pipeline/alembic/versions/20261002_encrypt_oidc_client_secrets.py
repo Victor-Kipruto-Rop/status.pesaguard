@@ -13,7 +13,7 @@ from cryptography.fernet import Fernet
 
 
 revision = "20261002_encrypt_oidc_client_secrets"
-down_revision = "20261001_add_user_devices"
+down_revision = "20261002_create_oidc_providers"
 branch_labels = None
 depends_on = None
 

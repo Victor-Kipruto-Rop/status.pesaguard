@@ -85,11 +85,15 @@ The settlement services described above are implemented in
 | Settlement Reporting Service | `SettlementReportingService` | Read-only, tenant-scoped queries; Decimals serialized as strings. |
 
 - **Persistence:** `Settlement` and `SettlementLine` models in `models.py`
-  (`NUMERIC(18,2)` money columns, non-empty `tenant_id` check constraints,
-  unique `(tenant_id, settlement_key)` for idempotency).
+  (`NUMERIC(19,3)` money columns, non-empty `tenant_id` check constraints,
+  unique `(tenant_id, settlement_key, currency)` for idempotency).
+- **Currency contract:** calculations validate every input at its currency's
+  minor-unit precision and reject mixed-currency lines. Currency buckets are
+  distinct; there is no implicit FX conversion. Provider input is never rounded;
+  `ROUND_HALF_UP` is used only for explicitly derived totals.
 - **Migration:** Alembic revision `20261009_settlement_scheduler`
-  (`alembic/versions/20261009_add_settlement_scheduler.py`).
+  (`alembic/versions/20261009_add_settlement_scheduler.py`), extended by
+  `20261013_currency_minor_units`.
 - **Tests:** `tests/test_settlement.py` covers money math, idempotency,
   lifecycle (calculate → reconcile → settle), variance handling, tenant
   isolation, and state-machine rejection.
-

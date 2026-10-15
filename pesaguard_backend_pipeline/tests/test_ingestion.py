@@ -18,7 +18,15 @@ class FakeEventStore:
         self.calls = []
         self.seen = set()
 
-    def mark_processed(self, payload, *, tenant_id, idempotency_key_override):
+    def mark_processed(
+        self,
+        payload,
+        *,
+        tenant_id,
+        idempotency_key_override,
+        source_ip=None,
+        signature_verified=False,
+    ):
         self.calls.append((payload, tenant_id, idempotency_key_override))
         if idempotency_key_override in self.seen:
             return ProcessResult.DUPLICATE

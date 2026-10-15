@@ -169,10 +169,44 @@ class OnCallService:
         )
         return [self._rotation_to_dict(r) for r in rotations]
 
-    def update_rotation(self, rotation_id: str, **kwargs) -> Dict[str, Any]:
-        """Update properties or shift times of an existing rotation."""
-        rotation = self.session.query(OnCallRotation).filter(OnCallRotation.id == rotation_id).first()
+    # Identity columns (id, tenant_id, created_at) and operator identity stay
+    # immutable so an update can never move a rotation between tenants.
+    UPDATABLE_ROTATION_FIELDS = frozenset(
+        {
+            "operator_name",
+            "operator_email",
+            "operator_phone",
+            "shift_start",
+            "shift_end",
+            "escalation_level",
+            "is_active",
+        }
+    )
+
+    def update_rotation(self, rotation_id: str, *, tenant_id: str, **kwargs) -> Dict[str, Any]:
+        """Update allowed properties of one rotation owned by ``tenant_id``.
+
+        The lookup is tenant-scoped so a caller can never read or modify
+        another tenant's rotation. Unsupported fields raise ``ValueError``.
+        """
+        if not str(tenant_id or "").strip():
+            raise ValueError("tenant_id is required to update an on-call rotation")
+        unsupported = set(kwargs) - self.UPDATABLE_ROTATION_FIELDS
+        if unsupported:
+            raise ValueError(
+                f"unsupported rotation fields: {', '.join(sorted(unsupported))}"
+            )
+        rotation = (
+            self.session.query(OnCallRotation)
+            .filter(OnCallRotation.id == rotation_id, OnCallRotation.tenant_id == tenant_id)
+            .first()
+        )
         if not rotation:
+            logger.warning(
+                "Rotation update denied: rotation_id=%s tenant_id=%s not found in tenant scope",
+                rotation_id,
+                tenant_id,
+            )
             return {"error": "rotation_not_found"}
 
         now = datetime.now(timezone.utc)
@@ -181,28 +215,40 @@ class OnCallService:
         if "shift_end" in kwargs:
             kwargs["shift_end"] = _parse_iso_datetime(kwargs["shift_end"])
 
-        shift_start = kwargs.get("shift_start", rotation.shift_start)
-        shift_end = kwargs.get("shift_end", rotation.shift_end)
+        # Stored datetimes may be timezone-naive (SQLite); normalise before
+        # comparing so updates never crash on naive/aware mixing.
+        shift_start = _ensure_utc(kwargs.get("shift_start", rotation.shift_start))
+        shift_end = _ensure_utc(kwargs.get("shift_end", rotation.shift_end))
         if shift_start and shift_end:
             kwargs["is_active"] = shift_start <= now < shift_end
 
         for key, value in kwargs.items():
-            if hasattr(rotation, key):
-                setattr(rotation, key, value)
+            setattr(rotation, key, value)
 
         self.session.commit()
-        logger.info("Updated rotation_id=%s", rotation_id)
+        logger.info("Updated rotation_id=%s for tenant_id=%s", rotation_id, tenant_id)
         return self._rotation_to_dict(rotation)
 
-    def delete_rotation(self, rotation_id: str) -> Dict[str, Any]:
-        """Delete an on-call rotation record."""
-        rotation = self.session.query(OnCallRotation).filter(OnCallRotation.id == rotation_id).first()
+    def delete_rotation(self, rotation_id: str, *, tenant_id: str) -> Dict[str, Any]:
+        """Delete a rotation only when it belongs to ``tenant_id``."""
+        if not str(tenant_id or "").strip():
+            raise ValueError("tenant_id is required to delete an on-call rotation")
+        rotation = (
+            self.session.query(OnCallRotation)
+            .filter(OnCallRotation.id == rotation_id, OnCallRotation.tenant_id == tenant_id)
+            .first()
+        )
         if not rotation:
+            logger.warning(
+                "Rotation deletion denied: rotation_id=%s tenant_id=%s not found in tenant scope",
+                rotation_id,
+                tenant_id,
+            )
             return {"error": "rotation_not_found"}
 
         self.session.delete(rotation)
         self.session.commit()
-        logger.info("Deleted rotation_id=%s", rotation_id)
+        logger.info("Deleted rotation_id=%s for tenant_id=%s", rotation_id, tenant_id)
         return {"status": "deleted", "id": rotation_id}
 
     def get_coverage_status(self, tenant_id: str) -> Dict[str, Any]:

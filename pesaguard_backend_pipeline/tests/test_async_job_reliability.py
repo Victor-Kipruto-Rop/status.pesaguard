@@ -163,7 +163,7 @@ def test_failed_job_without_dict_payload_falls_back_safely(task_db):
 
     with factory() as session:
         row = session.query(DeadLetter).filter_by(id="dlq_job_job-2").one()
-        assert row.tenant_id == "default"
+        assert row.tenant_id == background_tasks.UNATTRIBUTED_TENANT_ID
         assert row.reason == "background_job_failed"
 
 
@@ -224,8 +224,9 @@ def test_replay_is_tenant_scoped(replay_db, monkeypatch):
         lambda topic, payload: published.append((topic, payload)),
     )
 
-    # Wrong tenant: must be a no-op, nothing published, row untouched.
-    replay_dead_letter_job("dlq-replay-1", "tenant-b")
+    # Wrong tenant: fail explicitly without exposing or changing the row.
+    with pytest.raises(LookupError, match="not found"):
+        replay_dead_letter_job("dlq-replay-1", "tenant-b")
 
     assert published == []
     with factory() as session:
@@ -234,7 +235,7 @@ def test_replay_is_tenant_scoped(replay_db, monkeypatch):
         assert row.processed is not True
 
 
-def test_replay_ignores_non_queued_entries(replay_db, monkeypatch):
+def test_replay_rejects_non_queued_entries(replay_db, monkeypatch):
     _, factory = replay_db
     _seed_dead_letter(factory, id="dlq-idle-1", replay_status="idle")
     published = []
@@ -243,12 +244,61 @@ def test_replay_ignores_non_queued_entries(replay_db, monkeypatch):
         lambda topic, payload: published.append((topic, payload)),
     )
 
-    replay_dead_letter_job("dlq-idle-1", "tenant-a")
+    with pytest.raises(RuntimeError, match="not queued"):
+        replay_dead_letter_job("dlq-idle-1", "tenant-a")
 
     assert published == []
     with factory() as session:
         row = session.query(DeadLetter).filter_by(id="dlq-idle-1").one()
         assert row.replay_status == "idle"
+
+
+def test_recent_replay_lease_prevents_duplicate_delivery(replay_db, monkeypatch):
+    _, factory = replay_db
+    _seed_dead_letter(
+        factory,
+        id="dlq-active-1",
+        replay_status="replaying",
+        replayed_at=background_tasks.datetime.now(background_tasks.timezone.utc),
+    )
+    published = []
+    monkeypatch.setattr(
+        "producer.publish_transaction_event",
+        lambda topic, payload: published.append((topic, payload)),
+    )
+
+    replay_dead_letter_job("dlq-active-1", "tenant-a")
+
+    assert published == []
+    with factory() as session:
+        assert session.query(DeadLetter).filter_by(
+            id="dlq-active-1",
+            replay_status="replaying",
+        ).count() == 1
+
+
+def test_stale_replay_is_quarantined_for_operator_review(replay_db, monkeypatch):
+    _, factory = replay_db
+    stale = background_tasks.datetime.now(background_tasks.timezone.utc) - background_tasks.timedelta(
+        seconds=background_tasks.DEAD_LETTER_REPLAY_LEASE_SECONDS + 1
+    )
+    _seed_dead_letter(
+        factory,
+        id="dlq-stale-1",
+        replay_status="replaying",
+        replayed_at=stale,
+    )
+
+    with pytest.raises(
+        background_tasks.DeadLetterReplayRecoveryRequired,
+        match="operator review",
+    ):
+        replay_dead_letter_job("dlq-stale-1", "tenant-a")
+
+    with factory() as session:
+        row = session.query(DeadLetter).filter_by(id="dlq-stale-1").one()
+        assert row.replay_status == "failed"
+        assert "operator review required" in row.error_detail
 
 
 def test_replay_failure_marks_failed_preserves_error_and_raises(replay_db, monkeypatch):
@@ -268,3 +318,38 @@ def test_replay_failure_marks_failed_preserves_error_and_raises(replay_db, monke
         assert row.replay_status == "failed"
         assert "broker unreachable" in (row.error_detail or "")
         assert row.processed is not True
+
+
+def test_validation_dead_letter_replay_reingests_through_the_idempotent_store(
+    replay_db, monkeypatch
+):
+    from models import Transaction
+
+    engine, factory = replay_db
+    payload = {
+        "TransactionType": "Pay Bill",
+        "TransID": "REPLAY-1",
+        "TransTime": "20261013120000",
+        "TransAmount": "10.00",
+        "BusinessShortCode": "123456",
+        "MSISDN": "254700000000",
+    }
+    _seed_dead_letter(
+        factory,
+        id="dlq-validation-1",
+        reason="validation_failed",
+        payload=payload,
+    )
+    monkeypatch.setattr(background_tasks, "DATABASE_URL", str(engine.url))
+
+    replay_dead_letter_job("dlq-validation-1", "tenant-a")
+
+    with factory() as session:
+        assert session.query(Transaction).filter_by(
+            tenant_id="tenant-a",
+            trans_id="REPLAY-1",
+        ).count() == 1
+        dead_letter = session.query(DeadLetter).filter_by(id="dlq-validation-1").one()
+        assert dead_letter.replay_status == "ingested"
+        assert dead_letter.processed is True
+        assert dead_letter.processed_at is not None

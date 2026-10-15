@@ -186,7 +186,7 @@ def test_scheduler_unknown_task_records_failure_and_advances(tmp_path):
     sched = Scheduler(session, lock=DistributedLockService())  # no handlers
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     sched.register("tenant-a", "job-x", "missing-task", 60,
-                   first_run_at=now - timedelta(seconds=1))
+                   first_run_at=now - timedelta(seconds=1), max_attempts=1)
     outcomes = sched.run_due(now=now)
     assert outcomes[0]["status"] == "failed"
     job = session.query(ScheduledJob).filter_by(job_key="job-x").one()
@@ -220,4 +220,3 @@ def test_scheduler_second_worker_skips_locked(tmp_path):
         assert outcomes[0]["status"] == "skipped_locked"
     finally:
         lock.release(f"scheduler:{job_id}", token)
-

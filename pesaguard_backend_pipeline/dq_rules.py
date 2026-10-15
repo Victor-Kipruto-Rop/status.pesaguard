@@ -8,9 +8,11 @@ validator wrappers used by tests or processors.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Dict, Optional, Tuple
 
 from data_quality import DataQualityFailure, DataQualityRule
+from normalization import DEFAULT_CURRENCY, NormalizationError, normalize_amount, normalize_currency
 
 
 def _pick_string(payload: Dict[str, Any], *keys: str) -> Optional[str]:
@@ -25,12 +27,19 @@ def _pick_string(payload: Dict[str, Any], *keys: str) -> Optional[str]:
 
 
 
-def _try_amount(payload: Dict[str, Any], *keys: str) -> Optional[float]:
+def _try_amount(payload: Dict[str, Any], *keys: str) -> Optional[Decimal]:
     for key in keys:
         if key in payload:
             try:
-                return float(payload[key])
-            except (TypeError, ValueError):
+                currency = normalize_currency(
+                    payload.get("Currency")
+                    or payload.get("CurrencyCode")
+                    or payload.get("currency")
+                    or payload.get("currency_code")
+                    or DEFAULT_CURRENCY
+                )
+                return Decimal(normalize_amount(payload[key], currency=currency))
+            except (NormalizationError, TypeError, ValueError):
                 return None
     return None
 
@@ -77,10 +86,15 @@ def _rule_amount_positive(raw: Dict[str, Any], normalized: Optional[Dict[str, An
 
 def _rule_currency_valid(raw: Dict[str, Any], normalized: Optional[Dict[str, Any]]) -> Tuple[bool, Optional[DataQualityFailure]]:
     value = _pick_string(raw, "Currency", "CurrencyCode", "currency", "currency_code")
-    if value and value.strip().upper() in {"KES", "USD"}:
+    try:
+        if not value or not value.strip():
+            raise NormalizationError("currency is required")
+        normalize_currency(value)
         return True, None
+    except NormalizationError:
+        pass
     return False, DataQualityFailure(
-        rule=DataQualityRule("currency_valid", "validity", "Currency must be a supported value", "currency in KES, USD"),
+        rule=DataQualityRule("currency_valid", "validity", "Currency must be a supported value", "currency in supported currencies"),
         value=value,
         reason=f"unsupported currency: {value!r}",
     )
@@ -98,7 +112,16 @@ def _rule_provider_valid(raw: Dict[str, Any], normalized: Optional[Dict[str, Any
 
 
 def _rule_reference_valid(raw: Dict[str, Any], normalized: Optional[Dict[str, Any]]) -> Tuple[bool, Optional[DataQualityFailure]]:
-    value = _pick_string(raw, "BillRefNumber", "BillReferenceNumber", "reference", "reference_number", "AccountReference")
+    reference_keys = (
+        "BillRefNumber",
+        "BillReferenceNumber",
+        "reference",
+        "reference_number",
+        "AccountReference",
+    )
+    value = _pick_string(raw, *reference_keys)
+    if value is None and not any(key in raw for key in reference_keys):
+        return True, None
     if value and value.strip():
         return True, None
     return False, DataQualityFailure(
@@ -128,4 +151,3 @@ def _rule_schema_version_present(raw: Dict[str, Any], normalized: Optional[Dict[
         value=value,
         reason="schema version is missing or empty",
     )
-

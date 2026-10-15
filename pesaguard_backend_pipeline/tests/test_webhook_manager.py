@@ -11,11 +11,15 @@ def test_webhook_delivery_history_retains_owner_tenant(monkeypatch):
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     session = sessionmaker(bind=engine)()
-    monkeypatch.setattr(webhook_manager, "_validate_webhook_url", lambda url: None)
     monkeypatch.setattr(
-        webhook_manager.requests,
-        "post",
-        lambda *args, **kwargs: SimpleNamespace(status_code=204, text="", is_redirect=False),
+        webhook_manager,
+        "_resolve_webhook_destination",
+        lambda url: (None, ("93.184.216.34",)),
+    )
+    monkeypatch.setattr(
+        webhook_manager,
+        "_post_pinned_webhook",
+        lambda *args, **kwargs: SimpleNamespace(status_code=204, body=b"", is_redirect=False),
     )
 
     manager = webhook_manager.WebhookManager(session)

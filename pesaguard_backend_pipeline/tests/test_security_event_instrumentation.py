@@ -86,21 +86,79 @@ def test_auth_risk_metrics_use_bounded_decision_and_signal_labels():
 
 def test_alertmanager_secret_mismatch_records_security_event(monkeypatch):
     calls = _spy_on_security_events(monkeypatch)
-    app = flask.Flask("security-test")
-    app.config["TESTING"] = True
+    from app import app as receiver_app
+    import app as receiver_module
 
-    data = b'{"alerts":[]}'
-    headers = {"X-Alertmanager-Secret": "wrong"}
+    monkeypatch.setattr(receiver_module, "record_security_event", lambda: calls.append(1))
     monkeypatch.setenv("PESAGUARD_ALERTMANAGER_WEBHOOK_SECRET", RANDOM_SECRET)
-    with app.test_request_context("/ops/alerts", method="POST", data=data, headers=headers):
-        import hmac
-        import os
+    monkeypatch.delenv("PESAGUARD_ALERTMANAGER_WEBHOOK_SECRET_FILE", raising=False)
 
-        secret = os.getenv("PESAGUARD_ALERTMANAGER_WEBHOOK_SECRET", "").strip()
-        provided = flask.request.headers.get("X-Alertmanager-Secret", "")
-        if secret and not hmac.compare_digest(provided, secret):
-            metrics.record_security_event()
-        assert calls, "alertmanager secret mismatch did not increment security_events"
+    response = receiver_app.test_client().post(
+        "/ops/alerts",
+        json={"alerts": []},
+        headers={"X-Alertmanager-Secret": "wrong"},
+    )
+    assert response.status_code == 401
+    assert calls, "alertmanager secret mismatch did not increment security_events"
+
+
+def test_alertmanager_webhook_fails_closed_and_accepts_configured_bearer(
+    monkeypatch, tmp_path
+):
+    from app import app as receiver_app
+
+    monkeypatch.delenv("PESAGUARD_ALERTMANAGER_WEBHOOK_SECRET", raising=False)
+    monkeypatch.delenv("PESAGUARD_ALERTMANAGER_WEBHOOK_SECRET_FILE", raising=False)
+    client = receiver_app.test_client()
+
+    unconfigured = client.post("/ops/alerts", json={"alerts": []})
+    assert unconfigured.status_code == 503
+
+    secret_file = tmp_path / "alertmanager-secret"
+    secret_file.write_text(RANDOM_SECRET, encoding="utf-8")
+    monkeypatch.setenv("PESAGUARD_ALERTMANAGER_WEBHOOK_SECRET_FILE", str(secret_file))
+
+    short_secret_file = tmp_path / "short-alertmanager-secret"
+    short_secret_file.write_text("too-short", encoding="utf-8")
+    monkeypatch.setenv(
+        "PESAGUARD_ALERTMANAGER_WEBHOOK_SECRET_FILE",
+        str(short_secret_file),
+    )
+    short_secret = client.post("/ops/alerts", json={"alerts": []})
+    assert short_secret.status_code == 503
+
+    monkeypatch.setenv(
+        "PESAGUARD_ALERTMANAGER_WEBHOOK_SECRET_FILE",
+        str(tmp_path / "missing-alertmanager-secret"),
+    )
+    unreadable_secret = client.post("/ops/alerts", json={"alerts": []})
+    assert unreadable_secret.status_code == 503
+
+    invalid_secret_file = tmp_path / "invalid-alertmanager-secret"
+    invalid_secret_file.write_bytes(b"\xff\xfe")
+    monkeypatch.setenv(
+        "PESAGUARD_ALERTMANAGER_WEBHOOK_SECRET_FILE",
+        str(invalid_secret_file),
+    )
+    invalid_secret = client.post("/ops/alerts", json={"alerts": []})
+    assert invalid_secret.status_code == 503
+
+    monkeypatch.setenv("PESAGUARD_ALERTMANAGER_WEBHOOK_SECRET_FILE", str(secret_file))
+    unauthorized = client.post("/ops/alerts", json={"alerts": []})
+    assert unauthorized.status_code == 401
+    invalid = client.post(
+        "/ops/alerts",
+        json={"alerts": []},
+        headers={"Authorization": "Bearer " + "x" * 32},
+    )
+    assert invalid.status_code == 401
+    accepted = client.post(
+        "/ops/alerts",
+        json={"alerts": []},
+        headers={"Authorization": "Bearer " + RANDOM_SECRET},
+    )
+    assert accepted.status_code == 200
+    assert accepted.get_json() == {"status": "accepted", "alerts": 0}
 
 
 def test_dashboard_api_auth_failure_records_security_event(monkeypatch):
@@ -267,6 +325,7 @@ def test_rate_limiter_fail_closed_when_no_redis_backend_is_configured(monkeypatc
     import rate_limiter
 
     monkeypatch.setattr(rate_limiter, "ENABLE_REDIS_RATE_LIMITING", False)
+    monkeypatch.setattr(rate_limiter, "runtime_environment", lambda: "production")
     limiter = rate_limiter.RateLimiter(default_max_per_minute=5, fail_closed=True)
     limiter._redis = None
 
@@ -353,4 +412,3 @@ def test_rate_limit_decorator_returns_503_when_metrics_also_fail(monkeypatch) ->
     response = app.test_client().post("/login")
     assert response.status_code == 503
     assert response.get_json()["error"] == "rate_limiter_unavailable"
-

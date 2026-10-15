@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import smtplib
 import time
-import urllib.error
-import urllib.request
 from email.message import EmailMessage
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit
+
+import requests
 
 try:
     from africas_talking import AfricasTalkingClient
@@ -46,19 +48,59 @@ RETRY_BACKOFF_SECONDS = float(os.getenv("ALERT_RETRY_BACKOFF_SECONDS", "1.0"))
 sms_client = AfricasTalkingClient() if HAS_AFRICAS_TALKING else None
 
 
+def _is_allowed_slack_webhook_url(value: str) -> bool:
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme == "https"
+        and parsed.hostname is not None
+        and parsed.hostname.lower() == "hooks.slack.com"
+        and port in {None, 443}
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.path.startswith("/services/")
+        and not parsed.query
+        and not parsed.fragment
+    )
+
+
+def _slack_retry_delay_seconds(
+    attempt: int,
+    status_code: Optional[int] = None,
+    retry_after: Optional[str] = None,
+) -> float:
+    if status_code == 429 and retry_after:
+        try:
+            requested_delay = float(retry_after)
+        except ValueError:
+            requested_delay = -1
+        if math.isfinite(requested_delay) and requested_delay >= 0:
+            return min(requested_delay, 300)
+    configured_delay = RETRY_BACKOFF_SECONDS * (2 ** min(attempt, 10))
+    return max(0, min(configured_delay, 300))
+
+
 def send_slack_alert(discrepancy: Dict[str, Any], locale: str = "en", max_retries: int = SLACK_RETRIES) -> bool:
     """Send alert payload to Slack via webhook with exponential retries.
 
     Args:
         discrepancy: Discrepancy anomaly dictionary
         locale: Message locale code ('en' or 'sw')
-        max_retries: Maximum retry attempts on network error
+        max_retries: Maximum retry attempts on network or retryable HTTP errors
 
     Returns:
         True if delivered successfully, False otherwise
     """
+    if max_retries < 0:
+        raise ValueError("max_retries must not be negative")
     if not SLACK_WEBHOOK_URL:
         logger.warning("SLACK_WEBHOOK_URL is not set; skipping Slack alert dispatch for trans_id=%s", discrepancy.get("trans_id"))
+        return False
+    if not _is_allowed_slack_webhook_url(SLACK_WEBHOOK_URL):
+        logger.error("SLACK_WEBHOOK_URL must use the approved HTTPS Slack webhook endpoint")
         return False
 
     trans_id = discrepancy.get("trans_id", "unknown")
@@ -69,31 +111,49 @@ def send_slack_alert(discrepancy: Dict[str, Any], locale: str = "en", max_retrie
 
     for attempt in range(max_retries + 1):
         try:
-            req = urllib.request.Request(
+            with requests.post(
                 SLACK_WEBHOOK_URL,
                 data=body,
                 headers={"Content-Type": "application/json"},
-            )
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                if resp.status == 200:
+                timeout=5,
+                allow_redirects=False,
+            ) as resp:
+                if resp.status_code == 200:
                     logger.info("Slack alert sent successfully trans_id=%s tenant_id=%s", trans_id, tenant_id)
                     return True
-                
-                logger.error("Slack alert failed with status %d (attempt %d/%d)", resp.status, attempt + 1, max_retries + 1)
-        except urllib.error.URLError as e:
-            if attempt < max_retries:
-                backoff = RETRY_BACKOFF_SECONDS * (2 ** attempt)
-                logger.warning(
-                    "Slack alert delivery failed (attempt %d/%d): %s. Retrying in %.1fs...",
-                    attempt + 1, max_retries + 1, e, backoff
+                if resp.status_code != 429 and resp.status_code < 500:
+                    logger.error("Slack alert rejected with status %d", resp.status_code)
+                    return False
+                if attempt >= max_retries:
+                    logger.error(
+                        "Slack alert delivery failed after %d attempts with status %d",
+                        max_retries + 1,
+                        resp.status_code,
+                    )
+                    return False
+                backoff = _slack_retry_delay_seconds(
+                    attempt,
+                    resp.status_code,
+                    resp.headers.get("Retry-After"),
                 )
-                time.sleep(backoff)
-            else:
+                logger.warning(
+                    "Slack alert delivery failed with status %d (attempt %d/%d). Retrying in %.1fs.",
+                    resp.status_code,
+                    attempt + 1,
+                    max_retries + 1,
+                    backoff,
+                )
+            time.sleep(backoff)
+        except requests.RequestException as e:
+            if attempt >= max_retries:
                 logger.error("Slack alert delivery failed after %d attempts: %s", max_retries + 1, e)
                 return False
-        except Exception as e:
-            logger.exception("Unexpected error dispatching Slack alert for trans_id=%s: %s", trans_id, e)
-            return False
+            backoff = _slack_retry_delay_seconds(attempt)
+            logger.warning(
+                "Slack alert delivery failed (attempt %d/%d): %s. Retrying in %.1fs...",
+                attempt + 1, max_retries + 1, e, backoff
+            )
+            time.sleep(backoff)
 
     return False
 

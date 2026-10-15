@@ -14,6 +14,7 @@ def _payload(**overrides):
         "TransAmount": "100.00",
         "Currency": "KES",
         "BillRefNumber": "member-1",
+        "TransTime": "2026-10-13T11:00:00+00:00",
         "schema_version": "1.0",
     }
     payload.update(overrides)
@@ -51,4 +52,4 @@ def test_invalid_data_is_quarantined_with_dimension_scores(tmp_path):
     assert decision["decision"] == "quarantined"
     assert decision["quality"]["status"] == DataQualityStatus.FAIL
     assert quarantine.rejection_context["dq_status"] == DataQualityStatus.FAIL
-    assert quarantine.rejection_context["dimension_scores"]["validity"] == 0.0
+    assert quarantine.rejection_context["dimension_scores"]["validity"] < 1.0

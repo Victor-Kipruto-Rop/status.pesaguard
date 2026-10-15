@@ -2,7 +2,19 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import CheckConstraint, Column, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import (
+    CheckConstraint,
+    Column,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    Integer,
+    JSON,
+    String,
+    Text,
+    UniqueConstraint,
+)
 
 try:
     from models import Base as _LocalBase
@@ -26,6 +38,7 @@ class CommunicationNotification(Base):
     __tablename__ = "communication_notifications"
     __table_args__ = (
         UniqueConstraint("tenant_id", "idempotency_key", name="uq_communication_notification_idempotency"),
+        UniqueConstraint("id", "tenant_id", name="uq_communication_notification_id_tenant"),
         CheckConstraint("tenant_id IS NOT NULL AND tenant_id <> ''", name="ck_communication_notification_tenant_id_nonempty"),
         CheckConstraint("status IN ('created', 'queued', 'processing', 'accepted', 'submitted', 'sent', 'delivered', 'opened', 'clicked', 'bounced', 'complained', 'failed', 'rejected', 'expired', 'cancelled', 'retrying', 'dead_letter')", name="ck_communication_notification_status"),
         CheckConstraint("priority IN ('critical', 'high', 'normal', 'low', 'bulk')", name="ck_communication_notification_priority"),
@@ -62,6 +75,11 @@ class CommunicationOutboxEntry(Base):
     __tablename__ = "communication_outbox_entries"
     __table_args__ = (
         UniqueConstraint("notification_id", name="uq_communication_outbox_notification"),
+        ForeignKeyConstraint(
+            ["notification_id", "tenant_id"],
+            ["communication_notifications.id", "communication_notifications.tenant_id"],
+            name="fk_communication_outbox_notification_tenant",
+        ),
         CheckConstraint("tenant_id IS NOT NULL AND tenant_id <> ''", name="ck_communication_outbox_entry_tenant_id_nonempty"),
         CheckConstraint("status IN ('pending', 'leased', 'retrying', 'completed', 'dead_letter')", name="ck_communication_outbox_status"),
         CheckConstraint("attempt_count >= 0 AND max_attempts > 0", name="ck_communication_outbox_attempt_counts"),
@@ -89,12 +107,18 @@ class CommunicationAttempt(Base):
     __tablename__ = "communication_attempts"
     __table_args__ = (
         UniqueConstraint("notification_id", "attempt_number", name="uq_communication_attempt_number"),
+        ForeignKeyConstraint(
+            ["notification_id", "tenant_id"],
+            ["communication_notifications.id", "communication_notifications.tenant_id"],
+            name="fk_communication_attempt_notification_tenant",
+        ),
         Index("ix_communication_attempt_notification_started", "notification_id", "started_at"),
         {"extend_existing": True},
     )
 
     id = Column(String(64), primary_key=True)
     notification_id = Column(String(64), ForeignKey("communication_notifications.id"), nullable=False)
+    tenant_id = Column(String(128), nullable=False)
     attempt_number = Column(Integer, nullable=False)
     provider = Column(String(64), nullable=False)
     status = Column(String(32), nullable=False)
@@ -112,6 +136,11 @@ class CommunicationDeliveryReport(Base):
     __tablename__ = "communication_delivery_reports"
     __table_args__ = (
         UniqueConstraint("provider", "provider_event_id", name="uq_communication_delivery_provider_event"),
+        ForeignKeyConstraint(
+            ["notification_id", "tenant_id"],
+            ["communication_notifications.id", "communication_notifications.tenant_id"],
+            name="fk_communication_delivery_notification_tenant",
+        ),
         CheckConstraint("tenant_id IS NOT NULL AND tenant_id <> ''", name="ck_communication_delivery_report_tenant_id_nonempty"),
         Index("ix_communication_delivery_notification_received", "notification_id", "received_at"),
         Index("ix_communication_delivery_tenant_status_received", "tenant_id", "status", "received_at"),

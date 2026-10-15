@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 import hashlib
 from datetime import datetime, timezone
-from decimal import InvalidOperation
+import os
 from typing import Any, Dict, Mapping, Optional
 
 from event_store import EventStore, ProcessResult, provider_account_id
@@ -114,19 +114,36 @@ class MpesaAdapter(ProviderAdapter):
         source = dict(payload)
         if "Result" in source:
             raise IngestionError("B2C result callbacks require an explicit provider account mapping")
-        try:
-            source["TransAmount"] = normalize_amount(source.get("TransAmount"))
-        except NormalizationError as exc:
-            raise IngestionError(str(exc)) from exc
-        valid, error = validate_daraja_payload(source)
+        is_stk = isinstance(source.get("Body"), Mapping) and "stkCallback" in source["Body"]
+        normalized_source = dict(source)
+        if is_stk:
+            account = source.get("BusinessShortCode") or os.getenv("DARAJA_BUSINESS_SHORT_CODE", "")
+            if not str(account).strip():
+                raise IngestionError("STK callback requires an explicit provider account mapping")
+            normalized_source = {**source, "BusinessShortCode": str(account).strip()}
+        else:
+            try:
+                currency = normalize_currency(source.get("Currency") or "KES")
+                normalized_source["Currency"] = currency
+                normalized_source["TransAmount"] = normalize_amount(
+                    source.get("TransAmount"), currency=currency
+                )
+            except NormalizationError as exc:
+                raise IngestionError(str(exc)) from exc
+        valid, error = validate_daraja_payload(normalized_source)
         if not valid:
             raise IngestionError(error)
-        canonical = extract_canonical_event(source, tenant_id=tenant_id)
+        canonical = extract_canonical_event(normalized_source, tenant_id=tenant_id)
         if canonical is None:
             raise IngestionError("M-Pesa payload could not be canonicalized")
         lifecycle_time = datetime.now(timezone.utc).isoformat()
         provider_transaction_id = normalize_identifier(canonical["TransID"])
-        account_id = normalize_identifier(provider_account_id(source))
+        try:
+            account_id = normalize_identifier(provider_account_id(normalized_source))
+        except NormalizationError as exc:
+            raise IngestionError("provider account mapping is required") from exc
+        if account_id == "LEGACY-DEFAULT":
+            raise IngestionError("provider account mapping is required")
         canonical_model = CanonicalTransaction(
             tenant_id=tenant_id,
             provider=self.provider,
@@ -134,14 +151,19 @@ class MpesaAdapter(ProviderAdapter):
             transaction_id=_canonical_transaction_id(tenant_id, self.provider, provider_transaction_id),
             provider_transaction_id=provider_transaction_id,
             account_id=account_id,
-            amount=normalize_amount(canonical["TransAmount"]),
-            currency=normalize_currency(source.get("Currency", "KES")),
+            amount=normalize_amount(
+                canonical["TransAmount"],
+                currency=canonical.get("Currency") or normalized_source.get("Currency") or "KES",
+            ),
+            currency=normalize_currency(
+                canonical.get("Currency") or normalized_source.get("Currency") or "KES"
+            ),
             transaction_type=normalize_transaction_type(canonical.get("TransactionType", "PAYMENT")),
             status=normalize_status("RECEIVED"),
             transaction_time=normalize_timestamp(canonical.get("TransTime", "")),
             phone_number=normalize_phone(canonical.get("MSISDN", "")),
             source="mpesa",
-            metadata={"location": normalize_location(source.get("location"))},
+            metadata={"location": normalize_location(normalized_source.get("location"))},
             created_at=lifecycle_time,
             updated_at=lifecycle_time,
             account_reference=str(canonical.get("BillRefNumber", "")),
@@ -176,9 +198,10 @@ class SafaricomApiAdapter(ProviderAdapter):
         if not transaction_id or not account:
             raise IngestionError("Safaricom API response requires transaction ID and account")
         try:
-            normalized_amount = normalize_amount(amount)
-        except (InvalidOperation, TypeError, ValueError, NormalizationError) as exc:
-            raise IngestionError("transaction amount must be a valid decimal") from exc
+            currency = normalize_currency(body.get("currency") or body.get("Currency") or "KES")
+            normalized_amount = normalize_amount(amount, currency=currency)
+        except NormalizationError as exc:
+            raise IngestionError(f"transaction amount or currency is invalid: {exc}") from exc
         lifecycle_time = datetime.now(timezone.utc).isoformat()
         canonical = CanonicalTransaction(
             tenant_id=tenant_id,
@@ -188,7 +211,7 @@ class SafaricomApiAdapter(ProviderAdapter):
             provider_transaction_id=transaction_id,
             account_id=account,
             amount=normalized_amount,
-            currency=normalize_currency(body.get("currency") or body.get("Currency") or "KES"),
+            currency=currency,
             transaction_type=normalize_transaction_type(body.get("transactionType") or body.get("TransactionType") or "PAYMENT"),
             status=normalize_status(body.get("status") or "RECEIVED"),
             transaction_time=normalize_timestamp(body.get("transactionTime") or body.get("TransTime") or datetime.now(timezone.utc).isoformat()),
@@ -224,9 +247,10 @@ class GenericProviderAdapter(ProviderAdapter):
             raise IngestionError("provider transaction reference is required")
         amount = source.get("amount", source.get("TransAmount"))
         try:
-            normalized_amount = normalize_amount(amount)
-        except (InvalidOperation, TypeError, ValueError, NormalizationError):
-            raise IngestionError("transaction amount must be a valid decimal")
+            currency = normalize_currency(source.get("currency") or source.get("Currency") or "KES")
+            normalized_amount = normalize_amount(amount, currency=currency)
+        except NormalizationError as exc:
+            raise IngestionError(f"transaction amount or currency is invalid: {exc}") from exc
         account = normalize_identifier(str(source.get("provider_account_id") or source.get("account_id") or "default"))
         if not account:
             raise IngestionError("provider account is required")
@@ -239,7 +263,7 @@ class GenericProviderAdapter(ProviderAdapter):
             provider_transaction_id=reference,
             account_id=account,
             amount=normalized_amount,
-            currency=normalize_currency(source.get("currency") or source.get("Currency") or "KES"),
+            currency=currency,
             transaction_type=normalize_transaction_type(source.get("transaction_type") or "PAYMENT"),
             status=normalize_status(source.get("status") or "RECEIVED"),
             transaction_time=normalize_timestamp(
@@ -348,7 +372,77 @@ class IngestionService:
         self.event_store = event_store
         self.adapters = dict(adapters or ADAPTERS)
 
-    def ingest(self, provider: str, payload: Mapping[str, Any], *, tenant_id: str) -> IngestionResult:
+    @staticmethod
+    def _quality_processor(
+        session,
+        payload: Dict[str, Any],
+        tenant_id: str,
+        provider: str,
+    ) -> Dict[str, Any]:
+        from provenance import DataProvenance
+        from models import Transaction
+        from normalization import normalize_currency
+
+        source_payload = payload.get("raw_payload")
+        quality_payload = dict(source_payload) if isinstance(source_payload, Mapping) else dict(payload)
+        for key in (
+            "TransID",
+            "TransAmount",
+            "Currency",
+            "TransTime",
+            "MSISDN",
+            "BusinessShortCode",
+            "TransactionType",
+        ):
+            value = payload.get(key)
+            if key not in quality_payload and value not in (None, ""):
+                quality_payload[key] = value
+        quality_payload["tenant_id"] = tenant_id
+        quality_payload["Provider"] = provider
+        quality_payload.setdefault(
+            "Currency",
+            payload.get("Currency") or payload.get("currency") or "KES",
+        )
+        quality_payload.setdefault(
+            "schema_version",
+            str(payload.get("source_schema_version") or "1.0"),
+        )
+        currency = normalize_currency(quality_payload.get("Currency") or "KES")
+        peers = (
+            session.query(Transaction)
+            .filter(
+                Transaction.tenant_id == tenant_id,
+                Transaction.provider == provider,
+                Transaction.currency == currency,
+            )
+            .order_by(Transaction.created_at.desc(), Transaction.id.desc())
+            .limit(1000)
+            .all()
+        )
+        reference_records = [
+            {
+                "TransID": peer.trans_id,
+                "TenantID": peer.tenant_id,
+                "Provider": peer.provider,
+                "TransAmount": str(peer.trans_amount),
+                "Currency": peer.currency,
+            }
+            for peer in peers
+        ]
+        return DataProvenance(reference_records=reference_records).process(
+            quality_payload,
+            session,
+        )
+
+    def ingest(
+        self,
+        provider: str,
+        payload: Mapping[str, Any],
+        *,
+        tenant_id: str,
+        source_ip: Optional[str] = None,
+        signature_verified: bool = False,
+    ) -> IngestionResult:
         adapter = self.adapters.get(str(provider).strip().lower())
         if adapter is None:
             raise IngestionError(f"unsupported ingestion provider: {provider}")
@@ -357,14 +451,24 @@ class IngestionService:
         except SourceContractError as exc:
             raise IngestionError(str(exc)) from exc
         envelope = adapter.normalize(payload, tenant_id=tenant_id)
-        result = self.event_store.mark_processed(
-            envelope.payload,
-            tenant_id=envelope.tenant_id,
-            idempotency_key_override=envelope.idempotency_key,
-        )
+        store_options: Dict[str, Any] = {
+            "tenant_id": envelope.tenant_id,
+            "source_ip": source_ip,
+            "signature_verified": signature_verified,
+            "idempotency_key_override": envelope.idempotency_key,
+        }
+        if isinstance(self.event_store, EventStore):
+            store_options["quality_processor"] = self._quality_processor
+        result = self.event_store.mark_processed(envelope.payload, **store_options)
         return IngestionResult(result=result, envelope=envelope)
 
-    def emit(self, envelope: IngestionEnvelope) -> IngestionResult:
+    def emit(
+        self,
+        envelope: IngestionEnvelope,
+        *,
+        source_ip: Optional[str] = None,
+        signature_verified: bool = False,
+    ) -> IngestionResult:
         """Persist an already-transformed envelope at the connector boundary."""
         if not isinstance(envelope, IngestionEnvelope):
             raise IngestionError("connector output must be an ingestion envelope")
@@ -435,9 +539,13 @@ class IngestionService:
         ):
             raise IngestionError("ingestion envelope does not match its source payload")
 
-        result = self.event_store.mark_processed(
-            envelope.payload,
-            tenant_id=envelope.tenant_id,
-            idempotency_key_override=envelope.idempotency_key,
-        )
+        store_options: Dict[str, Any] = {
+            "tenant_id": envelope.tenant_id,
+            "source_ip": source_ip,
+            "signature_verified": signature_verified,
+            "idempotency_key_override": envelope.idempotency_key,
+        }
+        if isinstance(self.event_store, EventStore):
+            store_options["quality_processor"] = self._quality_processor
+        result = self.event_store.mark_processed(envelope.payload, **store_options)
         return IngestionResult(result=result, envelope=envelope)

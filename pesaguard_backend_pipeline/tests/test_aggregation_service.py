@@ -13,7 +13,7 @@ def test_aggregate_transactions_builds_dashboard_metrics():
         {"merchant_id": "merchant-1", "amount": "1000.00", "status": "FAILED"},
         {"merchant_id": "merchant-1", "amount": "250.00", "status": "RECONCILED", "anomaly": True},
     ])
-    merchant = metrics["merchant-1"]
+    merchant = metrics[("merchant-1", "KES")]
     assert merchant.transaction_count == 3
     assert merchant.total_volume == Decimal("6250.00")
     assert merchant.average_transaction == Decimal("2083.33")

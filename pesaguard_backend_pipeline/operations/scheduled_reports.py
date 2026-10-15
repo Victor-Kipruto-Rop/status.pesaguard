@@ -21,11 +21,12 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import create_engine, distinct, func
+from sqlalchemy import create_engine, func
 from sqlalchemy.orm import sessionmaker
 
 from localization_utils import format_ke_currency, format_ke_datetime
 from models import Base, Discrepancy, Report, Transaction
+from tenant_context import tenant_scoped_argument
 
 logger = logging.getLogger("pesaguard.scheduled_reports")
 
@@ -41,6 +42,7 @@ except Exception:
     logger.debug("Scheduled reports engine query timing instrumentation skipped.", exc_info=True)
 Session = sessionmaker(bind=engine, expire_on_commit=False)
 
+@tenant_scoped_argument()
 def generate_report_for_tenant(
     tenant_id: str,
     days: int = 1,
@@ -150,15 +152,10 @@ def generate_report_for_tenant(
 
 
 def get_all_active_tenants() -> List[str]:
-    """Retrieve all unique tenant identifiers across discrepancies and transactions."""
-    with Session() as session:
-        disc_tenants = session.query(distinct(Discrepancy.tenant_id)).filter(Discrepancy.tenant_id.isnot(None)).all()
-        tenants = {t[0] for t in disc_tenants if t[0]}
-        transaction_tenants = session.query(distinct(Transaction.tenant_id)).filter(Transaction.tenant_id.isnot(None)).all()
-        tenants.update(t[0] for t in transaction_tenants if t[0])
-        if not tenants:
-            tenants.add("default")
-        return sorted(list(tenants))
+    """Read active tenant identities through the registry-only worker role."""
+    from tenant_registry import list_active_tenant_ids
+
+    return list_active_tenant_ids()
 
 
 if __name__ == "__main__":

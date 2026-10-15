@@ -40,7 +40,7 @@ def report_app(monkeypatch):
         app_2.Base.metadata.create_all(app_2.primary_engine)
         from action_audit import ActionAuditEntry, Base as AuditBase
         from auth_rbac import _RevocationBase
-        from models import Report, Transaction, UserAccount
+        from models import DeadLetter, Discrepancy, Report, Transaction, UserAccount
 
         AuditBase.metadata.create_all(app_2.primary_engine)
         _RevocationBase.metadata.create_all(app_2.primary_engine)
@@ -74,6 +74,19 @@ def report_app(monkeypatch):
                 period_start=datetime.now(timezone.utc),
                 period_end=datetime.now(timezone.utc),
                 content={"summary": {}},
+            ))
+            session.add(DeadLetter(
+                id="deadletter-b-secret",
+                tenant_id="tenant-b",
+                reason="cross-tenant sentinel",
+                payload={"event_id": "deadletter-b-secret"},
+                error_detail="tenant-b private error detail",
+            ))
+            session.add(Discrepancy(
+                id="discrepancy-b-secret",
+                trans_id="csv-b-secret",
+                tenant_id="tenant-b",
+                anomaly_type="cross-tenant sentinel",
             ))
             session.commit()
         finally:
@@ -141,6 +154,15 @@ def test_reports_listing_denies_cross_tenant(report_app):
     _assert_denied(response, "report-b-1")
 
 
+def test_deadletter_listing_denies_cross_tenant(report_app):
+    response = report_app.get(
+        "/v1/customers/tenant-b/deadletters",
+        headers=_headers("tenant-a"),
+    )
+    assert response.status_code == 403
+    _assert_denied(response, "deadletter-b-secret")
+
+
 # --- Service 84 (reporting audit): cross-tenant denial --------------------------
 
 
@@ -157,7 +179,16 @@ def test_audit_listing_denies_cross_tenant(report_app):
 
 def test_csv_export_requires_tenant_scope(report_app):
     response = report_app.get("/v1/export/csv", headers=_headers("tenant-a"))
-    assert response.status_code in {400, 401}
+    assert response.status_code == 400
+
+
+def test_csv_export_denies_caller_selected_other_tenant(report_app):
+    response = report_app.get(
+        "/v1/export/csv?tenant_id=tenant-b",
+        headers=_headers("tenant-a"),
+    )
+    assert response.status_code == 403
+    _assert_denied(response, "csv-b-secret")
 
 
 # --- Authorization: a role without read permission is denied --------------------

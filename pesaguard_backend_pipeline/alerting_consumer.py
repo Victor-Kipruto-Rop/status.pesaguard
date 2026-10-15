@@ -7,6 +7,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger("pesaguard.alerting.consumer")
 
+from tenant_context import tenant_scope
+
 
 class AlertingConsumer:
     """Processes discrepancy events from a topic or in-process list and routes them to the alerting service safely."""
@@ -33,19 +35,25 @@ class AlertingConsumer:
                 continue
 
             trans_id = message.get("trans_id", "unknown")
-            tenant_id = str(message.get("tenant_id") or "default")
+            tenant_value = message.get("tenant_id")
+            if not isinstance(tenant_value, str) or not tenant_value.strip():
+                logger.error("Rejecting alert message without a tenant_id for trans_id=%s", trans_id)
+                results.append({"status": "failed", "trans_id": trans_id, "reason": "missing_tenant_id"})
+                continue
+            tenant_id = tenant_value.strip()
 
             try:
-                self._apply_tenant_context(message, tenant_id)
-                
-                # Verify the alert service has the required handling method
-                if not hasattr(self.alert_service, "handle_discrepancy"):
-                    logger.error("Alert service instance missing 'handle_discrepancy' method")
-                    results.append({"status": "failed", "trans_id": trans_id, "reason": "misconfigured_alert_service"})
-                    continue
+                with tenant_scope(tenant_id):
+                    self._apply_tenant_context(message, tenant_id)
 
-                result = self.alert_service.handle_discrepancy(message)
-                results.append(result if isinstance(result, dict) else {"status": "success", "result": result})
+                    # Verify the alert service has the required handling method
+                    if not hasattr(self.alert_service, "handle_discrepancy"):
+                        logger.error("Alert service instance missing 'handle_discrepancy' method")
+                        results.append({"status": "failed", "trans_id": trans_id, "reason": "misconfigured_alert_service"})
+                        continue
+
+                    result = self.alert_service.handle_discrepancy(message)
+                    results.append(result if isinstance(result, dict) else {"status": "success", "result": result})
 
             except Exception as e:
                 logger.exception("Failed to process alerting message for trans_id=%s tenant_id=%s: %s", trans_id, tenant_id, e)

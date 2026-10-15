@@ -12,8 +12,10 @@ import json
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
+
+from normalization import DEFAULT_CURRENCY, normalize_amount, normalize_currency
 
 try:
     from .data_lineage import DataLineage, build_lineage
@@ -158,14 +160,18 @@ def _text(payload: Mapping[str, Any], *keys: str, required: bool = True) -> str:
     return ""
 
 
-def _amount(value: Any) -> Decimal:
-    try:
-        result = Decimal(str(value)).quantize(Decimal("0.01"))
-    except (InvalidOperation, TypeError, ValueError):
-        raise ValueError("amount must be a valid decimal")
-    if result <= 0:
-        raise ValueError("amount must be greater than zero")
-    return result
+def _amount(value: Any, currency: str) -> Decimal:
+    return Decimal(normalize_amount(value, currency=currency))
+
+
+def _currency(payload: Mapping[str, Any]) -> str:
+    for key in ("currency", "Currency"):
+        if key in payload:
+            value = payload[key]
+            if value is None or not str(value).strip():
+                raise ValueError("currency must not be empty when supplied")
+            return normalize_currency(value)
+    return DEFAULT_CURRENCY
 
 
 def _timestamp(value: Any) -> datetime:
@@ -192,14 +198,15 @@ def normalize_record(tenant_id: str, source: str, payload: Mapping[str, Any]) ->
     provider = _text(payload, "provider", "Provider", required=False).lower() or source.lower()
     timestamp = _timestamp(_text(payload, "occurred_at", "timestamp", "TransTime", "created_at"))
     phone = _text(payload, "phone_number", "MSISDN", "PhoneNumber", "msisdn", required=False)
+    currency = _currency(payload)
     return CanonicalRecord(
         tenant_id=tenant,
         event_id=event_id,
         transaction_id=_text(payload, "transaction_id", "transaction_reference", "TransID", required=False) or event_id,
         source=source,
         provider=provider,
-        amount=_amount(payload.get("amount", payload.get("TransAmount"))),
-        currency=_text(payload, "currency", "Currency", required=False).upper() or "KES",
+        amount=_amount(payload.get("amount", payload.get("TransAmount")), currency),
+        currency=currency,
         phone_number=phone,
         occurred_at=timestamp,
         status=_text(payload, "status", "Status", required=False).upper() or "RECEIVED",
@@ -255,10 +262,19 @@ class CoreDataEngineering:
     def ingest_connector(self, connector: SourceConnector, tenant_id: str, cursor: Optional[str] = None, limit: int = 500) -> Dict[str, int]:
         return self.ingest_batch(tenant_id, connector.read(tenant_id=tenant_id, cursor=cursor, limit=limit), connector.name)
 
-    def aggregate(self, tenant_id: str, *, by: str = "currency") -> Dict[str, Dict[str, Any]]:
-        result: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"count": 0, "amount": Decimal("0.00")})
+    def aggregate(
+        self,
+        tenant_id: str,
+        *,
+        by: str = "currency",
+    ) -> Dict[Any, Dict[str, Any]]:
+        """Aggregate without FX conversion; non-currency dimensions use tuple keys."""
+        result: Dict[Any, Dict[str, Any]] = defaultdict(
+            lambda: {"count": 0, "amount": Decimal("0.00")}
+        )
         for record in self.repository.records(tenant_id):
-            key = str(getattr(record, by, record.attributes.get(by, "unknown")))
+            dimension = str(getattr(record, by, record.attributes.get(by, "unknown")))
+            key = record.currency if by == "currency" else (dimension, record.currency)
             result[key]["count"] += 1
             result[key]["amount"] += record.amount
         return {key: {"count": value["count"], "amount": str(value["amount"])} for key, value in result.items()}

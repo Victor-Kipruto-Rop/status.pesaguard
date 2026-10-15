@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Optional, Tuple
 
-from normalization import NormalizationError, normalize_amount
+from normalization import NormalizationError, normalize_amount, normalize_currency
 
 logger = logging.getLogger("pesaguard.daraja_validator")
 
@@ -52,9 +51,13 @@ def validate_daraja_payload(payload: Dict[str, Any]) -> Tuple[bool, str]:
     if missing:
         return False, f"Missing required C2B fields: {', '.join(missing)}"
 
-    # Validate TransAmount numerics
+    # Keep currency and amount errors distinct for callers and ingestion metrics.
     try:
-        normalize_amount(payload["TransAmount"])
+        currency = normalize_currency(payload.get("Currency") or "KES")
+    except NormalizationError:
+        return False, "Currency is invalid"
+    try:
+        normalize_amount(payload["TransAmount"], currency=currency)
     except NormalizationError:
         return False, "TransAmount must be a valid numeric value"
 
@@ -66,7 +69,7 @@ def validate_daraja_payload(payload: Dict[str, Any]) -> Tuple[bool, str]:
     # Validate MSISDN format (12-digit Kenyan phone 2547XXXXXXXX / 2541XXXXXXXX)
     msisdn = str(payload.get("MSISDN", "")).strip()
     if not re.match(r"^254[17]\d{8}$", msisdn):
-        return False, f"MSISDN '{msisdn}' must be a valid 12-digit string starting with 254"
+        return False, "MSISDN must be a valid 12-digit string starting with 254"
 
     return True, ""
 
@@ -100,16 +103,18 @@ def extract_canonical_event(payload: Dict[str, Any], tenant_id: str = "default")
             if isinstance(item, dict) and isinstance(item.get("Name"), str)
         }
         try:
-            amount = normalize_amount(meta.get("Amount"))
+            currency = normalize_currency(payload.get("Currency") or "KES")
+            amount = normalize_amount(meta.get("Amount"), currency=currency)
         except NormalizationError:
             return None
 
         return {
             "tenant_id": tenant_id,
-            "TransID": str(meta.get("MpesaReceiptNumber", stk.get("CheckoutRequestID", "unknown"))).strip(),
+            "TransID": str(meta["MpesaReceiptNumber"]).strip(),
             "TransAmount": amount,
-            "MSISDN": str(meta.get("PhoneNumber", "")).strip(),
-            "TransTime": str(meta.get("TransactionDate", datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"))),
+            "Currency": currency,
+            "MSISDN": str(meta["PhoneNumber"]).strip(),
+            "TransTime": str(meta["TransactionDate"]),
             "BusinessShortCode": str(payload.get("BusinessShortCode", "")),
             "TransactionType": "STK_PUSH",
             "raw_payload": payload,
@@ -122,7 +127,11 @@ def extract_canonical_event(payload: Dict[str, Any], tenant_id: str = "default")
     return {
         "tenant_id": tenant_id,
         "TransID": str(payload.get("TransID", "")).strip(),
-        "TransAmount": normalize_amount(payload["TransAmount"]),
+        "TransAmount": normalize_amount(
+            payload["TransAmount"],
+            currency=normalize_currency(payload.get("Currency") or "KES"),
+        ),
+        "Currency": normalize_currency(payload.get("Currency") or "KES"),
         "MSISDN": str(payload.get("MSISDN", "")).strip(),
         "TransTime": str(payload.get("TransTime", "")).strip(),
         "BusinessShortCode": str(payload.get("BusinessShortCode", "")).strip(),
@@ -150,22 +159,39 @@ def _validate_stk_push_callback(stk: Dict[str, Any]) -> Tuple[bool, str]:
         return False, "STK Push callback ResultCode must be an integer"
 
     if numeric_result_code != 0:
-        result_desc = stk.get("ResultDesc")
-        if result_desc is None:
-            return False, f"STK Push payment failed with ResultCode={result_code}"
-        return False, f"STK Push payment failed with ResultCode={result_code}: {result_desc}"
+        description = stk.get("ResultDesc")
+        safe_description = (
+            re.sub(r"[\r\n\t]+", " ", description).strip()[:200]
+            if isinstance(description, str)
+            else ""
+        )
+        detail = f": {safe_description}" if safe_description else ""
+        return False, f"STK Push payment failed with ResultCode={result_code}{detail}"
 
     callback_metadata = stk.get("CallbackMetadata")
     meta_items = callback_metadata.get("Item") if isinstance(callback_metadata, dict) else None
     if not isinstance(meta_items, list) or not meta_items:
         return False, "STK Push callback missing CallbackMetadata items"
-    if not any(isinstance(item, dict) and item.get("Name") == "Amount" for item in meta_items):
-        return False, "STK Push callback missing transaction amount"
+    metadata = {
+        item["Name"]: item.get("Value")
+        for item in meta_items
+        if isinstance(item, dict) and isinstance(item.get("Name"), str)
+    }
+    required_metadata = ("Amount", "MpesaReceiptNumber", "TransactionDate", "PhoneNumber")
+    missing = [name for name in required_metadata if metadata.get(name) in (None, "")]
+    if missing:
+        return False, f"STK Push callback missing required metadata: {', '.join(missing)}"
     try:
-        amount_item = next(item for item in meta_items if isinstance(item, dict) and item.get("Name") == "Amount")
-        normalize_amount(amount_item.get("Value"))
-    except (StopIteration, NormalizationError):
-        return False, "STK Push callback has an invalid transaction amount"
+        currency = normalize_currency(metadata.get("Currency") or "KES")
+        normalize_amount(metadata["Amount"], currency=currency)
+    except NormalizationError:
+        return False, "STK Push callback has an invalid amount or currency"
+    if not re.fullmatch(r"[0-9]{14}", str(metadata["TransactionDate"])):
+        return False, "STK Push callback has an invalid transaction date"
+    if not re.fullmatch(r"254[17][0-9]{8}", str(metadata["PhoneNumber"])):
+        return False, "STK Push callback has an invalid phone number"
+    if len(str(metadata["MpesaReceiptNumber"]).strip()) > 255:
+        return False, "STK Push callback has an invalid receipt number"
 
     return True, ""
 
@@ -188,6 +214,6 @@ def _validate_b2c_callback(result: Dict[str, Any]) -> Tuple[bool, str]:
         return False, "B2C callback ResultCode must be an integer"
 
     if numeric_result_code != 0:
-        return False, f"B2C payment failed with ResultCode={result_code}: {result.get('ResultDesc')}"
+        return False, f"B2C payment failed with ResultCode={result_code}"
 
     return True, ""

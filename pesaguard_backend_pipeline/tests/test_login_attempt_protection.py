@@ -3,7 +3,7 @@ import uuid
 import pytest
 from datetime import datetime, timedelta, timezone
 
-from test_config import configure_test_database
+from test_config import configure_test_database, post_public_registration
 
 configure_test_database()
 
@@ -40,14 +40,16 @@ def test_per_account_lockout_and_admin_unlock(client, monkeypatch):
     tenant_id = "login-protect-tenant"
     _clean(email, tenant_id)
     _clean(admin_email, tenant_id)
-    registration = client.post(
-        "/auth/register",
-        json={"username": "login-protect-user", "email": email, "password": "StrongPass123!", "tenant_id": tenant_id},
+    registration = post_public_registration(
+        client,
+        app,
+        {"username": "login-protect-user", "email": email, "password": "StrongPass123!", "tenant_id": tenant_id},
     )
     assert registration.status_code == 201
-    admin_registration = client.post(
-        "/auth/register",
-        json={"username": "login-protect-admin", "email": admin_email, "password": "StrongPass123!", "tenant_id": tenant_id, "roles": ["admin"]},
+    admin_registration = post_public_registration(
+        client,
+        app,
+        {"username": "login-protect-admin", "email": admin_email, "password": "StrongPass123!", "tenant_id": tenant_id, "roles": ["admin"]},
     )
     assert admin_registration.status_code == 201
     verify = client.post(
@@ -145,9 +147,10 @@ def test_account_lockout_progresses_and_automatically_unlocks(client, monkeypatc
     monkeypatch.setenv("PESAGUARD_LOGIN_IP_RATE_LIMIT", "100")
     monkeypatch.setenv("PESAGUARD_LOGIN_DEVICE_RATE_LIMIT", "100")
     _clean(email, tenant_id)
-    registration = client.post(
-        "/auth/register",
-        json={"username": "progressive-lockout", "email": email, "password": "StrongPass123!", "tenant_id": tenant_id},
+    registration = post_public_registration(
+        client,
+        app,
+        {"username": "progressive-lockout", "email": email, "password": "StrongPass123!", "tenant_id": tenant_id},
     )
     assert registration.status_code == 201
     assert client.post(
@@ -208,9 +211,10 @@ def test_per_ip_and_device_throttling(client, monkeypatch):
     _clean(email_b, tenant_id)
 
     for email in (email_a, email_b):
-        registration = client.post(
-            "/auth/register",
-            json={"username": email.split("@")[0], "email": email, "password": "StrongPass123!", "tenant_id": tenant_id},
+        registration = post_public_registration(
+            client,
+            app,
+            {"username": email.split("@")[0], "email": email, "password": "StrongPass123!", "tenant_id": tenant_id},
         )
         assert registration.status_code == 201
         verify = client.post(

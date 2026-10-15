@@ -11,6 +11,8 @@ evidence (and optionally a live database connection).
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 import os
 import uuid
 from pathlib import Path
@@ -30,28 +32,41 @@ pytestmark = pytest.mark.skipif(
     not os.getenv("PESAGUARD_LIVE_GATEWAY_URL"),
     reason="PESAGUARD_LIVE_GATEWAY_URL is required",
 )
+@pytest.mark.skipif(
+    not os.getenv("DARAJA_WEBHOOK_SIGNING_SECRET"),
+    reason="DARAJA_WEBHOOK_SIGNING_SECRET is required for the callback HMAC",
+)
 def test_gateway_postgres_kafka_consumer_reconciliation_notification_traceability():
     """Submit a real event and require one trace identity through persisted evidence."""
     gateway_url = os.environ["PESAGUARD_LIVE_GATEWAY_URL"].rstrip("/")
     trace_id = os.getenv("PESAGUARD_LIVE_TRACE_ID") or uuid.uuid4().hex
     transaction_id = os.getenv("PESAGUARD_LIVE_TRANSACTION_ID") or f"live-trace-{trace_id}"
+    payload = {
+        "TransactionType": "CustomerPayBillOnline",
+        "TransID": transaction_id,
+        "TransTime": "20260914100000",
+        "TransAmount": "1.00",
+        "BusinessShortCode": "600000",
+        "MSISDN": "254700000000",
+        "BillRefNumber": transaction_id,
+    }
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    signature = hmac.new(
+        os.environ["DARAJA_WEBHOOK_SIGNING_SECRET"].encode("utf-8"),
+        body,
+        hashlib.sha256,
+    ).hexdigest()
     response = requests.post(
         f"{gateway_url}/webhook/mpesa/confirmation",
         headers={
+            "Content-Type": "application/json",
             "X-Request-ID": f"req-{trace_id}",
             "X-Correlation-ID": f"corr-{trace_id}",
             "X-Trace-ID": trace_id,
             "X-Tenant-ID": os.getenv("PESAGUARD_LIVE_TENANT_ID", "live-test"),
+            "X-Daraja-Signature": signature,
         },
-        json={
-            "TransactionType": "CustomerPayBillOnline",
-            "TransID": transaction_id,
-            "TransTime": "20260914100000",
-            "TransAmount": "1.00",
-            "BusinessShortCode": "600000",
-            "MSISDN": "254700000000",
-            "BillRefNumber": transaction_id,
-        },
+        data=body,
         timeout=float(os.getenv("PESAGUARD_LIVE_TIMEOUT_SECONDS", "15")),
     )
     response.raise_for_status()

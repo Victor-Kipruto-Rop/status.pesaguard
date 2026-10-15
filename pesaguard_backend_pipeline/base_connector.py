@@ -19,7 +19,16 @@ from typing import Any, Dict, Iterable, List, Optional
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from sqlalchemy import create_engine, text
+from sqlalchemy import Numeric, bindparam, create_engine, text
+from normalization import (
+    DEFAULT_CURRENCY,
+    MAX_TRANSACTION_AMOUNT,
+    NormalizationError,
+    normalize_amount,
+    normalize_currency,
+    normalize_identifier,
+    parse_decimal,
+)
 
 logger = logging.getLogger("pesaguard.connectors")
 
@@ -44,7 +53,7 @@ class BaseConnector(ABC):
     All connectors must yield records matching the normalized PesaGuard ledger shape:
     {
         "internal_ref": str,        # Order/Invoice ID in the customer's ledger system
-        "amount": float,            # Expected monetary amount
+        "amount": Decimal | str,    # Expected monetary amount, preserved without binary-float conversion
         "phone_number": str,        # Payer phone number
         "timestamp": str,           # ISO8601 UTC timestamp
         "status": str,              # Status (e.g. "pending", "paid", "failed")
@@ -63,9 +72,76 @@ class BaseConnector(ABC):
         phone_number: Optional[str] = None,
         tolerance: Optional[Decimal] = None,
         limit: int = 500,
+        reference: Optional[str] = None,
+        currency: str = DEFAULT_CURRENCY,
     ) -> Iterable[Dict[str, Any]]:
-        """Return a bounded candidate set; non-SQL connectors use a capped fallback."""
-        return list(self.fetch_recent_records(since_minutes=since_minutes))[:max(1, min(limit, 5000))]
+        """Return all reference and amount/phone candidates without silent truncation."""
+        limit = max(1, min(int(limit), 5000))
+        normalized_currency = normalize_currency(currency)
+        normalized_reference = (
+            normalize_identifier(reference) if reference and str(reference).strip() else None
+        )
+        normalized_amount = (
+            Decimal(normalize_amount(amount, currency=normalized_currency))
+            if amount is not None
+            else None
+        )
+        normalized_tolerance = parse_decimal(tolerance) if tolerance is not None else None
+        if normalized_tolerance is not None and (
+            not normalized_tolerance.is_finite()
+            or normalized_tolerance < 0
+            or normalized_tolerance > MAX_TRANSACTION_AMOUNT
+        ):
+            raise ValueError("candidate tolerance must be finite and non-negative")
+
+        candidates = []
+        for record in self.fetch_recent_records(since_minutes=since_minutes):
+            if not isinstance(record, dict):
+                raise ValueError("ledger connector records must be objects")
+            record_reference = record.get("reference")
+            reference_match = bool(
+                normalized_reference
+                and record_reference
+                and str(record_reference).strip()
+                and normalize_identifier(record_reference) == normalized_reference
+            )
+            amount_match = False
+            if normalized_amount is not None and normalized_tolerance is not None:
+                raw_record_amount = record.get("amount", record.get("TransAmount"))
+                try:
+                    record_currency = normalize_currency(
+                        record.get("currency", record.get("Currency", DEFAULT_CURRENCY))
+                    )
+                    record_amount = (
+                        Decimal(normalize_amount(raw_record_amount, currency=record_currency))
+                        if record_currency == normalized_currency
+                        else None
+                    )
+                except NormalizationError:
+                    record_amount = None
+                if record_amount is not None:
+                    amount_match = (
+                        abs(normalized_amount - record_amount) <= normalized_tolerance
+                        and (
+                            not phone_number
+                            or str(record.get("phone_number") or "").strip() == phone_number
+                        )
+                    )
+            phone_match = bool(
+                phone_number
+                and normalized_amount is None
+                and str(record.get("phone_number") or "").strip() == phone_number
+            )
+            if (
+                normalized_reference is None
+                and normalized_amount is None
+                and not phone_number
+            ) or reference_match or amount_match or phone_match:
+                candidates.append(record)
+
+        if len(candidates) > limit:
+            raise RuntimeError("ledger candidate set exceeds the configured limit")
+        return candidates
 
 
 # Default field mapping for internal ledger columns
@@ -84,6 +160,22 @@ def _merge_mapping(defaults: Dict[str, str], override: Optional[Dict[str, str]])
     if override:
         merged.update(override)
     return merged
+
+
+def _optional_ledger_fields(record: Dict[str, Any], mapping: Dict[str, str]) -> Dict[str, Any]:
+    """Preserve optional matching reference and currency fields from ledger adapters."""
+    fields = {}
+    for name, aliases in (
+        ("reference", ("reference", "merchant_ref", "payment_reference", "bill_ref_number")),
+        ("currency", ("currency", "Currency")),
+    ):
+        mapped_name = mapping.get(name)
+        value = record.get(mapped_name) if mapped_name else None
+        if value in (None, ""):
+            value = next((record.get(alias) for alias in aliases if record.get(alias) not in (None, "")), None)
+        if value not in (None, ""):
+            fields[name] = value
+    return fields
 
 
 class PostgresConnector(BaseConnector):
@@ -111,8 +203,40 @@ class PostgresConnector(BaseConnector):
     def fetch_recent_records(self, since_minutes: int = 15) -> List[Dict[str, Any]]:
         """Query recent internal transactions from Postgres safely."""
         if not self.connection_string:
-            logger.warning("PostgresConnector execution skipped: Connection string is empty.")
-            return []
+            raise ValueError("PostgresConnector requires a configured connection string")
+        safe_table = _validate_identifier(self.table_name, "table")
+        safe_columns = {
+            key: _validate_identifier(value, f"column mapping for '{key}'")
+            for key, value in self.mapping.items()
+        }
+        selected_fields = ["internal_ref", "amount", "phone_number", "timestamp", "status"]
+        selected_fields.extend(
+            field for field in ("reference", "currency") if self.mapping.get(field)
+        )
+        query = text(
+            f"SELECT {', '.join(safe_columns[field] for field in selected_fields)} "
+            f"FROM {safe_table} WHERE {safe_columns['timestamp']} >= :since "
+            f"ORDER BY {safe_columns['timestamp']} DESC, {safe_columns['internal_ref']} ASC"
+        )
+        since = datetime.now(timezone.utc) - timedelta(minutes=max(0, since_minutes))
+        with self._get_engine().connect() as connection:
+            rows = connection.execute(query, {"since": since}).fetchall()
+        records = []
+        for row in rows:
+            values = dict(zip(selected_fields, row))
+            timestamp = values["timestamp"]
+            record = {
+                "internal_ref": str(values["internal_ref"] or ""),
+                "amount": values["amount"],
+                "phone_number": str(values["phone_number"] or ""),
+                "timestamp": timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp),
+                "status": str(values["status"] or "pending"),
+            }
+            for field in ("reference", "currency"):
+                if values.get(field) not in (None, ""):
+                    record[field] = values[field]
+            records.append(record)
+        return records
 
     def fetch_candidate_records(
         self,
@@ -121,81 +245,135 @@ class PostgresConnector(BaseConnector):
         phone_number: Optional[str] = None,
         tolerance: Optional[Decimal] = None,
         limit: int = 500,
+        reference: Optional[str] = None,
+        currency: str = DEFAULT_CURRENCY,
     ) -> List[Dict[str, Any]]:
-        """Push bounded candidate filtering into PostgreSQL before Python scoring."""
+        """Fetch amount candidates and every available row sharing a payment reference."""
         if not self.connection_string:
-            return []
-        try:
-            safe_table = _validate_identifier(self.table_name, "table")
-            safe_columns = {k: _validate_identifier(v, f"column mapping for '{k}'") for k, v in self.mapping.items()}
-            engine = self._get_engine()
-            since_dt = datetime.now(timezone.utc) - timedelta(minutes=since_minutes)
-            conditions = [f"{safe_columns['timestamp']} >= :since"]
-            params: Dict[str, Any] = {"since": since_dt, "limit": max(1, min(limit, 5000))}
-            if amount is not None and tolerance is not None:
-                conditions.append(f"{safe_columns['amount']} BETWEEN :lower_amount AND :upper_amount")
-                params["lower_amount"] = max(Decimal("0"), amount - tolerance)
-                params["upper_amount"] = amount + tolerance
-            if phone_number:
-                conditions.append(f"{safe_columns['phone_number']} = :phone_number")
-                params["phone_number"] = phone_number
-            query = text(
-                f"SELECT {safe_columns['internal_ref']}, {safe_columns['amount']}, {safe_columns['phone_number']}, "
-                f"{safe_columns['timestamp']}, {safe_columns['status']} FROM {safe_table} "
-                f"WHERE {' AND '.join(conditions)} ORDER BY {safe_columns['timestamp']} DESC LIMIT :limit"
+            raise ValueError("PostgresConnector requires a configured connection string")
+        currency = normalize_currency(currency)
+        safe_table = _validate_identifier(self.table_name, "table")
+        safe_columns = {
+            key: _validate_identifier(value, f"column mapping for '{key}'")
+            for key, value in self.mapping.items()
+        }
+        selected_fields = ["internal_ref", "amount", "phone_number", "timestamp", "status"]
+        selected_fields.extend(
+            field for field in ("reference", "currency") if self.mapping.get(field)
+        )
+        limit = max(1, min(limit, 5000))
+        params: Dict[str, Any] = {
+            "since": datetime.now(timezone.utc) - timedelta(minutes=max(0, since_minutes)),
+            "limit": limit + 1,
+        }
+        filters = []
+        amount_filter = None
+        if amount is not None and tolerance is not None:
+            normalized_amount = Decimal(normalize_amount(amount, currency=currency))
+            normalized_tolerance = parse_decimal(tolerance)
+            if (
+                not normalized_tolerance.is_finite()
+                or normalized_tolerance < 0
+                or normalized_tolerance > MAX_TRANSACTION_AMOUNT
+            ):
+                raise ValueError("candidate tolerance must be finite and non-negative")
+            amount_filter = (
+                f"{safe_columns['amount']} BETWEEN :lower_amount AND :upper_amount"
             )
-            with engine.connect() as connection:
-                rows = connection.execute(query, params).fetchall()
-            return [{
-                "internal_ref": str(row[0]),
-                "amount": row[1],
-                "phone_number": str(row[2] or ""),
-                "timestamp": row[3].isoformat() if hasattr(row[3], "isoformat") else str(row[3]),
-                "status": str(row[4] or "pending"),
-            } for row in rows]
-        except Exception as exc:
-            logger.exception("Failed fetching bounded ledger candidates: %s", exc)
-            return []
+            params["lower_amount"] = max(Decimal("0"), normalized_amount - normalized_tolerance)
+            params["upper_amount"] = normalized_amount + normalized_tolerance
+        if phone_number:
+            params["phone_number"] = phone_number
+            phone_filter = f"{safe_columns['phone_number']} = :phone_number"
+        else:
+            phone_filter = None
 
-        try:
-            safe_table = _validate_identifier(self.table_name, "table")
-            safe_columns = {k: _validate_identifier(v, f"column mapping for '{k}'") for k, v in self.mapping.items()}
-        except ValueError as exc:
-            logger.error("PostgresConnector query aborted due to invalid identifier: %s", exc)
-            return []
-
-        try:
-            engine = self._get_engine()
-            since_time = datetime.now(timezone.utc).timestamp() - (since_minutes * 60)
-            since_dt = datetime.fromtimestamp(since_time, tz=timezone.utc)
-
-            query = text(
-                f"SELECT {safe_columns['internal_ref']}, {safe_columns['amount']}, {safe_columns['phone_number']}, "
-                f"{safe_columns['timestamp']}, {safe_columns['status']} "
-                f"FROM {safe_table} WHERE {safe_columns['timestamp']} >= :since"
+        amount_currency_filter = None
+        if amount_filter and self.mapping.get("currency"):
+            raw_currency = f"UPPER(TRIM({safe_columns['currency']}))"
+            normalized_currency = (
+                f"CASE {raw_currency} "
+                "WHEN 'KSH' THEN 'KES' "
+                "WHEN 'KSHS' THEN 'KES' "
+                "WHEN 'KENYAN SHILLING' THEN 'KES' "
+                "WHEN 'US DOLLAR' THEN 'USD' "
+                "WHEN '$' THEN 'USD' "
+                f"ELSE {raw_currency} END"
             )
+            amount_currency_filter = (
+                f"COALESCE(NULLIF({normalized_currency}, ''), :default_currency) = :currency"
+            )
+            params["currency"] = currency
+            params["default_currency"] = DEFAULT_CURRENCY
+        elif amount_filter and currency != DEFAULT_CURRENCY:
+            amount_currency_filter = "1 = 0"
 
-            with engine.connect() as connection:
-                rows = connection.execute(query, {"since": since_dt}).fetchall()
-
-            records = []
-            for row in rows:
-                raw_ts = row[3]
-                formatted_ts = raw_ts.isoformat() if hasattr(raw_ts, "isoformat") else str(raw_ts)
-                records.append({
-                    "internal_ref": str(row[0]),
-                    "amount": float(row[1]) if row[1] is not None else 0.0,
-                    "phone_number": str(row[2] or ""),
-                    "timestamp": formatted_ts,
-                    "status": str(row[4] or "pending"),
-                })
-            
-            logger.info("Fetched %d internal records from Postgres table '%s'", len(records), safe_table)
-            return records
-
-        except Exception as exc:
-            logger.exception("Failed fetching records from Postgres connector: %s", exc)
-            return []
+        if reference and self.mapping.get("reference"):
+            dialect = self._get_engine().dialect.name
+            reference_column = safe_columns["reference"]
+            if dialect == "postgresql":
+                normalized_reference_column = (
+                    f"UPPER(REGEXP_REPLACE({reference_column}, '[[:space:]]+', '', 'g'))"
+                )
+            elif dialect == "sqlite":
+                normalized_reference_column = f"REPLACE({reference_column}, ' ', '')"
+                for codepoint in range(9, 14):
+                    normalized_reference_column = (
+                        f"REPLACE({normalized_reference_column}, CHAR({codepoint}), '')"
+                    )
+                normalized_reference_column = f"UPPER({normalized_reference_column})"
+            else:
+                raise RuntimeError(
+                    f"reference candidate normalization is unsupported for database dialect {dialect!r}"
+                )
+            amount_candidates = [amount_filter] if amount_filter else []
+            if phone_filter and amount_filter:
+                amount_candidates.append(phone_filter)
+            if amount_currency_filter:
+                amount_candidates.append(amount_currency_filter)
+            reference_terms = [f"{normalized_reference_column} = :reference"]
+            if amount_candidates:
+                reference_terms.append("(" + " AND ".join(amount_candidates) + ")")
+            filters.append("(" + " OR ".join(reference_terms) + ")")
+            params["reference"] = normalize_identifier(reference)
+        else:
+            if amount_filter:
+                filters.append(amount_filter)
+            if amount_currency_filter:
+                filters.append(amount_currency_filter)
+            if phone_filter:
+                filters.append(phone_filter)
+        query = text(
+            f"SELECT {', '.join(safe_columns[field] for field in selected_fields)} "
+            f"FROM {safe_table} WHERE {safe_columns['timestamp']} >= :since"
+            + (f" AND {' AND '.join(filters)}" if filters else "")
+            + f" ORDER BY {safe_columns['timestamp']} DESC, {safe_columns['internal_ref']} ASC LIMIT :limit"
+        )
+        if amount is not None and tolerance is not None:
+            query = query.bindparams(
+                bindparam("lower_amount", type_=Numeric()),
+                bindparam("upper_amount", type_=Numeric()),
+            )
+        with self._get_engine().connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        if len(rows) > limit:
+            raise RuntimeError("ledger candidate set exceeds the configured limit")
+        records = []
+        for row in rows:
+            values = dict(zip(selected_fields, row))
+            timestamp = values["timestamp"]
+            record = {
+                "internal_ref": str(values["internal_ref"] or ""),
+                "amount": values["amount"],
+                "phone_number": str(values["phone_number"] or ""),
+                "timestamp": timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp),
+                "status": str(values["status"] or "pending"),
+            }
+            for field in ("reference", "currency"):
+                if values.get(field) not in (None, ""):
+                    record[field] = values[field]
+            records.append(record)
+        return records
 
 
 class GoogleSheetsConnector(BaseConnector):
@@ -242,8 +420,7 @@ class GoogleSheetsConnector(BaseConnector):
     def fetch_recent_records(self, since_minutes: int = 15) -> List[Dict[str, Any]]:
         """Fetch and parse records from the designated Google Sheet worksheet."""
         if not self.sheet_id:
-            logger.warning("GoogleSheetsConnector skipped: sheet_id is empty.")
-            return []
+            raise ValueError("GoogleSheetsConnector requires a configured sheet_id")
 
         try:
             client = self._get_client()
@@ -255,7 +432,6 @@ class GoogleSheetsConnector(BaseConnector):
             now_ts = datetime.now(timezone.utc).timestamp()
             cutoff_ts = now_ts - (since_minutes * 60)
 
-            ref_col = self.mapping["internal_ref"]
             amount_col = self.mapping["amount"]
             phone_col = self.mapping["phone_number"]
             time_col = self.mapping["timestamp"]
@@ -269,26 +445,32 @@ class GoogleSheetsConnector(BaseConnector):
                 if raw_time:
                     try:
                         record_dt = datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
+                        if record_dt.tzinfo is None:
+                            record_dt = record_dt.replace(tzinfo=timezone.utc)
+                        else:
+                            record_dt = record_dt.astimezone(timezone.utc)
                     except ValueError:
                         pass
 
                 if record_dt and record_dt.timestamp() < cutoff_ts:
                     continue
 
-                records.append({
-                    "internal_ref": str(row.get(ref_col, "")),
-                    "amount": float(row.get(amount_col, 0) or 0),
+                record = {
+                    "internal_ref": str(row.get(self.mapping["internal_ref"], "")),
+                    "amount": row.get(amount_col, 0) or 0,
                     "phone_number": str(row.get(phone_col, "")),
                     "timestamp": record_dt.isoformat() if record_dt else raw_time,
                     "status": str(row.get(status_col, "pending")),
-                })
+                }
+                record.update(_optional_ledger_fields(row, self.mapping))
+                records.append(record)
 
             logger.info("Fetched %d internal records from Google Sheet '%s'", len(records), self.sheet_id)
             return records
 
         except Exception as exc:
-            logger.exception("Failed to fetch Google Sheets records: %s", exc)
-            return []
+            logger.exception("Google Sheets ledger fetch failed")
+            raise RuntimeError("Google Sheets ledger fetch failed") from exc
 
 
 class RestConnector(BaseConnector):
@@ -329,8 +511,7 @@ class RestConnector(BaseConnector):
     def fetch_recent_records(self, since_minutes: int = 15) -> List[Dict[str, Any]]:
         """Execute REST query to retrieve recent order payload."""
         if not self.endpoint:
-            logger.warning("REST connector execution skipped: Endpoint URL is empty.")
-            return []
+            raise ValueError("RestConnector requires a configured endpoint")
 
         headers = {"Accept": "application/json"}
         if self.auth_type == "bearer" and self.auth_value:
@@ -353,30 +534,30 @@ class RestConnector(BaseConnector):
             items = payload.get("items", payload) if isinstance(payload, dict) else payload
 
             if not isinstance(items, list):
-                logger.error("REST connector expected list payload, got: %s", type(items))
-                return []
+                raise ValueError("REST connector expected a list of ledger records")
 
             records = []
             for item in items:
                 if not isinstance(item, dict):
-                    continue
+                    raise ValueError("REST connector ledger rows must be objects")
                 records.append({
                     "internal_ref": str(item.get(self.mapping["internal_ref"], "")),
-                    "amount": float(item.get(self.mapping["amount"], 0) or 0),
+                    "amount": item.get(self.mapping["amount"], 0) or 0,
                     "phone_number": str(item.get(self.mapping["phone_number"], "")),
                     "timestamp": str(item.get(self.mapping["timestamp"], "")),
                     "status": str(item.get(self.mapping["status"], "pending")),
+                    **_optional_ledger_fields(item, self.mapping),
                 })
 
             logger.info("Fetched %d internal records via REST connector from %s", len(records), self.endpoint)
             return records
 
         except requests.RequestException as exc:
-            logger.error("REST connector HTTP request failed for %s: %s", self.endpoint, exc)
-            return []
+            logger.error("REST ledger HTTP request failed: %s", type(exc).__name__)
+            raise RuntimeError("REST ledger fetch failed") from exc
         except Exception as exc:
-            logger.exception("Unexpected error processing REST connector response: %s", exc)
-            return []
+            logger.exception("REST ledger response processing failed")
+            raise RuntimeError("REST ledger response processing failed") from exc
 
 
 class ConnectorRegistry:
@@ -404,6 +585,9 @@ class ConnectorRegistry:
                 sheet_id=os.getenv("GOOGLE_SHEET_ID", ""),
                 worksheet_name=os.getenv("GOOGLE_SHEET_WORKSHEET", "Orders"),
                 credentials_json=os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", ""),
+                mapping=json.loads(os.getenv("GOOGLE_SHEETS_MAPPING", "{}"))
+                if os.getenv("GOOGLE_SHEETS_MAPPING")
+                else None,
             )
         elif connector_type == "rest":
             connector = RestConnector(
@@ -429,7 +613,7 @@ class CsvLedgerConnector(BaseConnector):
 
     def fetch_recent_records(self, since_minutes: int = 15) -> List[Dict[str, Any]]:
         if not self.csv_path:
-            return []
+            raise ValueError("CsvLedgerConnector requires a configured CSV path")
         try:
             import csv
 
@@ -439,17 +623,18 @@ class CsvLedgerConnector(BaseConnector):
                 for row in reader:
                     record = {
                         "internal_ref": str(row.get(self.mapping["internal_ref"], row.get("reference", ""))),
-                        "amount": float(row.get(self.mapping["amount"], 0) or 0),
+                        "amount": row.get(self.mapping["amount"], 0) or 0,
                         "phone_number": str(row.get(self.mapping["phone_number"], "") or ""),
                         "timestamp": str(row.get(self.mapping["timestamp"], "") or ""),
                         "status": str(row.get(self.mapping["status"], "pending") or "pending"),
                     }
+                    record.update(_optional_ledger_fields(row, self.mapping))
                     if record["internal_ref"] or record["amount"]:
                         records.append(record)
                 return records
         except Exception as exc:
-            logger.exception("Failed to read CSV ledger file %s: %s", self.csv_path, exc)
-            return []
+            logger.exception("CSV ledger file read failed")
+            raise RuntimeError("CSV ledger fetch failed") from exc
 
 
 class ExcelLedgerConnector(BaseConnector):
@@ -461,7 +646,7 @@ class ExcelLedgerConnector(BaseConnector):
 
     def fetch_recent_records(self, since_minutes: int = 15) -> List[Dict[str, Any]]:
         if not self.source_path:
-            return []
+            raise ValueError("ExcelLedgerConnector requires a configured source path")
         try:
             from openpyxl import load_workbook
 
@@ -480,16 +665,17 @@ class ExcelLedgerConnector(BaseConnector):
                         continue
                     record = {
                         "internal_ref": str(row.get(self.mapping["internal_ref"], row.get("reference", ""))),
-                        "amount": float(row.get(self.mapping["amount"], 0) or 0),
+                        "amount": row.get(self.mapping["amount"], 0) or 0,
                         "phone_number": str(row.get(self.mapping["phone_number"], "") or ""),
                         "timestamp": str(row.get(self.mapping["timestamp"], "") or ""),
                         "status": str(row.get(self.mapping["status"], "pending") or "pending"),
                     }
+                    record.update(_optional_ledger_fields(row, self.mapping))
                     if record["internal_ref"] or record["amount"]:
                         records.append(record)
                 return records
             finally:
                 workbook.close()
         except Exception as exc:
-            logger.exception("Failed to read Excel ledger file %s: %s", self.source_path, exc)
-            return []
+            logger.exception("Excel ledger file read failed")
+            raise RuntimeError("Excel ledger fetch failed") from exc

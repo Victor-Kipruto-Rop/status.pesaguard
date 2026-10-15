@@ -4,16 +4,14 @@ import hashlib
 from datetime import datetime
 from typing import Any, Dict, Optional
 
+from normalization import DEFAULT_CURRENCY, normalize_amount, normalize_currency
 
 def _normalize_msisdn(value: Any) -> str:
     return "".join(ch for ch in str(value or "") if ch.isdigit())
 
 
-def _normalize_amount(value: Any) -> str:
-    try:
-        return f"{float(value):.2f}"
-    except (TypeError, ValueError):
-        return "0.00"
+def _normalize_amount(value: Any, currency: str) -> str:
+    return normalize_amount(value, currency=currency)
 
 
 def _normalize_time(value: Any) -> str:
@@ -40,9 +38,13 @@ def derive_idempotency_key(payload: Dict) -> str:
         return f"transid:{trans_id.upper()}"
 
     msisdn = _normalize_msisdn(payload.get("MSISDN") or payload.get("msisdn") or payload.get("phone_number"))
-    amount = _normalize_amount(payload.get("TransAmount") or payload.get("amount"))
+    currency = normalize_currency(payload.get("Currency") or payload.get("currency") or DEFAULT_CURRENCY)
+    amount = _normalize_amount(
+        payload.get("TransAmount", payload.get("amount")),
+        currency,
+    )
     trans_time = _normalize_time(payload.get("TransTime") or payload.get("trans_time") or payload.get("timestamp"))
 
-    canonical = f"{msisdn}|{amount}|{trans_time}"
+    canonical = f"{currency}|{msisdn}|{amount}|{trans_time}"
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return f"hash:{digest}"

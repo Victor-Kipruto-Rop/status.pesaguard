@@ -23,6 +23,8 @@ PyYAML==6.0.2
 
 # HTTP Networking & Security
 requests==2.33.0
+urllib3>=2.2,<3
+dnspython>=2.6,<3
 PyJWT==2.13.0
 cryptography==46.0.5
 argon2-cffi==23.1.0

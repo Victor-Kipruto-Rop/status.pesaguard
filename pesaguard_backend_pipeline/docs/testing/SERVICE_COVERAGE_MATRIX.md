@@ -24,26 +24,150 @@ human approval (Rule #61).
 | 3 | Authorization / RBAC | `role_models.py`, `authorization_policy.py`, `rbac.py`, `auth_rbac.py` | TESTED | `test_rbac_enforcement.py`, `test_least_privilege_authorization.py` |
 | 4 | User Service | `models.py` `UserAccount`, `IamUserIdentity`, `PasswordCredential`, `PasswordHistory`, `PasswordResetState` | TESTED | `test_iam_foundation.py`, `test_password_credentials.py`, `test_password_policy.py` |
 | 5 | Organization | `tenant_organization_service.py` (orgs, teams, depts, memberships) | TESTED | `test_tenant_organization_service.py` |
-| 6 | Tenant | `tenant_organization_service.py` + `TenantConfiguration/Limit/Usage` | TESTED | `test_tenant_organization_service.py`, `test_tenant_scope_constraints.py` |
+| 6 | Tenant | `tenant_organization_service.py` + `TenantConfiguration/Limit/Usage` + PostgreSQL RLS | PARTIALLY TESTED | `test_tenant_organization_service.py`, `test_tenant_scope_constraints.py`, `test_tenant_context.py`, `test_registration_hardening.py`; reporting boundary tests now exercise cross-tenant dead-letter and caller-selected CSV denial; the route-policy classifier found no unmapped entries, but a complete route/query audit and deployed role/grant verification remain outstanding |
 | 7 | Project | `project_environment_service.py` `ProjectService` | TESTED | `test_project_environment_service.py` |
 | 8 | Environment | `project_environment_service.py` `EnvironmentService` (tier promotion) | TESTED | `test_project_environment_service.py` |
 | 9 | API Key | `models.py` `ApiKeyRecord`, `ApiKeyLifecycleIdempotencyRecord`, `ServiceIdentity`; Java `ApiKeyService`; key-sync bridge | TESTED | `test_developer_api_key_sync.py`, `test_api_idempotency_contract.py` |
 | 10 | Session / Device | `UserSession`, `DeviceIdentity`; session routes; Java `SessionService` | TESTED | `test_session_management.py`, `test_device_risk_auth.py` |
 | 11 | OTP / MFA | `MFAChallenge/Factor/Recovery/Policy/Event`; Java `MfaService`/`TotpService`; `communications` OTP | TESTED | `test_otp.py`, `test_device_risk_auth.py`, `test_iam_foundation.py` |
 
+### Identity services verification (this session)
+
+**Full identity & access suite run end-to-end with Redis up** (so the rate limiter
+does not fail closed with 503s): the 19 identity test files below were executed in
+one pytest session — **181 passed, 0 failed, 0 errors, 37 warnings in 451.12s**.
+Coverage spans unit, integration (HTTP), security (tenant isolation, RBAC, authz
+boundary, fail-closed), and telemetry/observability assertions for services 1–11.
+
+Files (service): `test_control_plane_health.py` (1); `test_auth_lifecycle.py`,
+`test_auth_session_fail_closed.py`, `test_login_hardening.py`,
+`test_login_attempt_protection.py`, `test_token_revocation.py` (2);
+`test_rbac_enforcement.py`, `test_least_privilege_authorization.py` (3);
+`test_iam_foundation.py`, `test_password_credentials.py`, `test_password_policy.py`
+(4); `test_tenant_organization_service.py` (5, 6);
+`test_tenant_scope_constraints.py` (6); `test_project_environment_service.py` (7,
+8); `test_environment.py` (8); `test_developer_api_key_sync.py` (9);
+`test_session_management.py`, `test_device_risk_auth.py` (10); `test_otp.py` (11).
+
+**MFA challenge-expiry bug found and fixed (service 11).** `/auth/mfa/verify`
+compared a timezone-aware `datetime.now(timezone.utc)` against the stored
+`MFAChallenge.expires_at`. On PostgreSQL the driver returns an aware value and it
+worked, but on SQLite (tests/local) the column reads back **naive**, raising
+`TypeError: can't compare offset-naive and offset-aware datetimes` → HTTP 500
+instead of a clean refusal. Fix (in `verify_mfa_route`): normalize `expires_at`
+to UTC when `tzinfo is None` before comparison — mirroring the existing
+`locked_until` pattern — so an expired challenge returns
+`{"verified": false, "status": ...}` (200) consistently on both backends.
+
+- **Regression test added (Rule #37):**
+  `tests/test_otp.py::test_expired_challenge_is_refused_not_errored` forces a
+  challenge into the past (naive, as SQLite stores it) and asserts verify returns
+  **200 with `verified=false`**. **Guard proven:** with the fix reverted the test
+  reproduces the exact `TypeError`; with the fix restored it passes.
+- Re-ran `test_otp.py` + `test_auth_lifecycle.py`: **42 passed** (no regressions).
+
+### Self-review (identity verification phase)
+
+- Integrates with existing architecture: yes — the fix is local to one route;
+  the new test uses existing helpers/fixtures only.
+- Preserves tenant isolation: yes — the challenge lookup stays
+  `tenant_id`-scoped; the new test creates and purges its own tenant.
+- Preserves data integrity: yes — expiry is now *enforced* (a security
+  strengthening), never bypassed; expired challenges can never verify.
+- Race conditions: none introduced (read-then-compare, single-writer commit).
+- Security boundary: strengthened — expired challenges are refused on all
+  backends instead of erroring.
+- Duplicate functionality: no.
+- Unnecessary network calls: none.
+- Scalability bottleneck: none (constant-time tz normalization).
+- Observability: unchanged (success/failure paths already emit events/telemetry).
+- Tests: added 1 (proven to fail without the fix); full identity suite 181 green.
+- Rollback/recovery: fix is a minimal additive branch; reverting the 3-line
+  normalization restores prior behavior.
+
+
 ## Transaction services (12–20)
 
 | # | Service | Implementation | Status | Notes |
 |---|---------|----------------|--------|-------|
-| 12 | Transaction Service | `models.Transaction` + `IngestionService` + `EventStore.mark_processed` + `POST /api/v1/transactions` | TESTED | `test_transaction_routes.py`, `test_transaction_outbox.py`, `test_api_idempotency_contract.py`, `test_ingestion.py` |
+| 12 | Transaction Service | `models.Transaction` + `IngestionService` + `EventStore.mark_processed` + `POST /api/v1/transactions` | TESTED | `test_transaction_routes.py`, `test_transaction_outbox.py`, `test_api_idempotency_contract.py`, `test_ingestion.py`, `test_monetary_contract.py` |
 | 13 | Transaction Status Service | `EventStore.update_processing_status` + `GET /transactions/{id}/status` | TESTED | `test_transaction_routes.py`; optimistic-locking covered by `test_transaction_state_machine.py` |
 | 14 | Payment Service (origination) | **Out of scope** | NOT IMPLEMENTED (by design) | `PRODUCT_SCOPE.md`: no payouts/fund movement. Only Daraja callback *ingestion* exists |
 | 15 | Payment Confirmation Service | **Out of scope** | NOT IMPLEMENTED (by design) | `PRODUCT_SCOPE.md`: "does not execute or confirm settlements" |
 | 16 | Refund Service (money movement) | **Out of scope** | NOT IMPLEMENTED (by design) | Refund/reversal exists only as reconciliation *classification*, not money movement |
-| 17 | Payment / Transaction State Machine | `lifecycle.transition_transaction` + DB `CheckConstraint` + `EventStore.transition_transaction` | TESTED (gap closed this pass) | New: `test_transaction_state_machine.py` — see below |
+| 17 | Payment / Transaction State Machine | `lifecycle.transition_transaction` + DB `CheckConstraint` + `EventStore.transition_transaction` | TESTED (gaps closed this pass) | New: `test_transaction_state_machine.py` (FSM) + `test_transaction_db_constraints.py` (DB backstop) — see below |
 | 18 | Transaction History Service | `TransactionEvent` (append-only) + `_reconciliation_payload` history | TESTED | `test_transaction_routes.py`, `test_transaction_state_machine.py` (state-change events) |
 | 19 | Transaction Search Service | `/transactions/search` (tenant-scoped, paginated, LIKE-escaped) | TESTED (gap closed this pass) | New: `test_transaction_search_security.py` — see below |
 | 20 | Transaction Idempotency Service | `IdempotencyRecord` + `ProcessedTransaction` ledger + `_idempotent_route` | TESTED | `test_api_idempotency_contract.py`, `test_transaction_outbox.py`, `test_transaction_routes.py` |
+
+### Transaction services verification (this session)
+
+**Scope reminder (Rule #47):** services 14 (Payment/origination), 15 (Payment
+Confirmation) and 16 (Refund money-movement) are **out of scope by design** — PesaGuard
+ingests Daraja callbacks and reconciles them; it does not originate, confirm, refund,
+or move funds (`PRODUCT_SCOPE.md`). Implementing them is a separately scoped,
+human-approved effort (Rule #61). Services 12, 13, 17, 18, 19, 20 are fully in scope
+and covered.
+
+**Full transaction & payment suite run end-to-end with Redis up** (so the rate limiter
+does not fail closed): `test_transaction_routes.py`, `test_transaction_outbox.py`,
+`test_transaction_state_machine.py`, `test_transaction_search_security.py`,
+`test_transaction_performance.py`, `test_api_idempotency_contract.py`,
+`test_transaction_db_constraints.py` (new), `test_lifecycle_integrity.py`,
+`test_ingestion.py`, `test_batch_ingestion.py`, `test_ingestion_tenant_isolation.py`
+— **81 passed, 0 failed, 0 errors, 2 warnings in 417.27s**. Coverage spans unit (FSM,
+money math), integration (HTTP create/status/search/history + durable outbox),
+security (tenant isolation, SQLi/wildcard neutralization, idempotency-conflict), DB
+defense-in-depth (CheckConstraints), and a measured performance baseline.
+
+Files (service): `test_transaction_routes.py` (12, 13, 18, 19, 20);
+`test_transaction_outbox.py` (12, 20); `test_transaction_state_machine.py`
+(13, 17, 18); `test_transaction_search_security.py` (19);
+`test_transaction_db_constraints.py` (12, 13, 17, 20);
+`test_api_idempotency_contract.py` (20); `test_transaction_performance.py`
+(12, 13, 17, 20); `test_ingestion*.py` / `test_lifecycle_integrity.py`
+(12 canonical model, data lifecycle).
+
+**Gap found and closed this session (service 17).** The DB `CheckConstraint` that
+mirrors the FSM was never exercised — see item 3 below. No production behaviour,
+schema, or route was changed (Rules #5, #45, #46); the only new artifact is a test
+file, and `models.py` is byte-identical to the committed version.
+
+**Re-confirmed after a defensive-restore slip (Rule #38).** To prove the new DB
+constraint test is a real guard — not merely green by coincidence — I temporarily
+weakened `ck_transactions_status` to a no-op (`1=1`) and confirmed the suite then
+**fails** (illegal statuses insert), then restored it. While restoring the exact
+vocabulary I briefly mistyped it (mixing in data-lifecycle states); the new
+`test_transaction_db_constraints.py` **caught that typo immediately** (legal-state
+parametrize cases failed), which is precisely the drift the constraint test exists
+to prevent (Rule #23). After `git checkout HEAD -- models.py`, the constraint is
+byte-identical to the committed version again and the DB suite re-runs green.
+
+- Focused transaction suite re-run (8 files: routes, outbox, idempotency-contract,
+  state-machine, DB-constraints, search-security, performance, public-status):
+  **62 passed, 0 failed, 0 errors, 2 warnings in 452.53s**.
+- DB defense-in-depth suite alone: **12 passed in 45.30s**.
+
+
+### Self-review (transaction verification phase)
+
+- Integrates with existing architecture: yes — new test imports existing `models`,
+  writes via SQLAlchemy only; no wiring changed.
+- Preserves tenant isolation: yes — the constraint test asserts an empty `tenant_id`
+  is rejected; existing suites pin cross-tenant read/absence.
+- Preserves data integrity: yes — DB backstops (status vocabulary, positive amount,
+  ISO currency, non-empty tenant) are now pinned against direct writes that bypass
+  the app FSM.
+- Race conditions: none introduced (pure inserts; no concurrency added).
+- Security boundary: strengthened — a future writer that skips the FSM cannot persist
+  an illegal state; the constraint is proven to fire.
+- Duplicate functionality: no — additive test only; no service reimplemented.
+- Unnecessary network calls: none — in-memory SQLite.
+- Scalability bottleneck: none (constraint checks are DB-native, O(1) per row).
+- Observability: unchanged (no production path touched).
+- Tests: added 12 (proven to fail when the constraint is weakened); full suite green.
+- Rollback/recovery: additive test; deleting `tests/test_transaction_db_constraints.py`
+  reverts the change entirely. No production code/schema to roll back.
 
 ## Gaps closed in this hardening pass
 
@@ -66,7 +190,26 @@ schema, or route was modified (Rules #5, #45, #46).
    `%\%`, `100%_legit`, comment suffix) are neutralized and the table survives, and
    cross-tenant reads return no rows. **TESTED — 7 passed.**
 
-3. **Performance baseline (services 12, 13, 17, 20) — no measured throughput test.**
+3. **Service 17 — the DB `CheckConstraint` mirroring the FSM was never exercised.**
+   The FSM is enforced in `lifecycle.transition_transaction` (application layer) and
+   its docstring states it is "mirrored by a database CheckConstraint" — but no test
+   ever raised an `IntegrityError` from the `transactions` table, so the database
+   backstop was unpinned (Rule #23: critical invariants must be enforced at the DB
+   layer, not *only* in the app). Added
+   `tests/test_transaction_db_constraints.py` (12 tests) that write **directly** to
+   the DB (bypassing the FSM) and assert the constraints fire and nothing is
+   partially committed: an out-of-vocabulary status (`NOT_A_STATE`) is rejected; all
+   7 documented statuses are accepted (pins the exact vocabulary so it cannot drift);
+   a lowercase status is rejected (uppercase contract); non-positive `trans_amount`
+   is rejected; non-ISO / lowercase currency is rejected; an empty `tenant_id` is
+   rejected (tenant-isolation backstop, Rule #11). **TESTED — 12 passed.**
+   **Guard proven (Rule #38):** with the status constraint weakened to a no-op, the
+   illegal-status and lowercase tests fail; restored to the committed constraint,
+   all 12 pass. During this proof an accidental mis-typing of the constraint's
+   vocabulary was caught by the very test it was meant to strengthen, and
+   `models.py` was restored to the exact committed version (`git diff` clean).
+
+4. **Performance baseline (services 12, 13, 17, 20) — no measured throughput test.**
    Added `tests/test_transaction_performance.py` (3 tests) following the existing
    communications load-test convention: in-memory SQLite, no network,
    `time.monotonic()`, correctness asserted (all rows persisted, duplicates
@@ -114,12 +257,90 @@ schema, or route was modified (Rules #5, #45, #46).
 Total new automated tests: **25**, all passing. No production code, schema, route,
 or migration was changed.
 
+## Transaction & payment services (12–20)
+
+**Scope reminder (Rule #47/#3):** services 14 (Payment), 15 (Payment Confirmation)
+and 16 (Refund) are **money-movement capabilities and are intentionally not
+implemented** — they are outside `docs/product/PRODUCT_SCOPE.md` (PesaGuard ingests
+and reconciles; it does not originate, confirm, or refund payments) and would require
+a separately scoped, human-approved effort (Rule #61). Services 12, 13, 17, 18, 19 and
+20 are the transaction *lifecycle* (ingest → status → state machine → history → search
+→ idempotency) and are fully implemented and covered.
+
+### Transaction services verification (this session)
+
+**Full transaction suite run end-to-end with Redis up** (so the rate limiter does not
+fail closed): 10 test files were executed in one pytest session — **69 passed,
+0 failed, 0 errors, 2 warnings in 384.84s**. Coverage spans unit (state graph,
+transition edges), integration (HTTP routes), security (tenant isolation, SQLi/
+wildcard escaping, cross-tenant write denial), durability (outbox + dead-letter,
+atomic commit), and performance/observability (throughput measured, correctness
+asserted under volume) for services 12, 13, 17, 18, 19, 20.
+
+Files (service): `test_transaction_routes.py` (1, 12, 13, 17, 18, 19, 20 — HTTP
+integration incl. the canonical ASGI mount, idempotent create, tenant-scoped
+status/detail/search, reconciliation-request idempotency + conflict, fraud-analyse
+idempotency); `test_transaction_outbox.py` (20 — accepted-transaction + outbox
+committed together, duplicate suppressed, identity-reuse conflict, retry/backoff,
+exhausted → dead-letter, producer-failure releases claims); `test_transaction_state_machine.py`
+(13, 17 — forward-only one-stage transitions, terminal states, skip/regression
+rejected, optimistic-lock stale-version rejection, tenant-scoped, append-only events);
+`test_transaction_search_security.py` (19 — `%`/`_`/`\` and injection payloads are
+literal not pattern, cross-tenant search returns nothing); `test_transaction_performance.py`
+(12, 13, 17, 20 — 500 ingest / 300 duplicate / 200×4 transition volume, correctness
+asserted, rate printed not thresholded per Rule #39); `test_api_idempotency_contract.py`
+(9, 20 — replay, payload-reuse 409, missing key/tenant 400, service/API-key
+cross-tenant write + read denied 403); `test_lifecycle_integrity.py` (13, 17);
+`test_ingestion.py`, `test_batch_ingestion.py`, `test_ingestion_tenant_isolation.py`
+(12, 20 — ingestion path + tenant isolation).
+
+**No production bug found in this pass.** A targeted source review of the same class
+of defect fixed for the MFA service (service 11) confirmed the transaction paths are
+already hardened: `transaction_routes.py` normalizes every `created_at` read back from
+SQLite to UTC before `.isoformat()` (lines 47–48 and 124–126), so the aware/naive
+`TypeError` cannot occur on SQLite. State transitions run under DB-level optimistic
+locking, the search filter is escaped before ILIKE, and every route re-validates the
+tenant context. No code change was required (Rule #45).
+
+### Self-review (transaction verification phase)
+
+- Integrates with existing architecture: yes — no wiring added; existing suites exercised.
+- Preserves tenant isolation: yes — cross-tenant create/read/search/transition all
+  denied or return nothing; pinned by `test_api_idempotency_contract.py`,
+  `test_transaction_search_security.py`, `test_transaction_state_machine.py`,
+  `test_ingestion_tenant_isolation.py`.
+- Preserves data integrity: yes — idempotency (no duplicate rows), append-only state
+  events, optimistic-lock stale-version rejection, and atomic accepted+outbox commit
+  are all asserted.
+- Race conditions: none introduced; the stale-version (lost-update) test proves the
+  optimistic-lock guard.
+- Security boundary: strengthened/verified — SQLi/wildcard escaping and cross-tenant
+  denial pinned.
+- Duplicate functionality: no.
+- Unnecessary network calls: none — in-process SQLite (Redis only for the rate limiter).
+- Scalability bottleneck: none introduced; performance tests assert correctness at
+  volume and print measured throughput.
+- Observability: unchanged (ingestion/transition emit structured events, confirmed).
+- Tests: full suite green (69); no new test was required because coverage already
+  spans unit/integration/security/performance for these services.
+- Rollback/recovery: no production code changed; documentation-only addition here.
+
 ## Data pipeline services (21–32)
 
 All twelve services are implemented and covered by dedicated test suites. Verified
-by running the existing suites (baseline): normalization/schema/contract (18),
-ingestion/batch/lineage/catalog/dictionary (19), schema-registry/source-contracts/
-transformation/data-quality (9), core-data-engineering/realtime (6) — all green.
+by running the full data-pipeline suite as one session (23 files: ingestion,
+ingestion-tenant-isolation, connectors, batch, realtime pipeline + worker,
+normalization + hardening, daraja-validation, schema/registry/compatibility,
+contract diff/lint/versioning, source-contracts, contract-testing,
+api-idempotency-contract, data-quality, lineage, catalog/dictionary/
+transformation-store): **134 passed, 0 failed, 0 errors in 78.89s** with Redis up.
+A focused re-verification of exactly the services-21–32 authoritative test files
+(19 files: ingestion, ingestion-tenant-isolation, batch, realtime pipeline +
+worker, core-data-engineering, normalization + hardening, api-idempotency-contract,
+transaction-outbox, schema-registry, schema-compatibility, contract-versioning,
+source-contracts, data-quality-layer, lineage, catalog, dictionary,
+transformation-store) reproduced a clean baseline: **99 passed, 0 failed,
+0 errors in 41.15s** (exit code 0).
 
 | # | Service | Implementation | Status | Notes |
 |---|---------|----------------|--------|-------|
@@ -132,9 +353,31 @@ transformation/data-quality (9), core-data-engineering/realtime (6) — all gree
 | 27 | Canonical Data Model Service | `ingestion.CanonicalTransaction` + `_canonical_transaction_id` | TESTED (gap closed) | New: `test_ingestion_tenant_isolation.py` (5 tests) |
 | 28 | Deduplication Service | `idempotency.py`, `EventStore` idempotency ledger | TESTED | `test_api_idempotency_contract.py`, `test_transaction_outbox.py` |
 | 29 | Schema Registry / Contract Service | `schema_validation.py`, `schema_compatibility.py`, `contract_versioning.py`, `source_contracts.py` | TESTED | `test_schema_registry.py`, `test_schema_compatibility.py`, `test_contract_versioning.py`, `test_source_contracts.py` |
-| 30 | Data Quality Service | `data_quality.py`, `dq_rules.py` | TESTED | `test_data_quality_layer.py` (dimension scoring + quarantine) |
+| 30 | Data Quality Service | `data_quality.py`, `dq_rules.py`, `provenance.py`, M-Pesa `IngestionService` and authenticated transaction-route gates | TESTED (expanded) | `test_data_quality_essentials.py`, `test_data_quality_layer.py`, `test_data_quality_remediation_migration.py`, `test_transaction_ingestion_hardening.py`, `test_transaction_routes.py` (contracts, quality scoring/reports, duplicates, freshness, robust MAD/IQR warnings, transactional quarantine, route quarantine, and append-only remediation) |
 | 31 | Data Lineage Service | `lineage.py`, `data_lineage.py`, `provenance.py` | TESTED | `test_lineage.py` |
 | 32 | Data Metadata Service | `data_catalog.py`, `data_dictionary.py`, `transformation_store.py` | TESTED | `test_data_catalog.py`, `test_data_dictionary.py`, `test_transformation_store.py` |
+
+### Data-quality controls (Service 30)
+
+Both M-Pesa write paths run DQ/provenance inside the event-store transaction:
+`IngestionService` and the authenticated `/api/v1/transactions` endpoint.
+Accepted events persist check-level and dimensional evidence with the
+transaction, while rejected events are quarantined without writing a transaction,
+processed marker, or outbox row. The direct endpoint returns a distinct
+quarantined disposition. Quarantines are idempotent by tenant/provider and
+raw-payload hash. Reports expose the versioned equal-dimension-rule-mean score,
+failed checks, non-blocking warnings, freshness/null/empty profile, and bounded
+batch summaries. Identical duplicate IDs warn; conflicting ID reuse fails.
+Freshness thresholds default to unset, stale events warn rather than quarantine,
+and robust amount outliers use tenant/provider/currency-scoped peers and warn
+rather than reject.
+
+`quarantine_remediations` records tenant-authorized transitions append-only;
+correction evidence is represented by a hash. No remediation HTTP API or
+automatic replay path is added. Migration downgrade is blocked when remediation
+history exists, preventing evidence loss. PostgreSQL migration/recovery,
+concurrency, target-capacity tests, and outlier-threshold calibration remain
+release gates, not claims established by SQLite tests.
 
 ### Data-pipeline gaps closed in this pass (additive only)
 
@@ -153,6 +396,43 @@ transformation/data-quality (9), core-data-engineering/realtime (6) — all gree
    (`normalize_identifier`) before derivation so retries are recognised (Rule #9).
    Also documents that the raw helper is intentionally case-sensitive so callers
    must normalize first. **TESTED — 5 passed.**
+
+3. **Service 23 — realtime ingestion hand-rolled its own amount logic (financial
+   bug).** `realtime_pipeline.validate_transaction_payload` used
+   `Decimal(str(payload["TransAmount"])) <= 0` and
+   `normalize_transaction_payload` used `Decimal(...).quantize(0.01)`, diverging
+   from the canonical service-26 `normalize_amount`. A live probe confirmed:
+   `Infinity`/`1e30` **passed validation then crashed normalization** with an
+   uncaught `InvalidOperation` (500 at the API boundary), and sub-minor-unit
+   fractions were **silently truncated** (`12.345` → `12.34`, losing 0.005 — a
+   silent financial-data change, Rules #7/#32/#33/#57). It also rejected
+   thousands-separated amounts (`1,234.56`) the canonical normalizer accepts.
+
+   **Fix (Rules #44/#21):** delegate both stages to
+   `normalization.normalize_amount` so the real-time path enforces the exact same
+   finite/positive/minor-unit/precision invariants as the batch/canonical path.
+   This removes the duplicated, divergent copy rather than patching it. Happy
+   paths stay byte-identical (`"10"` → `"10.00"`, `"1,234.56"` → `"1234.56"`).
+
+   **Verification (Rule #37/#38):** added
+   `test_realtime_pipeline_amount_invariants_match_canonical_normalizer` (happy
+   paths + 8 rejected inputs, each asserted at *both* validate and normalize
+   stages). Proven to be a real guard — it **fails against the original HEAD
+   version** and **passes with the fix**. `test_realtime_pipeline.py` +
+   `test_realtime_worker.py` re-run: **3 passed**. Full data-pipeline suite
+   re-run: **99 passed, 0 failed, 0 errors in 41.15s** (exit code 0) — no
+   regressions.
+
+### Observation (reviewed, deliberately NOT changed — Rules #5/#45/#60)
+
+- **Service 28 — `idempotency._normalize_amount` uses `float(value)`**, which is
+  divergent from the canonical `Decimal` normalizer. I traced reachability: it
+  runs **only** in the fallback path when `TransID` is empty, and its output is a
+  **disambiguator inside a SHA-256 dedup key**, never a stored/persisted money
+  value. It is deterministic (stable key → correct idempotency) and cannot crash
+  (`try/except` → `"0.00"`). Changing dedup-key derivation risks altering match
+  behaviour for existing records (Rules #26/#58) for no financial-integrity gain,
+  so per Rule #45 it is **left unchanged** and recorded here rather than edited.
 
 ### Self-review (data-pipeline phase)
 
@@ -209,6 +489,39 @@ raises `TypeError` on a `None` signature, but the only production caller
 Per Rules #5/#45/#46 this was documented via a test rather than changing security
 code speculatively.
 
+### Webhook source-gate hardening in this pass (additive + one docstring fix)
+
+**Finding (Rule #47 — documentation described a control that does not exist):** the
+docstring for `security_helpers.is_allowed_source` advertised a fail-open development
+override, `PESAGUARD_ALLOW_UNRESTRICTED_WEBHOOK_SOURCE=1`, that **no code reads**. The
+gate itself correctly **fails closed** (rejects when neither `DARAJA_SHARED_SECRET` nor
+`DARAJA_ALLOWED_IPS` is configured) and uses constant-time `hmac.compare_digest`. The
+misleading docstring matters because CI/staging workflow files *set* that env var
+believing it relaxes validation, and `PRODUCTION_CERTIFICATION.md` references it — so an
+operator (or a future change) could assume a fail-open switch exists. Per Rule #65, a
+future "implementation" of the documented override would be a fail-open backdoor on the
+webhook ingestion boundary (Rules #19/#55).
+
+**Fix (docstring only — no security-code change):** rewrote the docstring to describe the
+real, secure posture: the gate always fails closed, there is no override, and unconfigured
+deployments must set the shared secret or IP allowlist. No behavioral change to the gate
+(Rules #5/#46 — I did not speculatively touch the security-critical comparison).
+
+**Regression guard (Rule #37/#38):** added `tests/test_webhook_source_gate.py` (4 tests):
+(1) unconfigured → denied; (2) valid shared-secret header → allowed, wrong/absent secret →
+denied; (3) IP allowlist exact + CIDR match vs non-listed IP; (4) the critical
+`test_documented_unrestricted_override_is_not_implemented` sets
+`PESAGUARD_ALLOW_UNRESTRICTED_WEBHOOK_SOURCE=1` and asserts the gate **still denies** — so
+if anyone later implements the documented fail-open switch, this test fails loudly.
+
+**Guard proven real (Rule #38):** temporarily injecting the fail-open override exactly as
+the old docstring described made test (4) fail (`assert True is False`); reverting restored
+green. No behavioral change shipped.
+
+**Full M-Pesa suite re-run (this pass): 53 passed, 0 failed** (49 baseline + 4 new guard
+tests) — no regressions.
+
+
 ### Self-review (integration phase)
 
 - Integrates with existing architecture: yes — tests import existing modules only.
@@ -231,125 +544,216 @@ separately scoped, human-approved effort (Rule #61).
 ## Reconciliation services (43–50)
 
 The financial core (Rules #26/#27: deterministic, explainable matching). All
-services are implemented and covered. Verified by running existing suites:
-reconciliation/utils/state/batch/phase3/ground-truth/anomaly (31) and settlement
-(10) — all green, including the phase-3 golden-dataset 100%-correct certification.
+services are implemented and covered. Verified this phase by running
+reconciliation + determinism + utils + state + batch + phase3 + anomaly_rules +
+anomaly_scoring → **41 passed, 0 failed (exit 0)**, and settlement (10) — all
+green, including the phase-3 golden-dataset 100%-correct certification.
 
 | # | Service | Implementation | Status | Notes |
 |---|---------|----------------|--------|-------|
-| 43 | Reconciliation Service | `reconciliation_engine.py` `ReconciliationEngine.reconcile` | TESTED | `test_phase3_reconciliation.py` (golden dataset), `test_reconciliation.py` |
+| 43 | Reconciliation Service | `reconciliation_engine.py` `ReconciliationEngine.reconcile` / `reconcile_batch` (`phase3.3`) | TESTED | Golden dataset; deterministic batch control totals, ambiguity review, and exact grouped matching in `test_reconciliation_financial_processing.py` |
 | 44 | Reconciliation Job Service | `reconciliation_job.py` | TESTED | `test_reconciliation_batch.py` |
-| 45 | Transaction Matching Service | `reconciliation_engine.py` matching rules + `reconciliation_scoring.score_match` | TESTED (gap closed) | New: `test_reconciliation_determinism.py` |
+| 45 | Transaction Matching Service | `reconciliation_engine.py` matching rules + `reconciliation_scoring.score_match` | TESTED | Equal top scores are review outcomes; exact-only many-to-one and one-to-many groups in `test_reconciliation_determinism.py` and `test_reconciliation_financial_processing.py` |
 | 46 | Exception Service | engine `EXCEPTION` outcomes + `discrepancy_dao.py` | TESTED | `test_phase3_reconciliation.py` (invalid input, sub-cent) |
-| 47 | Unmatched Transaction Service | engine `UNMATCHED`/`MISMATCH` outcomes | TESTED | `test_reconciliation_determinism.py`, `test_phase3_reconciliation.py` |
+| 47 | Unmatched Transaction Service | engine `UNMATCHED`/`MISMATCH` outcomes and batch `unmatched_ledger_records` | TESTED | `test_reconciliation_determinism.py`, `test_phase3_reconciliation.py`, `test_reconciliation_financial_processing.py` |
 | 48 | Reconciliation Rules Service | engine matching-rule tags + `anomaly_rules.py` | TESTED | `test_anomaly_rules.py`, `test_phase3_reconciliation.py` |
 | 49 | Reconciliation Result Service | engine `_result` evidence + `reconciliation_scoring` | TESTED | `test_anomaly_scoring.py`, `test_phase3_reconciliation.py` |
-| 50 | Reconciliation Audit Service | `record_ground_truth`, `ReconciliationGroundTruth`, `action_audit.py` | TESTED | `test_ground_truth_certification.py` (immutability) |
+| 50 | Reconciliation Audit Service | `record_ground_truth`, `ReconciliationGroundTruth`, `action_audit.py`, `ReconciliationMatch` | TESTED | Versioned evidence in the atomic audit; append-only match decisions in `test_reconciliation_database_guards.py` |
 
-### Determinism gap found and fixed (services 43, 45, 47)
+### Candidate selection, group cardinality, and durable decisions (services 43–50)
 
-**Finding (Rule #26/#27):** when multiple internal records tied on match score,
-candidate selection used `max(records, key=score)`, which returns the FIRST max in
-input order. I verified with a live probe that reversing the input changed which
-record a callback reconciled against (`cand-A` vs `cand-C`) — a non-deterministic,
-non-explainable financial decision. Distinct-score cases were already deterministic.
+Equal-scoring top candidates are now classified as `EXCEPTION` by the versioned
+engine and `needs_review` by the legacy compatibility evaluator. Candidate IDs
+remain in stable order for evidence, but no ledger row is selected. A unique
+highest score continues to select the best candidate.
 
-**Fix (human-approved per Rule #61):** added `_best_candidate`, which selects the
-highest-scoring record and breaks score ties with a stable secondary key
-(`internal_ref`, ascending). When scores differ nothing changes (higher score still
-wins); ties are now reproducible regardless of input order. This is the minimal
-change that restores determinism without altering normal-case outcomes.
+Cardinality policy is exact-only for automatic matching: one payment may match
+multiple distinct ledger rows, or multiple payments may match one ledger row,
+only when their same-reference, same-currency, in-window aggregate is exact.
+An under-total many-to-one group is `PARTIAL`; an over-total group is `MISMATCH`.
+Non-exact groups do not consume ledger rows. Duplicate transaction IDs are
+`DUPLICATE`; duplicate normalized ledger identifiers reject the batch during
+input validation; absent candidates are `UNMATCHED`. Refunds and reversals must reference the original transaction and
+are reconciled as separate immutable events; they do not mutate the original
+financial record or initiate a money movement.
 
-**Verification (Rule #37/#38):**
-- Added `tests/test_reconciliation_determinism.py` (11 tests): tied candidates
-  resolve identically under reordering, ties break by `internal_ref`, distinct
-  scores still pick the better candidate, and the key Rule #27 cases (exact,
-  unmatched, duplicate-reference, mismatch, refund-requires-original, invalid
-  amount) remain stable.
-- Full reconciliation suite re-run: **42 passed** (11 new + 31 existing), including
-  the golden-dataset 100%-correct certification — **zero regressions**.
-- Settlement suite re-run: **10 passed**.
+Every persisted outcome requires a recognized phase-3 status and evidence
+containing matching rules, match score/time, engine version, and rule version.
+The same database transaction stores the result, the full evidence in the
+append-only audit, the `ReconciliationMatch`, and the outbox. Completed outcomes
+are replay-safe duplicates; direct database updates/deletes of match decisions
+and illegal lifecycle edges are rejected by triggers. No authorized correction
+workflow currently exists, so established outcomes cannot be replaced.
+
+**Verification (2026-10-14):** reconciliation, grouped processing, batch
+delivery, dead-letter, audit, lifecycle, and related database-constraint suites
+→ **124 passed, 11 warnings**. Alembic resolves to one head,
+`20261014_quarantine_remediation_history`; the new lifecycle/match guards are
+its predecessor. The PostgreSQL migration and full-chain PostgreSQL upgrade
+remain deployment checks.
 
 ### Self-review (reconciliation phase)
 
-- Integrates with existing architecture: yes — one helper added inside the engine.
+- Integrates with existing architecture: matching and persistence remain in the
+  engine/job; lifecycle checks follow the existing transition maps.
 - Preserves tenant isolation: reconciliation operates on caller-supplied records;
   no tenant boundary changed.
-- Preserves data integrity: yes — determinism strengthened; no match outcome
-  changed for distinct scores.
-- Race conditions: none introduced (pure selection).
-- Security boundary: unchanged.
-- Duplicate functionality: no — reuses existing `_score`.
-- Unnecessary network calls: none (in-memory).
-- Scalability bottleneck: `_best_candidate` is O(n), same as `max`; `_score` is
-  called per candidate as before.
-- Observability: unchanged (result evidence unchanged in shape).
-- Tests: added (11), all passing; existing reconciliation + settlement still green.
-- Rollback/recovery: change is a pure, in-memory selection refinement; revertable by
-  restoring the two `max(...)` lines. **Human-approved** because it touches
-  reconciliation matching logic (Rule #61).
+- Preserves data integrity: ambiguous candidates cannot be silently attached;
+  non-exact payment groups do not consume ledger rows.
+- Race conditions: optimistic transaction versions, scoped uniqueness, row locks,
+  and atomic persistence prevent duplicate outcomes; concurrent SQLite tests
+  verify one durable result.
+- Auditability: matching rules, outcome, engine/rule version, score, timestamp,
+  and full evidence are written atomically.
+- Database boundary: migration triggers enforce lifecycle edges and match
+  decision immutability; Alembic reports one head.
+- Corrections: no correction endpoint exists. Completed decisions remain
+  immutable until an explicitly authorized correction workflow is designed.
+
+### Durable Kafka disposition and offset handling (services 44/47)
+
+The reconciliation consumer uses at-least-once delivery with explicit offset
+commits. A Kafka offset is a per-partition broker position; committing message
+offset `n` stores `n+1`, the next position to consume. An application result or
+counter is not an acknowledgement. The consumer commits only after either the
+reconciliation transaction (idempotency state, audit record, and outbox) or a
+tenant-scoped dead-letter record is durable.
+
+Processing failure is quarantined before commit. The dead letter retains the
+payload (raw malformed bytes are base64 encoded) and topic/partition/offset
+coordinates. If reconciliation and dead-letter storage both fail, or the
+explicit offset commit fails, the affected partition is paused and sought back
+to the failed offset for timed retry; later messages in that partition are not
+processed past it. Other partitions remain eligible to progress. Failure to
+pause/seek or commit is surfaced rather than silently acknowledged. A crash
+after durable database commit but before confirmed offset commit may redeliver:
+the reconciliation ledger makes completed transactions a no-op, while the
+dead-letter store deduplicates quarantine.
+
+**Verification (2026-10-13):**
+- `tests/test_reconciliation_dead_letter.py` covers dead-letter database
+  outage/retry, partition pause and recovery, malformed payload quarantine,
+  explicit per-message commit, and durable DLQ redelivery after commit
+  uncertainty.
+- SQLite-backed tests verify that successful redelivery leaves one processed
+  transaction, audit entry, outbox entry, and fraud-risk assessment; durable DLQ
+  redelivery leaves one auditable record with its Kafka coordinates.
+- Exact command from `pesaguard_backend_pipeline/`:
+  `python -m pytest -q --tb=short tests/test_reconciliation_utils.py tests/test_reconciliation_state.py tests/test_reconciliation_determinism.py tests/test_reconciliation_dead_letter.py tests/test_reconciliation_batch.py tests/test_reconciliation_audit_immutability.py tests/test_transaction_outbox.py`
+  **46 passed** (one unrelated `datetime.utcnow()` deprecation warning). This is
+  automated test evidence, not production verification; live broker
+  pause/rebalance behavior and PostgreSQL outage recovery still require
+  deployment-level validation.
+
+### Financial matching and control totals (services 43–47)
+
+`ReconciliationEngine` `phase3.3` now exposes deterministic bounded batch
+reconciliation in addition to the worker's per-event path. It normalizes
+identifiers, validates currency and timestamps, supports exact one-payment to
+many-ledger-row matches, reports partial/overpaid discrepancies, detects
+duplicate and unmatched rows, and returns signed per-currency control totals.
+Duplicate ledger row IDs and batches containing multiple tenants are rejected.
+The production worker fetches shared-reference candidates and persists grouped
+ledger-row evidence in `ReconciliationMatch`.
+
+Grouped auto-matching is intentionally conservative: same normalized reference
+and currency, unique row IDs, all timestamps inside the configured window, and
+an exact Decimal total are required. Partial or overpaid groups remain review
+outcomes. Postgres deployments must configure separate `internal_ref` and
+`reference` mappings to find split rows; see
+`docs/product/RECONCILIATION_WORKFLOW.md` for the connector contract, batch
+limits, rollback behavior, benchmark evidence, and deployment-verification gaps.
 
 ## Settlement services (51–55)
 
 **Important scope nuance (Rule #47):** `settlement.py` implements an **internal
-settlement calculation / status / reconciliation / reporting domain**. It computes
-and tracks settlement *records* against internal ledger data using `Decimal` money,
-tenant isolation, per-key idempotency, and an auditable state machine. It does
-**NOT** move money, call Daraja, initiate payouts/B2C, or execute fund transfers —
-so it respects the money-movement boundary in `PRODUCT_SCOPE.md`. It is currently
-imported only by tests (no HTTP route or worker wires `SettlementService` in yet).
+settlement calculation / status / reconciliation / reporting domain**. It
+calculates `Decimal` totals from caller-supplied lines and compares them to a
+caller-supplied expected net. It does not currently load/verify the lines against
+authoritative source transactions or import/verify provider statements. A zero
+variance is therefore only agreement with that supplied expected net, not
+provider confirmation. It does **NOT** move money, call Daraja, initiate
+payouts/B2C, or execute fund transfers. `SettlementService` remains service-layer
+only: no HTTP route or worker wires it, so it is not customer-accessible.
 
-Verified by running `tests/test_settlement.py`: **10 passed** (money math, per-key
-idempotency, calculate→reconcile→settle lifecycle, variance→`disputed`, cross-tenant
-denial, same-key-per-tenant isolation, illegal/terminal transition rejection,
-tenant-scoped reporting).
+Settlement input amounts and fees must be finite, non-negative, in-range, and
+within currency minor-unit precision; fees cannot exceed line amounts. Duplicate
+transaction IDs in one calculation are rejected, aggregation overflow is
+rejected, and omitted lines are removed from the current line snapshot on
+recalculation while prior input/totals remain in append-only audit snapshots.
+Signed adjustment, chargeback, refund, and reversal entries are unsupported and
+rejected for investigation. Recalculation cannot overwrite a reconciled/settled
+outcome. ORM version columns reject stale writes. The integrity migration adds
+database-enforced status edges and status-transition audit insertion, plus
+update/delete protection for settlement audit history. `settled` means only that
+the internal record was finalized.
+
+Focused verification uses `tests/test_settlement.py` and
+`tests/test_settlement_integrity_migration.py` for exact money math, minor units,
+duplicate/rejected lines, aggregation overflow, idempotency, expected-net
+variance, tenant isolation, optimistic locking, transaction rollback, immutable
+calculation evidence, database status guards, and append-only audit behavior.
+The final focused run across those suites and
+`tests/test_currency_minor_units_migration.py` completed **31 passed, 0 failed**
+on 2026-10-14. Alembic reports one head,
+`20261014_settlement_integrity`; the SQLite migration tests run the revision in
+isolation. PostgreSQL migration/concurrency behavior remains unverified. The
+migration refuses downgrade after audit history exists to prevent silently
+discarding it. No settlement HTTP/worker integration exists because the
+capability is intentionally not exposed.
 
 | # | Service | Implementation | Status | Notes |
 |---|---------|----------------|--------|-------|
-| 51 | Settlement Service | `settlement.py` `SettlementService` (facade) | TESTED | `test_settlement.py` lifecycle |
-| 52 | Settlement Calculation Service | `SettlementCalculationService` (Decimal half-up totals; idempotent per `(tenant_id, settlement_key)`) | TESTED | money math + idempotency |
-| 53 | Settlement Status Service | `SettlementStatusService` (auditable state machine) | TESTED | illegal/terminal transitions rejected |
-| 54 | Settlement Reconciliation Service | `SettlementReconciliationService` (variance = expected − net; non-zero → `disputed`, never overwritten) | TESTED | variance handling |
+| 51 | Settlement Service | `settlement.py` `SettlementService` (facade) | TESTED, NOT EXPOSED | `test_settlement.py`; no customer-facing API or worker |
+| 52 | Settlement Calculation Service | `SettlementCalculationService` (currency-precision validation; derived half-up totals; idempotent per `(tenant_id, settlement_key, currency)`) | TESTED | `test_settlement.py`, `test_currency_minor_units_migration.py` |
+| 53 | Settlement Status Service | `SettlementStatusService` (state machine + database lifecycle guard) | TESTED | illegal/terminal transitions rejected, logged and counted; migration writes status audit records |
+| 54 | Settlement Reconciliation Service | `SettlementReconciliationService` (variance = caller-supplied expected net − calculated net; non-zero → `disputed`) | TESTED | Does not import or verify a provider statement |
 | 55 | Settlement Reporting Service | `SettlementReportingService` (read-only, tenant-scoped, Decimals as strings) | TESTED | tenant-scoped listing |
 
-### Documentation conflicts found (flagged for human decision; NOT changed here)
+### Documentation consistency and observability
 
-Per Rule #47 (documentation must describe the real system) and Rule #60, I am
-**reporting** these rather than editing scope/decision documents unilaterally:
+Per Rule #47, the product scope and the implemented internal settlement domain
+must describe the same boundary:
 
-1. **`docs/product/PRODUCT_SCOPE.md` is stale.** It states there is "no corresponding
-   settlement persistence model, executable API, or worker workflow." This is now
-   contradicted by `settlement.py`, the `Settlement`/`SettlementLine` models in
-   `models.py`, the Alembic migration `20261009_add_settlement_scheduler.py`, and
-   `docs/domains/reconciliation/SETTLEMENTS.md` (which was updated 2026-10-09 to
-   describe the implemented services). **Recommendation:** update `PRODUCT_SCOPE.md`
-   to state that an *internal, non-money-moving* settlement calculation/reporting
-   domain exists, while retaining the explicit boundary that PesaGuard does not
-   execute settlements, payouts, or fund movement.
+1. **Product-scope conflict — RESOLVED.** `docs/product/PRODUCT_SCOPE.md` now
+   records the internal calculation, variance reconciliation, and read-only
+   reporting domain while retaining the explicit prohibition on provider
+   confirmation, payouts, and fund movement. Reporting remains service-layer
+   only; no HTTP route or worker was added.
 
-2. **`settlement.py` module docstring overstates observability.** Line ~13 says
-   illegal transitions "are recorded as security events," but the code raises
-   `SettlementStateError` and logs at INFO without calling `record_security_event`.
-   **Recommendation:** either add the security-event call (Rule #40) or correct the
-   docstring. Left unchanged here because it touches production behavior.
+2. **Settlement integrity gaps — addressed locally.** Illegal transitions emit a
+   warning and increment the shared security-event metric before rejection.
+   Optimistic locking prevents stale ORM updates. The integrity migration writes
+   successful status changes as audit records from a database trigger, rejects
+   invalid status edges from alternate SQL paths, and makes audit history
+   append-only. PostgreSQL deployment behavior remains unverified.
 
 ### Self-review (settlement phase)
 
 - Integrates with existing architecture: yes — services use existing models/session.
 - Preserves tenant isolation: yes — every query/mutation is tenant-scoped; DB check
   constraints enforce non-empty tenant_id (verified by `test_settlement.py`).
-- Preserves data integrity: yes — `Decimal`/`NUMERIC(18,2)`, half-up rounding,
-  non-negative check constraints, idempotent per key.
-- Race conditions: idempotency per `(tenant_id, settlement_key)`; unique constraint
-  prevents double-count on replay.
-- Security boundary: unchanged; no money movement added.
+- Preserves data integrity: yes — `Decimal`/`NUMERIC(19,3)`, currency-specific
+  precision, half-up rounding for derived values only, duplicate rejection,
+  aggregation range checks, immutable calculation snapshots, and DB status guards.
+- Race conditions: idempotent insert per `(tenant_id, settlement_key, currency)`;
+  optimistic version checks reject stale ORM updates. PostgreSQL concurrent-write
+  behavior needs integration validation.
+- Security boundary: unchanged; no money movement added. Illegal transitions are
+  rejected, logged, and counted (Rule #8/#26/#40).
 - Duplicate functionality: no — reuses existing models.
 - Unnecessary network calls: none (pure DB).
 - Scalability bottleneck: none introduced; tenant/period indexes exist.
-- Observability: structured logging present; **security-event recording is a flagged
-  gap** (see above).
-- Tests: existing suite green (10); no new tests required — coverage is thorough.
-- Rollback/recovery: N/A — no production code changed in this pass.
+- Observability: structured warning plus security-event metric on illegal
+  transitions. A rejected-transition audit row shares the caller-owned database
+  transaction and is rolled back if the caller rolls back; warning/metric are the
+  independent rejection signals.
+- Source/provider evidence: authoritative source-transaction and provider-statement
+  imports are not implemented. Caller-provided lines and expected totals are not
+  independently verified; provider transfer/settlement execution is unsupported.
+- Rollback/recovery: calculations and their audit evidence are written in the
+  caller-owned transaction and roll back together. PostgreSQL trigger and
+  concurrency behavior remains a deployment verification requirement.
 
 ## Risk & fraud services (56–63)
 
@@ -362,30 +766,98 @@ Verified by running existing suites: fraud-risk-engine / anomaly-rules /
 anomaly-scoring / escalation-actions / alert-delivery-routing / alerting-monitoring
 — **32 passed** (incl. 5 new boundary tests).
 
+2026-10-13 production-hardening pass added (all passing; evidence in the
+hardening note below): `test_fraud_events.py` (8), anomaly Decimal-threshold
+regression (+1), alert tenant-scoping/audit-log (+2), fraud-route durable-event
+(+1), `test_investigation_tenant_isolation.py` (11).
+
 | # | Service | Implementation | Status | Notes |
 |---|---------|----------------|--------|-------|
 | 56 | Risk Service | `fraud_risk_engine.assess_transaction` + `FraudRiskAssessment` model | TESTED | `test_fraud_risk_engine.py`, `test_fraud_boundaries.py` |
-| 57 | Anomaly Detection Service | `anomaly_rules.check_for_anomalies` / `score_transaction_anomaly` | TESTED (gap documented) | `test_anomaly_rules.py`, `test_fraud_boundaries.py` |
+| 57 | Anomaly Detection Service | `anomaly_rules.check_for_anomalies` / `score_transaction_anomaly` | TESTED | `test_anomaly_rules.py`, `test_fraud_boundaries.py`, `test_monetary_contract.py` |
 | 58 | Fraud Detection Service | `fraud_risk_engine` layered rules + `fraud_events.py` publication | TESTED | `test_fraud_risk_engine.py` (Rule #28 boundaries) |
-| 59 | Risk Scoring Service | `fraud_risk_engine` features/score; `reconciliation_scoring.score_match` | TESTED | `test_anomaly_scoring.py`, `test_fraud_risk_engine.py` |
+| 59 | Risk Scoring Service | `fraud_risk_engine` features/score; `algorithms.py` registry adapter; `reconciliation_scoring.score_match` | TESTED | `test_anomaly_scoring.py`, `test_fraud_risk_engine.py`, `test_algorithm_registry_real.py`, `test_monetary_contract.py` |
 | 60 | Risk Rules Service | `fraud_risk_engine.evaluate_rules` (velocity/amount/duplicate/time/rapid) | TESTED | explainable `rules_triggered` |
-| 61 | Risk Event Service | `fraud_events.py` (`publish_fraud_analysis`, `publish_fraud_review_decision`) | TESTED | versioned Kafka events; analyst-attributed verdict |
-| 62 | Investigation Service | `escalation_engine.py`, `on_call_service.py`, `discrepancy_dao.py` | TESTED | `test_escalation_actions.py` |
-| 63 | Alert Service | `alerting_service.py`, `notifier.py`, `alert_template_loader.py` | TESTED | `test_alert_delivery_routing.py`, `test_alerting_monitoring.py` |
+| 61 | Risk Event Service | `fraud_events.py` (`publish_fraud_analysis`, `publish_fraud_review_decision`, `stage_fraud_analysis_event`); `/fraud/analyse` stages the envelope into `transaction_outbox` in the same commit as the assessment | TESTED | new `test_fraud_events.py` (8) + route-level durable-event test; replay stages zero extra rows |
+| 62 | Investigation Service | `escalation_engine.py` (tenant-scoped `update_rule`/`delete_rule`, config validation), `on_call_service.py` (tenant-scoped `update_rotation`/`delete_rotation`, naive/aware-safe), `discrepancy_dao.py` | TESTED | new `test_investigation_tenant_isolation.py` (11: service boundary + live-route 404/400) + `test_escalation_actions.py` |
+| 63 | Alert Service | `alerting_service.py` (tenant-scoped dedup, tenant-scoped `needs_review` delivery log), `notifier.py`, `alert_template_loader.py` | TESTED | `test_alert_delivery_routing.py` (+2 tenant-scoping/audit-log tests), `test_alerting_monitoring.py` |
 
-### Rule #28 boundary pinned + defense-in-depth gap documented (additive)
+### Rule #28 boundary pinned + monetary defense-in-depth gap closed
 
-Added `tests/test_fraud_boundaries.py` (5 tests):
+`tests/test_fraud_boundaries.py` pins:
 - No action ever confirms fraud (highest = `escalate`); risk levels are the four
   documented tiers; a pathological amount yields a bounded, non-NaN score.
 - The primary ingestion normalizer rejects NaN/Infinity, so non-finite amounts never
   reach anomaly scoring through normal ingestion.
-- **Flagged defense-in-depth gap:** the secondary `anomaly_rules` path does NOT flag
-  a literal `"nan"` amount (it silently scores 0.0), even though it flags negative
-  and infinite amounts. Unreachable via normal ingestion (normalizer blocks it), but
-  pinned in a test so the behaviour is explicit. **Recommendation for human
-  decision:** either harden `anomaly_rules._has_invalid_amount`/scoring to treat
-  non-finite as invalid, or document the reliance on the ingestion normalizer.
+- The secondary `anomaly_rules` scoring entry point independently classifies
+  NaN/infinities, zero, negative, malformed, and unsupported-currency amounts as
+  invalid. Its amount-threshold comparisons stay in `Decimal` arithmetic.
+
+The algorithm registry risk-scoring adapter validates required transaction inputs,
+rejects malformed history/baseline data, fails closed when its engine is unavailable,
+and preserves the engine's human-review actions for high-risk results. Regression
+coverage is in `tests/test_algorithm_registry_real.py`; the production fraud route
+continues to use its tenant-scoped history query and persisted risk assessment
+(`test_transaction_routes.py::test_fraud_analysis_persists_and_replays_idempotently`).
+Other catalog entries in the registry's fraud and ledger categories return
+`needs_review` until they have their own evaluator; they do not reuse unrelated
+category-level checks as a success signal.
+
+### Algorithm registry hardening verification (2026-10-11)
+
+- Focused registry, fraud engine/boundary, reconciliation, Daraja signature, and
+  transaction-route run: **78 passed, 1 failed**. The failure is
+  `test_versioned_auth_aliases_are_registered` (`/api/v1/auth/login` returned 503
+  rather than the expected 401); auth routing/rate-limiter files are outside this
+  change. The fraud-analysis persistence/idempotency integration test passed.
+- The focused registry file passed **28 tests**. Coverage measured with
+  `coverage.py` started before test collection (the test imports `algorithms.py`
+  through `importlib`): **70/83 changed executable statements covered (84.3%)**;
+  whole-file coverage was 59%. `pytest.ini` does not configure a coverage
+  threshold.
+- Local micro-benchmark on Python 3.13.15: median **69.3 risk evaluations/sec**
+  over five 500-evaluation trials, each with 100 history rows. This is a local
+  synthetic baseline only, not a production-scale result or SLO.
+- Production readiness is not certified by local tests: deployed database/Redis
+  behavior, production telemetry, and production-like performance remain
+  unverified. No schema, persistence, or money-movement behavior was added.
+
+### Risk-event, investigation, and alert production hardening (2026-10-13)
+
+Gaps closed in this pass, all through existing boundaries:
+
+- **Service 61 wired into production.** `fraud_events` previously had no
+  callers. `/fraud/analyse` (`transaction_routes.py`) now stages the versioned
+  fraud envelope into `transaction_outbox` in the **same commit** as the
+  persisted assessment and idempotency record, using event key
+  `fraud-analysis:<Idempotency-Key>`. The existing `drain_transaction_outbox`
+  worker delivers it with retries and dead-letter handling; idempotent replays
+  stage zero extra rows. Evidence: new `tests/test_fraud_events.py` (direct
+  publication topics/payloads, analyst-attributed review decision, staging
+  atomicity + `uq_transaction_outbox_tenant_event` dedup) = **8 passed**, plus
+  `test_transaction_routes.py::test_fraud_analysis_stages_a_durable_risk_event`.
+- **Service 62 tenant isolation.** `EscalationEngine.update_rule`/`delete_rule`
+  looked up rules by id only and `setattr`'d arbitrary request fields, so
+  `PUT /escalation-rules/<rule_id>` (whose resource-permission decorator
+  short-circuits for broad scope) could modify and reassign another tenant's
+  rule. Lookup is now tenant-scoped (misses uniformly return `rule_not_found`,
+  no existence oracle), updates are restricted to an allowlist (identity
+  columns immutable), and unknown operators/actions/fields raise `ValueError`
+  mapped to **400** at both route branches; cross-tenant misses map to **404**
+  and successful updates record an action-audit entry. Same treatment for
+  `OnCallService.update_rotation`/`delete_rotation`. Also fixed a latent
+  naive-vs-aware crash in `update_rotation`'s `is_active` recomputation
+  (SQLite returns naive datetimes). Evidence: new
+  `tests/test_investigation_tenant_isolation.py` = **11 passed** (7
+  service-boundary + 4 live-route tests confirmed failing pre-fix).
+- **Service 63 tenant scoping + audit persistence.** Alert deduplication is now
+  keyed `tenant_id:alert_id` so one tenant can never suppress another's alert,
+  and the delivery-log row uses the DAO's tenant-scoped id convention. The log
+  row previously wrote `status="alerted"`, which violates
+  `ck_discrepancy_status`, so delivery audit rows were **never persisted**
+  (integrity error swallowed); it now writes `status="needs_review"` with a
+  constraint-safe severity. `TestEscalationRules`/`TestOnCallRotations` route
+  tests and all existing escalation/alert suites remain green.
 
 ### Pre-existing failures noted (NOT caused by this pass — Rule #38)
 
@@ -410,6 +882,49 @@ this environment. No action taken — flagged for human investigation.
 - Tests: added (5), all passing; risk/fraud suites green (32).
 - Rollback/recovery: N/A — no production code changed in this pass.
 
+### Currency-aware monetary contract verification (2026-10-13)
+
+The authoritative amount contract is `normalization.py`; adapters and scoring
+entry points share it rather than maintaining KES-only or float-based amount
+parsers. Supported scales are KES/TZS/USD/EUR/GBP (2), UGX (0), and BHD (3).
+Non-finite, non-positive, unsupported, out-of-range, and over-precision
+transaction values reject before scoring/storage. Excess input precision is
+rejected; `ROUND_HALF_UP` is limited to explicitly derived values. Provider
+payloads remain available in raw form; comparisons, reconciliations, baselines,
+settlement keys, and merchant metric buckets do not combine currencies and do
+not perform FX conversion.
+
+CSV/Excel purchase-order and ledger imports now normalize through the same
+contract and retain the source row. Core data-engineering aggregates keyed by a
+non-currency dimension use `(dimension, currency)` keys. Reconciliation
+candidate lookup scopes amount matches by currency but still returns
+reference-matched rows for explicit mismatch classification. Notification
+thresholds compare only within their configured currency; incomparable
+reconciliation amounts escalate to critical review.
+
+Focused test command (run from the repository root):
+
+```text
+python -m pytest -q --tb=short pesaguard_backend_pipeline\tests\test_currency_minor_units_migration.py pesaguard_backend_pipeline\tests\test_monetary_contract.py pesaguard_backend_pipeline\tests\test_normalization.py pesaguard_backend_pipeline\tests\test_normalization_hardening.py pesaguard_backend_pipeline\tests\test_ingestion.py pesaguard_backend_pipeline\tests\test_ingestion_tenant_isolation.py pesaguard_backend_pipeline\tests\test_batch_ingestion.py pesaguard_backend_pipeline\tests\test_realtime_pipeline.py pesaguard_backend_pipeline\tests\test_realtime_worker.py pesaguard_backend_pipeline\tests\test_api_schema_validation.py pesaguard_backend_pipeline\tests\test_schema_validation.py pesaguard_backend_pipeline\tests\test_algorithm_registry_real.py pesaguard_backend_pipeline\tests\test_anomaly_rules.py pesaguard_backend_pipeline\tests\test_anomaly_scoring.py pesaguard_backend_pipeline\tests\test_fraud_boundaries.py pesaguard_backend_pipeline\tests\test_fraud_risk_engine.py pesaguard_backend_pipeline\tests\test_reconciliation.py pesaguard_backend_pipeline\tests\test_reconciliation_batch.py pesaguard_backend_pipeline\tests\test_reconciliation_determinism.py pesaguard_backend_pipeline\tests\test_reconciliation_financial_processing.py pesaguard_backend_pipeline\tests\test_reconciliation_state.py pesaguard_backend_pipeline\tests\test_reconciliation_utils.py pesaguard_backend_pipeline\tests\test_aggregation_service.py pesaguard_backend_pipeline\tests\test_settlement.py pesaguard_backend_pipeline\tests\test_purchase_order_matching.py pesaguard_backend_pipeline\tests\test_core_data_engineering.py pesaguard_backend_pipeline\tests\test_communications_intelligence.py pesaguard_backend_pipeline\tests\test_phase1_integrity.py pesaguard_backend_pipeline\tests\test_phase1_full_integrity.py pesaguard_backend_pipeline\tests\test_transaction_outbox.py pesaguard_backend_pipeline\tests\test_reconciliation_audit_immutability.py pesaguard_backend_pipeline\tests\test_daraja_validation.py pesaguard_backend_pipeline\tests\test_connectors.py pesaguard_backend_pipeline\tests\test_api_idempotency_contract.py
+```
+
+The focused run completed with **319 passed, 11 warnings in 128.87s**. A diff-based
+coverage audit measured **984/1291 changed executable statements (76.2%)**,
+below the implementation workflow's 80% target; the coverage gate remains
+incomplete, particularly across legacy event-store, reconciliation-job,
+validator, and normalization branches. The currency
+migration and settlement rollback/currency tests were then re-run separately:
+**16 passed in 27.11s**, including the KES-only safe downgrade path. When
+`test_transaction_routes.py` was added separately, its unrelated
+`test_versioned_auth_aliases_are_registered` failed (expected HTTP 401, got
+503). `test_fraud_events.py` could not be collected because its source has an
+`IndentationError` at line 165. A full SQLite Alembic upgrade is blocked by the
+earlier `20260909_scope_transaction_identity` revision's PostgreSQL-only `md5()`
+function; the currency revision itself is exercised against a legacy SQLite
+schema. PostgreSQL migration execution, production data backfill, and rollback
+behavior remain deployment verification items; local test success is not
+production certification.
+
 ## Customer / account services (64–68)
 
 **Scope finding (Rule #3/#47):** these are largely **not implemented** in the
@@ -425,6 +940,11 @@ Evidence: the complete DB table list in `models.py` contains **no** `customers`,
 financial `accounts`, `balances`, `customer_transactions`, or
 `account_relationships` tables. The only account-like table is `user_accounts`
 (platform login identity, service 4) — not a business customer.
+
+The algorithm registry's debit-credit check is only an arithmetic consistency
+validator for a supplied entry. It does not own, persist, or calculate customer
+balances and does not add a financial ledger service. Other ledger catalog entries
+remain not implemented until they have dedicated validators.
 
 | # | Service | Implementation | Status | Notes |
 |---|---------|----------------|--------|-------|
@@ -471,7 +991,7 @@ Verified: `test_scheduler.py` + `test_phase_manager.py` + `test_distributed_lock
 | 78 | Job Service | `background_tasks.py` enqueue paths (transaction events, reconciliation, batch drain) + RQ job functions | TESTED | RQ retry (max=3) + `on_failure` → DLQ hook |
 | 79 | Worker Service | `realtime_worker.py`, RQ workers, scheduler `run_due` per replica | TESTED | `test_realtime_worker.py`, `test_scheduler.py` (busy-lock skip) |
 | 80 | Queue Service | Redis/RQ queues (`transaction_events`), bounded claim/drain (`claim_outbox_batch`, `drain_transaction_outbox`) | TESTED | `DEFAULT_BATCH_SIZE=50` per scheduler tick prevents runaway |
-| 81 | Scheduler Service | `scheduler.py` `Scheduler`: durable `scheduled_jobs`, injected-clock due computation, distributed-lock per run | TESTED | idempotent register, deterministic due, at-most-once, tenant isolation, failure+rearm |
+| 81 | Scheduler Service | `scheduler.py` `Scheduler`, `scheduler_worker.py`, `scheduled_tasks.py`: durable tenant-scoped jobs, DAG dependencies, bounded retries/timeouts, idempotent backfills, attempt history, authenticated operator/recovery API | PARTIALLY TESTED | Focused regression suite: 82 passed across scheduler, SQLite migration, worker/task, operator HTTP, DLQ, and authorization tests. Focused production-module coverage: `scheduler.py` 80%, `scheduler_worker.py` 96%, `scheduled_tasks.py` 100%. Disposable PostgreSQL 16 validation passed for the full Alembic upgrade, workflow downgrade/re-upgrade, scheduler grants and forced RLS, pooled-connection tenant-context isolation, and registry-role boundaries (`tests/test_postgres_scheduler_orchestration.py`: 2 passed). Target-deployment credential/RLS verification, alert receiver delivery, and performance evidence remain release gates; see `docs/operations/SCHEDULER.md` and `docs/runbooks/PIPELINE_ORCHESTRATION.md` |
 | 82 | Retry Service | `utils/retries.retry_with_backoff` (exponential backoff + full/none jitter) used by `shared/daraja/oauth.py` | TESTED (gap closed) | New: 6 retry tests |
 | 83 | Dead-Letter Service | `background_tasks.handle_job_failure` (RQ hook → `DeadLetter`) + `replay_dead_letter_job` (tenant-scoped republish) | TESTED (gap closed) | New: 6 DLQ tests; event-bus DLQ covered in phase4 |
 
@@ -535,61 +1055,78 @@ realtime pipeline/worker **2 passed**; new webhook security suite **17 passed**.
 
 | # | Service | Implementation | Status | Notes |
 |---|---------|----------------|--------|-------|
-| 69 | Webhook Management Service | `webhook_manager.WebhookManager` register/get/update + `_validate_webhook_url` (SSRF) | TESTED (gap closed) | New: `test_webhook_management_security.py` |
-| 70 | Webhook Delivery Service | `_deliver_webhook` with delivery-time SSRF re-validation, no-redirect policy, tenant-scoped audit rows | TESTED (gap closed) | DNS-rebinding defense pinned |
-| 71 | Webhook Retry Service | exponential backoff (`2**attempt`), bounded by `retry_attempts` (capped at 5) | TESTED (gap closed) | retry-then-succeed, bounded-attempts, timeout-retry |
-| 72 | Webhook Signature Service | `_generate_signature`: HMAC-SHA256 over `t=<ts>,v1=<hmac>` with per-tenant `whsec_` secret | TESTED (gap closed) | verify-format, determinism, ts/body/secret binding, header wiring |
+| 69 | Webhook Management Service | `webhook_manager.WebhookManager` register/get/update/rotate/revoke; globally-routable DNS policy | PARTIALLY TESTED | Registration, configuration bounds, secret lifecycle and cross-tenant HTTP access are locally tested; migration `20261017_webhook_runtime_grants` gives the non-bypass runtime role only config CRUD; disposable PostgreSQL 16 role/RLS integration passed; target-deployment grants and production egress/DNS controls remain unverified |
+| 70 | Webhook Delivery Service | `_deliver_webhook` using pinned HTTPS, certificate/hostname verification, no proxy environment, no redirects, durable attempt rows | PARTIALLY TESTED | Mocked transport verifies target pinning, bounded response/timeout, crash-visible processing state, and stale-row recovery; disposable PostgreSQL 16 verifies forced delivery RLS, tenant/no-context read isolation, read/insert/update grants, and denied application DELETE; no real production endpoint/TLS or deployed recovery worker verified |
+| 71 | Webhook Retry Service | 1–5 attempts with full-jitter exponential delays, 30-second total request timeout per attempt | PARTIALLY TESTED | Retry classes, terminal 4xx/TLS/redirect, max-attempts, jitter, crash recovery, lock contention and attempt-budget exhaustion are locally tested; DNS has a shared 3-second resolver deadline |
+| 72 | Webhook Signature Service | HMAC-SHA256 over exact transmitted UTF-8 JSON bytes; timestamp and stable event ID headers | PARTIALLY TESTED | Exact bytes, invalid signature, stale timestamp, malformed/non-finite JSON, event identity, rotation and revocation covered; receiver-side replay persistence remains external |
 | 73 | Event Service | `event_bus.py` versioned contract (`EVENT_TYPES`, `build_event`, schema/event versions) | TESTED | `test_phase4_event_bus.py` |
 | 74 | Event Publisher | `producer.publish_versioned_event` + batch publish; broker-unavailable raises without ack | TESTED | per-message delivery results pinned |
 | 75 | Event Consumer | `event_consumer.py` + `realtime_worker.py`: idempotent processing, bounded retry, backpressure | TESTED | duplicate-once + crash-retry pinned; `test_realtime_worker.py` |
 | 76 | Dead-Letter Queue Service | `dead_letters` table + phase4 DLQ placement; never silently discarded (Rule #10/#31) | TESTED | poison message → DLQ; network failure → DLQ; DLQ retained on backpressure |
 | 77 | Event Replay Service | phase4 replay preserves event identity after retry exhaustion | TESTED | replay-without-handler preserves dead letter |
 
-### Webhook gaps closed in this pass (additive only)
+### Webhook security and delivery implementation evidence
 
-Added `tests/test_webhook_management_security.py` (**17 tests**):
-- **Service 69:** http/ftp rejected; localhost/metadata-IP/hostname rejected;
-  private-resolved-IP rejected (DNS-rebinding class); unique unpredictable
-  per-registration `whsec_` secrets; signing secret immutable through `update`;
-  get/update strictly tenant-scoped.
-- **Service 70:** delivery-time SSRF re-validation aborts delivery; redirect
-  responses abort after exactly one request (no redirect-following SSRF/token-leak
-  vector); tenant-scoped `WebhookDelivery` audit row with true `attempt_count`.
-- **Service 71:** 5xx then 200 succeeds on attempt 2; retries bounded to exactly
-  `retry_attempts` (no unbounded loop); timeouts are retryable failures.
-- **Service 72:** signature format `t=<ts>,v1=<hmac>` independently verifiable with
-  the tenant secret; deterministic; binds timestamp, body, and secret (no
-  cross-tenant replay); delivery headers wire signature+timestamp+event.
+The follow-up implementation adds direct IP-pinned HTTPS transport (no second
+DNS resolution at connect), rejects any non-global DNS result, disallows
+proxy-environment routing, preserves TLS certificate and hostname checks, and
+refuses every 3xx. The canonical JSON bytes are both signed and transmitted.
+Attempt rows and attempt counters commit before outbound I/O; terminal outcome
+metadata is committed before the result is returned. Stale attempts now have a
+tenant-scoped recovery worker and exhausted ambiguous attempts become visible
+terminal failures. Full-jitter exponential
+retry is bounded to five attempts with a 30-second total request timeout.
+Registration, listing, secret rotation/revocation, update, and delivery-history
+surfaces avoid unintended secret disclosure and enforce tenant ownership.
 
-**17 passed** (run in batches; the full-file run exceeds a 30s command window due
-to per-test SQLite schema creation — same characteristic as other suite files).
+`webhook_operations_worker.py` provides a one-shot recovery and health tick.
+It enumerates active tenants only via the least-privilege tenant registry,
+then scopes business-table processing by tenant. Configure it as a supervised
+periodic job per deployment. This repository change does not provision the
+production scheduler, Redis instance, registry role, external alert receiver,
+or operator replay authorization process.
 
-### Minor observability inaccuracy flagged (not changed)
+Tests added/extended in `test_webhook_management_security.py`,
+`test_webhook_manager.py`, `test_webhook_operations_worker.py`, and
+`test_advanced_features.py` cover mixed
+public/private A/AAAA results, DNS rebinding between resolution and connect,
+bounded A/AAAA DNS queries and timeout failure, proxy environment, TLS
+verification configuration, response size, HTTP timeout,
+redirect and retry classifications, durable pending state after delivery/retry
+crashes, outcome-persistence failures, exact-body HMAC verification, invalid
+signatures/timestamps/payloads, stable receiver idempotency identity, secret
+rotation/revocation, cross-tenant route denial, stale delivery recovery, and
+tenant-scoped worker invocation. Evidence is from local tests with mocked
+outbound network only. Receiver-side idempotency is still required.
 
-On a redirect abort, the returned dict reports `"attempts": max_attempts` (the
-configured cap) even though only one request was made; the **DB
-`attempt_count` correctly records 1**. Recommendation for human decision: report
-the true attempt count in the response dict for operator clarity (Rule #40). Left
-unchanged here as it touches delivery response semantics.
+Final focused local validation: webhook security/manager tests **49 passed**;
+advanced-feature webhook HTTP tests **4 passed**; least-privilege
+authorization tests **16 passed**; recovery worker and targeted migration
+tests **5 passed**. Focused coverage reported `webhook_manager.py` **82%**,
+`webhook_operations_worker.py` **95%**, and `escalation_engine.py` **37%**
+overall (the file includes unrelated, unexercised escalation features; the
+changed webhook-health method's statements were exercised). Python
+compilation, scoped `git diff --check`, `pip check`, CLI help, and
+migration-head discovery passed. The targeted migration was exercised
+against SQLite. The full migration chain was subsequently upgraded on a
+disposable PostgreSQL 17.11 Docker database, downgraded one revision, and
+upgraded again. The database reached
+`20261014_webhook_delivery_recovery`; the delivery table, recovery and
+tenant-scoped indexes, forced row-level security, and both tenant policies
+were verified. The migration now bootstraps the delivery table when earlier
+revisions had skipped it because it was absent. A full offline `alembic
+upgrade head --sql` attempt remains blocked by a pre-existing migration that
+calls `sa.inspect` on Alembic's offline `MockConnection`. The PostgreSQL
+database was disposable and local; this does not verify a deployed database,
+production DNS behavior, firewall/egress enforcement, production proxy
+settings, real TLS certificates, receiver replay storage, or recovery in a
+deployed worker. The post-fix combined webhook manager, security, worker, and
+migration regression run passed **55 tests**.
 
-### Self-review (webhooks & events phase)
-
-- Integrates with existing architecture: yes — tests exercise the existing manager,
-  event bus, producer, and consumer modules; no new wiring.
-- Preserves tenant isolation: yes — registration/lookup/update/delivery/signature
-  all scoped or secret-per-tenant; cross-tenant update returns not-found.
-- Preserves data integrity: yes — delivery audit rows written on success and
-  failure; no silent drops.
-- Race conditions: none introduced (single-threaded test doubles).
-- Security boundary: strengthened — SSRF (registration + delivery + redirect),
-  signature binding, and secret immutability now pinned by tests.
-- Duplicate functionality: no — additive tests only.
-- Unnecessary network calls: none — all network mocked; DNS patched.
-- Scalability bottleneck: none introduced (tests only).
-- Observability: structured logs confirmed during runs; minor `attempts` reporting
-  inaccuracy flagged above.
-- Tests: added (17), all passing; event/realtime suites still green.
-- Rollback/recovery: N/A — no production code changed in this pass.
+See [WEBHOOK_DELIVERY.md](../operations/WEBHOOK_DELIVERY.md) for transport
+policy, signature contract, retry bounds, and operational limitations. No
+production egress, DNS, TLS endpoint, receiver replay store, or deployed retry
+recovery evidence is claimed.
 
 ## Reporting & analytics services (84–89)
 
@@ -877,16 +1414,16 @@ lifecycle + state-machine) green.
 
 | # | Service | Implementation | Status | Notes |
 |---|---------|----------------|--------|-------|
-| 139 | PostgreSQL Data Service | `DatabaseService` sessions/transactions/pool | TESTED (existing) | `test_database_data_services.py` |
-| 140 | Database Migration Service | `MigrationService` (Alembic upgrade/downgrade) | TESTED (gap closed) | New: empty-URL, missing-file, empty-downgrade-revision rejection |
+| 139 | PostgreSQL Data Service | `DatabaseService` sessions/transactions/pool; tenant-scoped operational and ledger tables | PARTIALLY TESTED | Disposable PostgreSQL 16 catalog audit found 83 tenant-bearing tables and zero missing/unenforced RLS policies. Registry role boundary and tenant/scheduler tests passed. Migration `20261018_transaction_ingestion_runtime_grants` adds audited least-privilege grants for `EventStore.mark_processed`; webhook, scheduler and ledger role tests pass. Remaining runtime table operations and target deployment privileges still require table-by-table audit/verification |
+| 140 | Database Migration Service | `MigrationService` (Alembic upgrade/downgrade) | TESTED (gap closed) | Existing input-validation tests plus disposable PostgreSQL 16 full-chain upgrade; ledger and webhook-grant revisions downgrade/re-upgrade successfully. Re-run full upgrade/downgrade verification for head `20261018_transaction_ingestion_runtime_grants` |
 | 141 | Connection Pool Service | pool snapshot/metrics, engine settings | TESTED (existing) | pool metrics cases |
 | 142 | Redis Service | `RedisService` (URL validation, bounded client, ownership) | TESTED (gap closed) | New: non-success ping raises; non-positive timeouts rejected |
 | 143 | Kafka/Redpanda Producer Service | `producer.publish_versioned_event` / `build_event` | TESTED (existing) | phase4 + contract + realtime suites |
 | 144 | Kafka/Redpanda Consumer Service | `EventConsumer` / `ConsumerGroup` / `validate_no_consumer_conflicts` | TESTED (existing) | phase4 validation + obs suites |
 | 145 | Schema Evolution Service | `schema_evolution` version extraction + compatibility + `DataProvenance` gate | TESTED (**defect fixed**, see below) | New: 8 unit tests + 3 integration regression tests (previously **zero** direct tests) |
-| 146 | Data Retention Service | `retention_cleanup` bounded batches + `RetentionPolicy` | TESTED (existing) | `test_retention_cleanup.py`, `test_retention_policy.py` |
-| 147 | Data Archival Service | `ArchiveManager` / `ArchiveObjectStore` (hash-partitioned, tamper-evident) | TESTED (existing) | path-traversal + tamper + idempotency |
-| 148 | Backup/Recovery Service | `backup_postgres` manifests, integrity, PITR, restore drills | TESTED (existing) | `test_backup_integrity.py`, `test_disaster_recovery.py`, `test_phase8_backup_dr.py` |
+| 146 | Data Retention Service | `retention_cleanup` bounded batches, fail-closed policy loading, external approval verification/consumption and immutable audit events | PARTIALLY TESTED | `test_retention_cleanup.py`, `test_retention_policy.py`, `test_retention_approval.py`; destructive runs require approval bound to tenant, effective policy hash, and expiry. Discrepancy and reconciliation-outbox cleanup now fail closed when no separate discrepancy period is configured; policy-owner sign-off is still missing. Transaction purge is gated because production object archival and end-to-end integrity verification are not wired |
+| 147 | Data Archival Service | `ArchiveManager` / `ArchiveObjectStore` local implementation | PARTIALLY TESTED | Local path safety, tamper detection, and idempotency tests pass. No production object-store adapter or scheduled transaction archival caller is wired; `mark_transaction_archived` records a key but does not verify its object |
+| 148 | Backup/Recovery Service | `backup_postgres` manifests, integrity, PITR, restore drills | PARTIALLY TESTED | `test_backup_integrity.py`, `test_disaster_recovery.py`, `test_phase8_backup_dr.py`, and `test_restore_safety.py`; target guards and manifest checks are tested. Production off-site delivery, live PostgreSQL restore/PITR drills, and measured RPO/RTO remain unverified |
 
 ### Defect found and fixed (services 145; human-approved fix under Rule #61)
 
@@ -963,7 +1500,7 @@ certification was performed.
 | 152 | Circuit Breaker Service | Separate Kafka producer and per-provider breakers protect different downstream boundaries | TESTED | `tests/test_communications_intelligence.py`, `tests/test_dashboard_api.py`; live broker/provider recovery is unverified |
 | 153 | Timeout Management Service | Per-client timeout settings for Redis, HTTP/provider calls, and workers; no single global timeout budget | PARTIALLY TESTED | Adapter-specific timeout checks exist; end-to-end deadline propagation is not verified |
 | 154 | Retry/Backoff Service | `utils.retries.retry_with_backoff`, `event_bus.RetryPolicy`, and durable event retry handling | TESTED | `tests/test_async_job_reliability.py`, `tests/test_phase4_event_bus.py`; actual external outage behavior remains deployment-dependent |
-| 155 | Disaster Recovery Service | Backup manifests, restore validation, PITR guards, and restore-drill tooling | TESTED | `tests/test_disaster_recovery.py`, `tests/test_phase8_backup_dr.py`; production PostgreSQL restore/PITR drill is not evidenced here |
+| 155 | Disaster Recovery Service | Backup manifests, restore validation, PITR guards, and restore-drill tooling | TESTED (restore-target safety hardened) | `tests/test_restore_safety.py`, `tests/test_disaster_recovery.py`, `tests/test_backup_integrity.py`, `tests/test_phase8_backup_dr.py`; restore CLI requires explicit confirmation, restore drills reject the configured app database, and reports omit credentials. Target PostgreSQL restore/PITR evidence remains environment-dependent |
 | 156 | Incident/Alert Management Service | Incident lifecycle/fingerprinting, alert delivery, routing, Prometheus rules, and escalation | TESTED | `tests/test_communications_intelligence.py`, `tests/test_alerting_monitoring.py`, `tests/test_alert_delivery_routing.py`; live Alertmanager test requires an external service |
 
 ### Self-review (production operations phase)
@@ -1027,3 +1564,48 @@ results do not verify a deployed API or certify production readiness.
 - Rollback/recovery: no persistence changes or migrations; source changes can be
   reverted. Runtime version policy remains centralized in the existing contract
   policy.
+
+## Transaction ingestion hardening (2026-10-13)
+
+**Service 12 / Daraja ingestion:** retained `IngestionService`, `EventStore`,
+the durable transaction outbox, versioned M-Pesa contract, batch import jobs,
+and tenant-scoped dead letters. Closed gaps by requiring a separately keyed raw
+body HMAC on Daraja callback routes; persisting callback verification/source
+metadata, attempt counts, source schema version and source digest; enforcing
+immutable source data in ORM and database triggers (with the authorized privacy
+redaction exception); making validation DLQ writes observable and retryable;
+re-ingesting validation dead letters through the canonical idempotent path;
+and leasing/restarting bounded historical imports.
+
+- Implementation: `app.py`, `ingestion.py`, `event_store.py`, `models.py`,
+  `transaction_routes.py`, `batch_ingestion.py`, `background_tasks.py`,
+  `api/dashboard_app.py`, `health.py`, migration
+  `alembic/versions/20261013_harden_transaction_ingestion.py`.
+- Contract and deployment notes: `docs/transaction-ingestion.md`.
+- Focused coverage: `tests/test_transaction_ingestion_hardening.py`,
+  `tests/test_transaction_ingestion_migration.py`,
+  `tests/test_batch_ingestion.py`, `tests/test_async_job_reliability.py`,
+  plus the existing Daraja schema, signature, route, and traceability suites.
+- Latest focused regression run: **72 passed** across ingestion, migration,
+  readiness, dead-letter operations, imports, and replay. The separate
+  `test_versioned_auth_aliases_are_registered` check still returns HTTP 503
+  where it expects HTTP 401; that unrelated auth-alias failure remains
+  unresolved. Readiness now remains degraded until webhook signing, source
+  authentication, and tenant configuration are present, without exposing
+  secret values.
+- Database migration evidence: the new revision's SQLite upgrade and database
+  immutability/redaction trigger were exercised directly. A full SQLite upgrade
+  from the initial Alembic revision remains blocked by an earlier migration's
+  unavailable SQLite `md5()` function, before this revision is reached.
+- Performance/capacity: no representative production benchmark or approved
+  throughput threshold was available; production capacity is NOT VERIFIED.
+- External deployment: the live callback sender must provide
+  `X-Daraja-Signature` as HMAC-SHA256 over exact raw bytes, and deployment must
+  configure `DARAJA_WEBHOOK_SIGNING_SECRET`, source authentication,
+  `TENANT_ID`, durable shared import storage, database migration, and queue
+  workers. None of those live dependencies were verified here.
+- Rollback: revert application code while retaining the additive migration.
+  Downgrade removes provenance and import retry metadata and requires an
+  explicit data-recovery decision. This implementation is not certified
+  production-ready until target-like PostgreSQL, sender, queue, and backfill
+  validation passes.

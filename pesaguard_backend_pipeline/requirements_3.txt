@@ -1,3 +1,11 @@
+# PesaGuard backend runtime dependencies.
+#
+# Single source of truth: Dockerfile, Dockerfile.worker, and all CI workflows
+# install this file. Do not add a requirements_4.txt or per-environment fork;
+# gate optional/test-only packages behind markers or extras instead.
+# Last dependency review: 2026-10-14 (deploy-readiness). Re-review cadence:
+# monthly via dependency-scan.yml (pip-audit/bandit/safety + Dependabot).
+
 # Web Framework & WSGI Server
 Flask==3.1.3
 gunicorn==23.0.0
@@ -17,6 +25,7 @@ kafka-python-ng==2.2.3
 # Database & ORM
 SQLAlchemy==2.0.38
 psycopg2-binary==2.9.10
+boto3>=1.35,<2
 
 # Caching, Rate Limiting & Async Worker Queue
 redis==5.3.1

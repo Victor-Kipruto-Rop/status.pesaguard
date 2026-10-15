@@ -25,3 +25,17 @@ def configure_test_database() -> str:
         return DEFAULT_IN_MEMORY_DB_URL
 
     return os.environ.get("DATABASE_URL", DEFAULT_IN_MEMORY_DB_URL)
+
+
+def post_public_registration(client, app, data):
+    """Set the trusted single-tenant server config for an HTTP registration test."""
+    missing = object()
+    previous = app.config.get("PUBLIC_REGISTRATION_TENANT_ID", missing)
+    app.config["PUBLIC_REGISTRATION_TENANT_ID"] = data["tenant_id"]
+    try:
+        return client.post("/auth/register", json=data)
+    finally:
+        if previous is missing:
+            app.config.pop("PUBLIC_REGISTRATION_TENANT_ID", None)
+        else:
+            app.config["PUBLIC_REGISTRATION_TENANT_ID"] = previous

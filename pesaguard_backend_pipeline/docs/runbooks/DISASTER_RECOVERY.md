@@ -45,7 +45,7 @@ pod liveness/readiness probes are failing.
 3. If no standby is available, provision a fresh PostgreSQL instance.
 4. Restore the latest base backup:
    ```bash
-   python pesaguard_backend_pipeline/backup_postgres.py --restore /var/backups/pesaguard/pesaguard_LATEST.sql.gz.enc
+   python pesaguard_backend_pipeline/backup_postgres.py --restore /var/backups/pesaguard/pesaguard_LATEST.sql.gz.enc --confirm-restore-target
    ```
 5. Configure WAL replay in `postgresql.auto.conf` and restart:
    ```conf
@@ -104,7 +104,8 @@ integrity violations, or performance regression.
       ```bash
       python pesaguard_backend_pipeline/backup_postgres.py \
         --pitr-restore /var/backups/pesaguard/pesaguard_BASEBACKUP.tar \
-        --target-time 'YYYY-MM-DD HH:MM:SS'
+        --target-time 'YYYY-MM-DD HH:MM:SS' \
+        --confirm-restore-target
       ```
    d. Verify the restored database passes the integrity validator.
    e. Re-run the migration with the fix.
@@ -157,7 +158,7 @@ is destroyed.
 4. Verify the manifest (SHA-256 + file size).
 5. Restore into a fresh database instance:
    ```bash
-   python pesaguard_backend_pipeline/backup_postgres.py --restore /tmp/restore/artifact
+   python pesaguard_backend_pipeline/backup_postgres.py --restore /tmp/restore/artifact --confirm-restore-target
    ```
 6. Replay WAL archives to minimize RPO:
    ```conf
@@ -188,7 +189,7 @@ exposed, leaked, or suspected of compromise.
 3. **Restore with the replacement secret:**
    ```bash
    DATABASE_URL="postgresql://postgres:NEW_PASSWORD@host:5432/db" \
-   python pesaguard_backend_pipeline/backup_postgres.py --restore /var/backups/pesaguard/LATEST.sql.gz.enc
+   python pesaguard_backend_pipeline/backup_postgres.py --restore /var/backups/pesaguard/LATEST.sql.gz.enc --confirm-restore-target
    ```
 4. Deploy the new credentials to the running application.
 5. Verify all integrations (Kafka, Redis, payment providers) reconnect
@@ -209,7 +210,7 @@ outage, network partition, or large-scale incident.
 2. Restore the latest off-site base backup in the recovery region:
    ```bash
    aws s3 cp s3://pesaguard-backups/latest/ /tmp/restore/ --recursive
-   python pesaguard_backend_pipeline/backup_postgres.py --restore /tmp/restore/artifact
+   python pesaguard_backend_pipeline/backup_postgres.py --restore /tmp/restore/artifact --confirm-restore-target
    ```
 3. Restore WAL archives from the recovery region's archived bucket:
    ```conf

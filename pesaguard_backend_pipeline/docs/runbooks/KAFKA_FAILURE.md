@@ -24,6 +24,9 @@ This runbook covers the affected PesaGuard workflow, its dependencies, and custo
 - Check structured logs by correlation ID; redact credentials and personal data.
 - Inspect tenant-scoped dead letters, retry counts, outbox age, and idempotency records.
 - Identify whether the failure is isolated to one tenant, provider account, region, or shared dependency.
+- For reconciliation, correlate `topic`, `partition`, and `offset` from logs or
+  the dead-letter record. The failed partition is intentionally paused and
+  retried at that offset when durable processing or quarantine is unavailable.
 
 ## Mitigation
 
@@ -32,9 +35,18 @@ Prefer reversible controls: pause a failing consumer, disable a provider route, 
 ## Recovery
 
 1. Confirm the dependency is stable and the failure condition is understood.
-2. Replay only tenant-scoped, validated records with an explicit operator and reason.
-3. Verify counts, ordering, reconciliation outcomes, and duplicate protection.
-4. Monitor retries, lag, error rates, and customer-facing latency for at least one recovery window.
+2. For a partition held by a dead-letter database outage, restore database
+   connectivity and confirm writes succeed. The consumer retries the failed
+   offset after its bounded pause; verify the record is processed or durably
+   quarantined before expecting lag to fall.
+3. For a durable dead letter, use its tenant and source coordinates to inspect
+   and validate the payload. Replay only tenant-scoped, validated records with
+   an explicit operator and reason; preserve the original quarantine evidence.
+4. Verify counts, ordering, reconciliation outcomes, audit/outbox records, and
+   duplicate protection. A crash after durable disposition but before offset
+   commit can redeliver a message; idempotency should make that retry safe.
+5. Monitor retries, lag, error rates, dead-letter growth, and customer-facing
+   latency for at least one recovery window.
 
 ## Escalation
 

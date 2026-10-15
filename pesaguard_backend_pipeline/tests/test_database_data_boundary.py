@@ -59,6 +59,7 @@ def _valid_payload(**overrides):
         "TransAmount": "100.00",
         "Currency": "KES",
         "BillRefNumber": "member-1",
+        "TransTime": "2026-10-13T11:00:00+00:00",
         "schema_version": "1.0",
     }
     payload.update(overrides)
@@ -210,4 +211,3 @@ def test_redis_service_requires_positive_timeouts():
         RedisService("redis://localhost/0", socket_connect_timeout=0)
     with pytest.raises(ValueError, match="[Tt]imeout"):
         RedisService("redis://localhost/0", socket_timeout=-1)
-

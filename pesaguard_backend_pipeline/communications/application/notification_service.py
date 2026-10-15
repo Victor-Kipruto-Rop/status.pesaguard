@@ -231,6 +231,7 @@ class NotificationService:
         attempt = CommunicationAttempt(
             id=f"attempt_{uuid.uuid4().hex}",
             notification_id=notification.id,
+            tenant_id=notification.tenant_id,
             attempt_number=1,
             provider=self.provider.name,
             status=NotificationStatus.PROCESSING.value,

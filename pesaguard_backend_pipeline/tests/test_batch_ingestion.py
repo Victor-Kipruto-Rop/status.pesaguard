@@ -1,6 +1,8 @@
 import csv
 import io
+from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -69,3 +71,60 @@ def test_submit_rejects_unsupported_formats_and_sources(tmp_path):
             assert "source" in str(exc)
         else:
             raise AssertionError("unsupported sources must be rejected")
+
+
+def test_failed_import_retry_restarts_counters_without_double_counting(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'retry-imports.db'}")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, expire_on_commit=False)
+    service = BatchImportService(FakeIngestionService(), ObjectStorage(str(tmp_path / "retry-objects")))
+
+    with Session() as session:
+        job = service.submit(
+            session,
+            tenant_id="tenant-a",
+            source="bank",
+            filename="statement.csv",
+            content=_csv_content(),
+        )
+        first = service.process(session, job.id, tenant_id="tenant-a")
+        first_attempts = first.attempts
+        second = service.process(session, job.id, tenant_id="tenant-a")
+
+        assert first_attempts == 1
+        assert second.attempts == 2
+        assert second.records_received == 2
+        assert second.records_valid == 1
+        assert second.records_failed == 1
+
+
+def test_live_import_lease_prevents_a_second_worker_from_processing(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'leased-imports.db'}")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, expire_on_commit=False)
+    service = BatchImportService(FakeIngestionService(), ObjectStorage(str(tmp_path / "leased-objects")))
+
+    with Session() as session:
+        job = ImportJob(
+            id="imp_live_lease",
+            tenant_id="tenant-a",
+            source="bank",
+            filename="statement.csv",
+            file_format="csv",
+            object_key="unused.csv",
+            status="running",
+            attempts=1,
+            lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        )
+        session.add(job)
+        session.commit()
+
+        with pytest.raises(BatchImportError, match="already running"):
+            service.process(session, job.id, tenant_id="tenant-a")
+
+
+def test_object_storage_rejects_paths_outside_its_root(tmp_path):
+    storage = ObjectStorage(str(tmp_path / "objects"))
+
+    with pytest.raises(BatchImportError, match="object"):
+        storage.get("..\\outside.csv")

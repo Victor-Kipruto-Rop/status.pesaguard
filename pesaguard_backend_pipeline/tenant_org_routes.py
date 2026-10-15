@@ -82,7 +82,7 @@ def create_organization():
     return jsonify({"status": "created", "organization": org}), 201
 
 
-@bp.route("/organizations/<organization_id>", methods=["GET", "PATCH"])
+@bp.route("/organizations/<organization_id>", methods=["GET"])
 @require_auth("read:settings")
 def organization_detail(organization_id: str):
     session = _resolve_session_factory()()
@@ -90,23 +90,6 @@ def organization_detail(organization_id: str):
         org = session.query(Organization).filter_by(id=organization_id, tenant_id=_tenant_scope()).first()
         if org is None:
             return jsonify({"error": "not_found"}), 404
-        if request.method == "PATCH":
-            payload = request.get_json(silent=True) or {}
-            if "name" in payload:
-                org.name = payload["name"]
-            if "settings" in payload:
-                org.settings = payload["settings"]
-            if "status" in payload:
-                org.status = payload["status"]
-            session.commit()
-            return jsonify({"status": "updated", "organization": {
-                "id": org.id,
-                "tenant_id": org.tenant_id,
-                "name": org.name,
-                "slug": org.slug,
-                "settings": org.settings,
-                "status": org.status,
-            }}), 200
         return jsonify({
             "id": org.id,
             "tenant_id": org.tenant_id,
@@ -115,6 +98,38 @@ def organization_detail(organization_id: str):
             "settings": org.settings,
             "status": org.status,
         }), 200
+    finally:
+        session.close()
+
+
+@bp.route("/organizations/<organization_id>", methods=["PATCH"])
+@require_auth("manage:organizations")
+def update_organization(organization_id: str):
+    session = _resolve_session_factory()()
+    try:
+        org = session.query(Organization).filter_by(
+            id=organization_id,
+            tenant_id=_tenant_scope(),
+        ).first()
+        if org is None:
+            return jsonify({"error": "not_found"}), 404
+
+        payload = request.get_json(silent=True) or {}
+        if "name" in payload:
+            org.name = payload["name"]
+        if "settings" in payload:
+            org.settings = payload["settings"]
+        if "status" in payload:
+            org.status = payload["status"]
+        session.commit()
+        return jsonify({"status": "updated", "organization": {
+            "id": org.id,
+            "tenant_id": org.tenant_id,
+            "name": org.name,
+            "slug": org.slug,
+            "settings": org.settings,
+            "status": org.status,
+        }}), 200
     finally:
         session.close()
 

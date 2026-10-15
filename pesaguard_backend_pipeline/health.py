@@ -213,12 +213,35 @@ def check_daraja_connectivity(timeout: int = 5) -> Dict[str, Any]:
         return result
 
 
+def check_webhook_ingestion_configuration() -> Dict[str, Any]:
+    """Fail readiness when the signed, tenant-scoped webhook cannot accept events."""
+    missing = []
+    if not os.getenv("DARAJA_WEBHOOK_SIGNING_SECRET", "").strip():
+        missing.append("webhook_signing_secret")
+    if (
+        not os.getenv("DARAJA_SHARED_SECRET", "").strip()
+        and not os.getenv("DARAJA_ALLOWED_IPS", "").strip()
+    ):
+        missing.append("webhook_source_authentication")
+    if not os.getenv("TENANT_ID", "").strip():
+        missing.append("tenant_context")
+    status = "ok" if not missing else "failed"
+    return {
+        "status": status,
+        "webhook_ingestion": {
+            "status": status,
+            "missing_configuration": missing,
+        },
+    }
+
+
 def build_health_payload() -> Dict[str, Any]:
     """Assemble health check telemetry across system dependencies."""
     db_result = check_database_connection()
     kafka_result = check_kafka_connectivity()
     redis_result = check_redis_connectivity()
     daraja_result = check_daraja_connectivity()
+    webhook_result = check_webhook_ingestion_configuration()
 
     db_ok = db_result["database"]["status"] == "ok"
     kafka_ok = kafka_result["kafka"]["status"] == "ok"
@@ -230,7 +253,8 @@ def build_health_payload() -> Dict[str, Any]:
     else:
         kafka_gate_ok = kafka_ok or not KAFKA_REQUIRED_FOR_OK
         redis_gate_ok = redis_ok or not REDIS_REQUIRED_FOR_OK
-        if kafka_gate_ok and redis_gate_ok and daraja_ok:
+        webhook_ok = webhook_result["webhook_ingestion"]["status"] == "ok"
+        if kafka_gate_ok and redis_gate_ok and daraja_ok and webhook_ok:
             overall_status = "ok"
         else:
             overall_status = "degraded"
@@ -243,6 +267,7 @@ def build_health_payload() -> Dict[str, Any]:
             "kafka": kafka_result["kafka"],
             "redis": redis_result["redis"],
             "daraja": daraja_result["daraja"],
+            "webhook_ingestion": webhook_result["webhook_ingestion"],
         },
     }
 

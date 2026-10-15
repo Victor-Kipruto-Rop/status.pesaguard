@@ -35,7 +35,14 @@ _PRIORITY_ORDER = "CASE communication_notifications.priority "
 _PRIORITY_ORDER += "WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 WHEN 'low' THEN 3 WHEN 'bulk' THEN 4 ELSE 5 END"
 
 
-def claim_entries(session: Session, *, worker_id: str, limit: int = 50, lease_seconds: int = 60) -> list[CommunicationOutboxEntry]:
+def claim_entries(
+    session: Session,
+    *,
+    worker_id: str,
+    limit: int = 50,
+    lease_seconds: int = 60,
+    tenant_id: str | None = None,
+) -> list[CommunicationOutboxEntry]:
     now = utc_now()
     query = (
         session.query(CommunicationOutboxEntry)
@@ -52,6 +59,8 @@ def claim_entries(session: Session, *, worker_id: str, limit: int = 50, lease_se
         )
         .limit(limit)
     )
+    if tenant_id is not None:
+        query = query.filter(CommunicationOutboxEntry.tenant_id == tenant_id)
     try:
         query = query.with_for_update(skip_locked=True)
     except TypeError:

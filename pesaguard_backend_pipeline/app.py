@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import redis
@@ -34,6 +38,7 @@ from validators import validate_daraja_payload
 from ingestion import IngestionError, IngestionService
 from auth_rbac import AuthRBAC, get_current_user, require_auth
 from transaction_routes import create_transaction_blueprint
+from ledger_routes import create_ledger_blueprint
 
 configure_logging()
 logger = logging.getLogger("pesaguard.webhook")
@@ -56,6 +61,13 @@ def _transaction_read_session():
 
 app.register_blueprint(
     create_transaction_blueprint(event_store, _transaction_read_session)
+)
+
+app.register_blueprint(
+    create_ledger_blueprint(
+        lambda: _transaction_read_session(),
+        lambda: event_store.Session(),
+    )
 )
 
 
@@ -282,14 +294,23 @@ def enforce_webhook_security():
             response.headers["Retry-After"] = str(status.get("retry_after", 60))
             return response
 
-        daraja_signature = request.headers.get("X-Daraja-Signature")
-        if daraja_signature:
+        requires_signature = request.path in {
+            "/webhook/mpesa/confirmation",
+            "/webhook/mpesa/validation",
+        }
+        if requires_signature:
+            daraja_signature = request.headers.get("X-Daraja-Signature")
             try:
                 _verify_daraja_signature(request.data, daraja_signature)
-            except Exception as e:
+            except RuntimeError:
                 record_security_event()
-                logger.warning("Webhook signature verification failed", extra={"error": str(e)})
+                logger.error("Webhook signature verification is unavailable: signing secret is not configured")
+                return jsonify({"ResultCode": 1, "ResultDesc": "Webhook authentication unavailable"}), 503
+            except ValueError:
+                record_security_event()
+                logger.warning("Webhook signature verification failed")
                 return jsonify({"ResultCode": 1, "ResultDesc": "Invalid signature"}), 403
+            g.daraja_signature_verified = True
 
 
 @require_auth("read:metrics")
@@ -304,13 +325,40 @@ def metrics():
     return _authenticated_metrics()
 
 
-def _verify_daraja_signature(request_body: bytes, signature: str) -> None:
-    """Verify incoming webhook signature from Daraja using constant-time comparison."""
-    consumer_secret = os.getenv("DARAJA_CONSUMER_SECRET", "")
-    if not consumer_secret:
-        raise ValueError("DARAJA_CONSUMER_SECRET not configured")
-    if not validate_daraja_callback(request_body, signature, consumer_secret):
+def _verify_daraja_signature(request_body: bytes, signature: Optional[str]) -> None:
+    """Verify the callback HMAC with a dedicated signing secret."""
+    signing_secret = os.getenv("DARAJA_WEBHOOK_SIGNING_SECRET", "").strip()
+    if not signing_secret:
+        raise RuntimeError("webhook signing is not configured")
+    if not signature or not validate_daraja_callback(request_body, signature, signing_secret):
         raise ValueError("Signature mismatch")
+
+
+def _reject_json_constant(value: str):
+    raise ValueError(f"non-finite JSON number: {value}")
+
+
+def _unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _webhook_json_object() -> Optional[Dict[str, Any]]:
+    if not request.is_json:
+        return None
+    try:
+        payload = json.loads(
+            request.get_data(cache=True),
+            parse_constant=_reject_json_constant,
+            object_pairs_hook=_unique_json_object,
+        )
+    except ValueError:
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 @app.route("/health", methods=["GET"])
@@ -329,21 +377,26 @@ def liveness():
 def mpesa_confirmation():
     """Handles C2B confirmation callbacks from Daraja with strict idempotency and atomicity safeguards."""
     started = time.perf_counter()
-    payload = request.get_json(silent=True)
+    payload = _webhook_json_object()
     tenant_id = os.getenv("TENANT_ID", "").strip()
 
     if not tenant_id:
         logger.error("Webhook rejected because TENANT_ID is not configured")
-        return jsonify({"ResultCode": 1, "ResultDesc": "Tenant context is required"}), 400
+        return jsonify({"ResultCode": 1, "ResultDesc": "Tenant context is unavailable"}), 503
 
-    if not payload:
+    if not isinstance(payload, dict) or not payload:
         record_pipeline_event("entered", tenant_id=tenant_id or "default")
         record_pipeline_event("dead_lettered", tenant_id=tenant_id or "default", duration_ms=(time.perf_counter() - started) * 1000)
-        logger.warning("Empty or invalid JSON payload received")
-        try:
-            event_store.write_dead_letter(None, reason="invalid_json", error_detail="empty_or_invalid_json", tenant_id=tenant_id)
-        except Exception:
-            logger.debug("Failed to persist dead-letter for invalid JSON payload", exc_info=True)
+        logger.warning("Empty or invalid JSON object received")
+        raw_digest = hashlib.sha256(request.get_data(cache=True)).hexdigest()
+        persisted = event_store.write_dead_letter(
+            {"raw_body_sha256": raw_digest},
+            reason="invalid_json",
+            error_detail="empty_or_invalid_json",
+            tenant_id=tenant_id,
+        )
+        if not persisted:
+            return jsonify({"ResultCode": 1, "ResultDesc": "Temporary persistence error; please retry"}), 503
         return jsonify({"ResultCode": 1, "ResultDesc": "Invalid payload"}), 400
 
     if not is_payload_within_limit(request):
@@ -351,25 +404,53 @@ def mpesa_confirmation():
 
     try:
         record_pipeline_event("entered", tenant_id=tenant_id)
-        ingestion = ingestion_service.ingest("mpesa", payload, tenant_id=tenant_id)
+        ingestion = ingestion_service.ingest(
+            "mpesa",
+            payload,
+            tenant_id=tenant_id,
+            source_ip=get_client_ip(request),
+            signature_verified=bool(getattr(g, "daraja_signature_verified", False)),
+        )
     except IngestionError as error:
         record_pipeline_event("failed", tenant_id=tenant_id, duration_ms=(time.perf_counter() - started) * 1000)
-        logger.warning("Payload validation failed: %s", error)
-        try:
-            event_store.write_dead_letter(payload, reason="validation_failed", error_detail=str(error), tenant_id=tenant_id)
-        except Exception:
-            logger.debug("Failed to persist dead-letter for validation failure", exc_info=True)
+        logger.warning("M-Pesa payload validation failed: %s", sanitize_error_message(error))
+        persisted = event_store.write_dead_letter(
+            payload,
+            reason="validation_failed",
+            error_detail=str(error),
+            tenant_id=tenant_id,
+        )
+        if not persisted:
+            return jsonify({"ResultCode": 1, "ResultDesc": "Temporary persistence error; please retry"}), 503
         return jsonify({"ResultCode": 1, "ResultDesc": sanitize_error_message(error)}), 400
 
     trans_id = ingestion.envelope.external_reference
     idempotency_key = ingestion.envelope.idempotency_key
 
     if ingestion.result == ProcessResult.CONFLICT:
+        event_store.write_dead_letter(
+            payload,
+            reason="duplicate_conflict",
+            error_detail="provider transaction identity was reused with different content",
+            tenant_id=tenant_id,
+        )
         logger.warning(
             "Conflicting transaction replay rejected",
             extra={"tenant_id": tenant_id, "trans_id": trans_id, "idempotency_key": idempotency_key},
         )
         return jsonify({"ResultCode": 1, "ResultDesc": "Conflicting transaction replay"}), 409
+
+    if ingestion.result == ProcessResult.QUARANTINED:
+        record_pipeline_event(
+            "dead_lettered",
+            tenant_id=tenant_id,
+            duration_ms=(time.perf_counter() - started) * 1000,
+        )
+        logger.warning(
+            "M-Pesa callback durably quarantined for data-quality remediation",
+            extra={"tenant_id": tenant_id, "trans_id": trans_id},
+        )
+        return jsonify({"ResultCode": 0, "ResultDesc": "Accepted for data-quality review"}), 200
 
     if ingestion.result == ProcessResult.DUPLICATE:
         record_pipeline_event("duplicate", tenant_id=tenant_id, duration_ms=(time.perf_counter() - started) * 1000)
@@ -436,6 +517,12 @@ def ingest_safaricom_api_transaction():
         return jsonify({"error": "invalid_provider_payload", "message": str(exc)}), 400
     if ingestion.result == ProcessResult.CONFLICT:
         return jsonify({"error": "idempotency_conflict", "message": "The transaction identity was reused with different content."}), 409
+    if ingestion.result == ProcessResult.QUARANTINED:
+        return jsonify({
+            "status": "quarantined",
+            "provider": ingestion.envelope.canonical.provider,
+            "transaction_id": ingestion.envelope.canonical.transaction_id,
+        }), 202
     if ingestion.result == ProcessResult.ERROR:
         return jsonify({"error": "transaction_not_persisted"}), 500
     if ingestion.result == ProcessResult.STORED:
@@ -452,8 +539,8 @@ def ingest_safaricom_api_transaction():
 @app.route("/webhook/mpesa/validation", methods=["POST"])
 def mpesa_validation():
     """Handles C2B validation callbacks (pre-confirmation)."""
-    payload = request.get_json(silent=True)
-    if not payload:
+    payload = _webhook_json_object()
+    if not isinstance(payload, dict) or not payload:
         return jsonify({"ResultCode": 1, "ResultDesc": "Invalid payload"}), 400
     is_valid, error = validate_daraja_payload(payload)
     if not is_valid:
@@ -472,15 +559,36 @@ def ops_alerts():
     business telemetry so the operational smoke test can verify end-to-end
     notification delivery without provider credentials.
     """
-    import hmac as hmac_lib
+    secret_file = os.getenv("PESAGUARD_ALERTMANAGER_WEBHOOK_SECRET_FILE", "").strip()
+    try:
+        if secret_file:
+            secret = Path(secret_file).read_text(encoding="utf-8").strip()
+        else:
+            secret = os.getenv("PESAGUARD_ALERTMANAGER_WEBHOOK_SECRET", "").strip()
+    except (OSError, UnicodeError):
+        record_security_event()
+        logger.error("Alertmanager webhook authentication is unavailable: secret file could not be read")
+        return jsonify({"error": "alertmanager_authentication_unavailable"}), 503
 
-    secret = os.getenv("PESAGUARD_ALERTMANAGER_WEBHOOK_SECRET", "").strip()
-    if secret:
-        provided = request.headers.get("X-Alertmanager-Secret", "")
-        if not hmac_lib.compare_digest(provided, secret):
-            record_security_event()
-            logger.warning("Alertmanager webhook rejected: secret mismatch")
-            return jsonify({"error": "invalid_alertmanager_secret"}), 401
+    if len(secret.encode("utf-8")) < 32:
+        record_security_event()
+        logger.error("Alertmanager webhook authentication is unavailable: secret is not configured")
+        return jsonify({"error": "alertmanager_authentication_unavailable"}), 503
+
+    authorization = request.headers.get("Authorization", "")
+    bearer_secret = (
+        authorization[7:]
+        if authorization[:7].lower() == "bearer "
+        else ""
+    )
+    header_secret = request.headers.get("X-Alertmanager-Secret", "")
+    if not (
+        hmac.compare_digest(bearer_secret, secret)
+        or hmac.compare_digest(header_secret, secret)
+    ):
+        record_security_event()
+        logger.warning("Alertmanager webhook rejected: secret mismatch")
+        return jsonify({"error": "invalid_alertmanager_secret"}), 401
     payload = request.get_json(silent=True) or {}
     alerts = payload.get("alerts") or []
     for alert in alerts:

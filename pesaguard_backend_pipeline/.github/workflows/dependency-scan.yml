@@ -10,6 +10,8 @@ on:
 jobs:
   python-scan:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -48,18 +50,17 @@ jobs:
           if [ -d "pesaguard_backend_pipeline" ]; then
             TARGET_DIR="pesaguard_backend_pipeline"
           fi
-          bandit -r "$TARGET_DIR" -ll -ii -f json -o bandit-report.json || true
-          bandit -r "$TARGET_DIR" -ll -ii -f txt
+          bandit -r "$TARGET_DIR" -ll -ii -f json -o bandit-report.json
 
       - name: Check database & library safety (safety)
         run: safety check --json
 
       - name: Upload Bandit Security Report
         uses: actions/upload-artifact@v4
+        if: always() && hashFiles('bandit-report.json') != ''
         with:
           name: bandit-security-report
           path: bandit-report.json
-        continue-on-error: false
 
   frontend-scan:
     runs-on: ubuntu-latest
@@ -98,3 +99,19 @@ jobs:
           if [ -f frontend/package.json ]; then
             npm --prefix frontend audit --omit=dev --json
           fi
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout repository history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan repository history for exposed credentials
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

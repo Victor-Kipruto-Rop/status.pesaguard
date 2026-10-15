@@ -37,6 +37,23 @@ def test_aggregation_is_tenant_scoped_and_partitioned():
     assert pipeline.partition_key(record) == "tenant=tenant-a/year=2026/month=09"
 
 
+def test_aggregation_by_non_currency_dimension_keeps_currencies_separate():
+    pipeline = CoreDataEngineering()
+    pipeline.ingest_api("tenant-a", payload("kes-tx", "10.00"))
+    pipeline.ingest_api(
+        "tenant-a",
+        {
+            **payload("usd-tx", "10.00"),
+            "Currency": "USD",
+        },
+    )
+
+    assert pipeline.aggregate("tenant-a", by="provider") == {
+        ("api", "KES"): {"count": 1, "amount": "10.00"},
+        ("api", "USD"): {"count": 1, "amount": "10.00"},
+    }
+
+
 def test_retention_archives_before_delete():
     repository = InMemoryDataRepository()
     pipeline = CoreDataEngineering(repository)

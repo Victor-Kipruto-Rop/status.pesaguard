@@ -6,19 +6,40 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
+from pesaguard_backend_pipeline.operations.restore_safety import validate_restore_target
 
-def run(backup: Path, target_database_url: str, sentinel_sql: str) -> dict[str, object]:
+
+def run(
+    backup: Path,
+    target_database_url: str,
+    sentinel_sql: str,
+    *,
+    confirmed_isolated_target: bool = False,
+    application_database_url: str | None = None,
+) -> dict[str, object]:
+    target = validate_restore_target(
+        target_database_url,
+        application_database_url=application_database_url or os.getenv("DATABASE_URL"),
+        confirmed_isolated_target=confirmed_isolated_target,
+    )
     if not backup.exists():
         raise FileNotFoundError(backup)
-    command = ["python", "pesaguard_backend_pipeline/backup_postgres.py", "--restore", str(backup)]
+    command = [
+        sys.executable,
+        "pesaguard_backend_pipeline/backup_postgres.py",
+        "--restore",
+        str(backup),
+        "--confirm-restore-target",
+    ]
     env = os.environ.copy()
     env["DATABASE_URL"] = target_database_url
     restore = subprocess.run(command, env=env, capture_output=True, text=True, check=False)
     result: dict[str, object] = {
         "backup": str(backup),
-        "target_database": target_database_url.rsplit("/", 1)[-1],
+        "target_database": target,
         "restore_returncode": restore.returncode,
         "restore_stderr": restore.stderr[-2000:],
         "sentinel_sql": sentinel_sql,
@@ -46,8 +67,20 @@ def main() -> None:
     parser.add_argument("--target-database-url", required=True)
     parser.add_argument("--sentinel-sql", default="SELECT current_database(), current_schema()")
     parser.add_argument("--json-path", default="restore_drill_result.json")
+    parser.add_argument(
+        "--confirm-isolated-target",
+        action="store_true",
+        help="confirm that the target is a disposable, isolated recovery database",
+    )
     args = parser.parse_args()
-    result = run(args.backup, args.target_database_url, args.sentinel_sql)
+    if not args.confirm_isolated_target:
+        parser.error("--confirm-isolated-target is required for restore drills")
+    result = run(
+        args.backup,
+        args.target_database_url,
+        args.sentinel_sql,
+        confirmed_isolated_target=args.confirm_isolated_target,
+    )
     Path(args.json_path).write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps(result, indent=2))
     if not result["passed"]:

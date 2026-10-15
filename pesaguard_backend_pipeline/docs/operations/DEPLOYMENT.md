@@ -2,7 +2,9 @@
 
 ## Runtime packaging
 
-The repository includes Docker assets under `docker/` and infrastructure templates under `infra/`. The Python backend dependencies are managed through multiple requirement snapshots in the `pesaguard_backend_pipeline/` package (`requirements.txt`, `requirements_1.txt`, `requirements_2.txt`, `requirements_3.txt`).
+The repository includes Docker assets under `pesaguard_backend_pipeline/infra/docker/` and infrastructure templates under `pesaguard_backend_pipeline/infra/`. The Python backend dependencies are managed through a single source of truth, `pesaguard_backend_pipeline/requirements_3.txt` (consumed by both Dockerfiles and all CI workflows; `requirements.txt`, `requirements_1.txt`, `requirements_2.txt` are legacy snapshots retained for reference — do not fork further).
+
+Compose requires loopback-safe deployment settings in the ignored root `.env` (see `pesaguard_backend_pipeline/.env.example`: `POSTGRES_USER`, `POSTGRES_DB`, `POSTGRES_PASSWORD`, `DATABASE_URL_DOCKER`, `REDIS_URL_DOCKER`, `KAFKA_BOOTSTRAP_SERVERS_DOCKER`, `PESAGUARD_BIND_HOST_DOCKER`, `PESAGUARD_API_URL`, `JWT_SECRET_KEY`, plus approved provider identifiers `DEPLOYMENT_REGION` / `BACKUP_REGION` / `LOG_REGION`). Alertmanager and Prometheus bearer material is mounted through Compose secrets (`PESAGUARD_PROMETHEUS_TOKEN_FILE`, `PESAGUARD_ALERTMANAGER_WEBHOOK_SECRET_FILE`), never baked into images.
 
 ## Local development
 
@@ -12,10 +14,14 @@ Use the workspace virtual environment or install dependencies from the project r
 
 The repository ships:
 
-- `docker/Dockerfile`
-- `docker/Dockerfile.worker`
-- `docker/docker-compose.yml`
-- `docker/docker-compose.full.yml`
+- `pesaguard_backend_pipeline/infra/docker/Dockerfile` — API image (uvicorn + `canonical_app`, non-root `appuser`, Docker-native `/live` healthcheck)
+- `pesaguard_backend_pipeline/infra/docker/Dockerfile.worker` — worker image (RQ + communications)
+- `pesaguard_backend_pipeline/infra/docker/docker-compose.yml` — full production-shaped stack (postgres, redis, redpanda, api, dashboard, workers, observability)
+- `pesaguard_backend_pipeline/infra/docker/docker-compose.full.yml` — Kafka/ZooKeeper variant
+- `pesaguard_backend_pipeline/infra/docker/docker-compose.staging.yml` — staging data services
+- `pesaguard_backend_pipeline/infra/docker/docker-compose.aws.yml` / `docker-compose.tunnel.yml` — ingress overlays
+
+Service entrypoints use absolute module invocation (`python -m pesaguard_backend_pipeline.<module>`); relative script paths break sibling imports and must not return. The Kafka-only `reconciliation_job` consumer (no HTTP port) emits a file-mtime heartbeat consumed by its Compose healthcheck — a wedged consumer goes unhealthy instead of idling green.
 
 These files map mostly to the infrastructure and deployment model already observed in the repository. The code does not require a full rewrite of the current runtime packaging.
 

@@ -5,7 +5,15 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime
-from typing import Any, Dict, List, Set
+from decimal import Decimal, InvalidOperation
+from typing import Any, Dict, List, Optional, Set
+
+from normalization import (
+    DEFAULT_CURRENCY,
+    NormalizationError,
+    normalize_amount,
+    normalize_currency,
+)
 
 logger = logging.getLogger("pesaguard.anomaly_rules")
 
@@ -60,18 +68,23 @@ def check_for_anomalies(
         if _is_duplicate(event, seen_trans_ids):
             anomalies.append("duplicate_transaction_id")
 
-        if _is_unusually_large(event, large_amount_threshold):
-            anomalies.append(f"amount_exceeds_threshold_{large_amount_threshold}_KES")
-
         if _has_invalid_amount(event):
             anomalies.append("invalid_or_zero_amount")
+        else:
+            currency = _event_currency(event)
+            threshold = _threshold_for_currency(
+                currency, tenant_settings, large_amount_threshold
+            )
+            if threshold is not None and _amount(event) > threshold:
+                anomalies.append(f"amount_exceeds_threshold_{threshold}_{currency}")
 
-        # Run statistical heuristic anomaly scoring
-        score = score_transaction_anomaly(event, tenant_settings, large_amount_threshold)
-        if score > score_threshold:
-            anomalies.append(f"high_anomaly_score_{round(score, 2)}")
+            score = score_transaction_anomaly(
+                event, tenant_settings, large_amount_threshold
+            )
+            if score > score_threshold:
+                anomalies.append(f"high_anomaly_score_{round(score, 2)}")
 
-    except Exception as exc:
+    except (InvalidOperation, TypeError, ValueError) as exc:
         logger.exception("Unexpected error during anomaly evaluation for event: %s", exc)
         anomalies.append("anomaly_evaluation_error")
 
@@ -93,17 +106,18 @@ def score_transaction_anomaly(
     tenant_settings = tenant_settings or {}
     score = 0.0
 
-    try:
-        amount = float(event.get("TransAmount", 0))
-    except (TypeError, ValueError):
-        logger.warning("Critical: Non-numeric transaction amount detected.")
-        return 1.0
+    amount = _amount(event)
+    currency = _event_currency(event)
+    threshold = _threshold_for_currency(
+        currency, tenant_settings, large_amount_threshold
+    )
 
     # Signal 1: Extreme amount tiering
-    if amount > large_amount_threshold * 1.5:
-        score += 0.5
-    elif amount > large_amount_threshold:
-        score += 0.3
+    if threshold is not None:
+        if amount > threshold * Decimal("1.5"):
+            score += 0.5
+        elif amount > threshold:
+            score += 0.3
 
     # Signal 2: Off-hours timing check (UTC timezone evaluation)
     off_hours_start = int(tenant_settings.get("anomaly_off_hours_start", DEFAULT_OFF_HOURS_START_UTC))
@@ -132,7 +146,7 @@ def score_transaction_anomaly(
         pass  # Malformed timestamps are safely ignored without penalty
 
     # Signal 3: Unusual amount patterning (non-round figures on large transactions)
-    if amount > large_amount_threshold and amount % 10000 != 0:
+    if threshold is not None and amount > threshold and amount % 10000 != 0:
         score += 0.15
 
     # Clamp final score securely between 0.0 and 1.0
@@ -150,16 +164,58 @@ def _is_duplicate(event: Dict[str, Any], seen_trans_ids: Set[str]) -> bool:
 def _is_unusually_large(event: Dict[str, Any], threshold: int) -> bool:
     """Check if transaction amount exceeds the active threshold."""
     try:
-        amount = float(event.get("TransAmount", 0))
-        return amount > threshold
-    except (TypeError, ValueError):
+        currency = _event_currency(event)
+        active_threshold = _threshold_for_currency(currency, {}, threshold)
+        return active_threshold is not None and _amount(event) > active_threshold
+    except NormalizationError:
         return False
 
 
 def _has_invalid_amount(event: Dict[str, Any]) -> bool:
-    """Check if transaction amount is missing, zero, or negative."""
+    """Classify invalid, non-finite, non-positive, or unsupported money."""
     try:
-        amount = float(event.get("TransAmount", 0))
-        return amount <= 0
-    except (TypeError, ValueError):
-        return True  # Unparseable amounts are treated as invalid data quality issues
+        _amount(event)
+        return False
+    except NormalizationError:
+        return True
+
+
+def _event_currency(event: Dict[str, Any]) -> str:
+    return normalize_currency(
+        event.get("Currency") or event.get("currency") or DEFAULT_CURRENCY
+    )
+
+
+def _amount(event: Dict[str, Any]) -> Decimal:
+    currency = _event_currency(event)
+    return Decimal(
+        normalize_amount(
+            event.get("TransAmount", event.get("amount")),
+            currency=currency,
+        )
+    )
+
+
+def _threshold_for_currency(
+    currency: str,
+    tenant_settings: Dict[str, Any],
+    default_threshold: int,
+) -> Decimal | None:
+    thresholds = tenant_settings.get("anomaly_large_amount_thresholds", {})
+    if currency == "KES":
+        raw_threshold = (
+            tenant_settings.get("anomaly_large_amount_kes")
+            or tenant_settings.get("LARGE_AMOUNT_THRESHOLD_KES")
+            or default_threshold
+        )
+    elif isinstance(thresholds, dict) and currency in thresholds:
+        raw_threshold = thresholds[currency]
+    else:
+        return None
+    try:
+        threshold = Decimal(str(raw_threshold))
+    except Exception as exc:
+        raise NormalizationError("amount threshold must be a valid decimal") from exc
+    if not threshold.is_finite() or threshold <= 0:
+        raise NormalizationError("amount threshold must be a positive finite decimal")
+    return threshold

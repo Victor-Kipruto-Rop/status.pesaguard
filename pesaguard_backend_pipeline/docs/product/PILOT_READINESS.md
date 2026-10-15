@@ -224,7 +224,7 @@ python3 backup_postgres.py --list
 python3 backup_postgres.py --test
 
 # Full restoration test (on staging only!)
-python3 backup_postgres.py --restore /var/backups/pesaguard/pesaguard_20260722_020000.sql.gz
+python3 backup_postgres.py --restore /var/backups/pesaguard/pesaguard_20260722_020000.sql.gz --confirm-restore-target
 
 # Verify data after restore
 psql -c "SELECT COUNT(*) FROM transactions;"

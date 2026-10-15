@@ -282,6 +282,8 @@ def record_data_quality(result: Any) -> None:
     for dimension, score in scores.items():
         _dq_checks.labels(dimension=dimension, status=status, tenant_id=tenant).inc()
         _dq_scores.labels(dimension=dimension, tenant_id=tenant).set(float(score))
+    if hasattr(result, "overall_score"):
+        _dq_overall_scores.labels(tenant_id=tenant).set(float(result.overall_score))
 
 
 def record_security_event(amount: int = 1) -> None:
@@ -543,6 +545,11 @@ if HAS_PROMETHEUS_CLIENT:
         "pesaguard_data_quality_score",
         "Latest data quality score by dimension",
         ["dimension", "tenant_id"],
+    )
+    _dq_overall_scores = Gauge(
+        "pesaguard_data_quality_overall_score",
+        "Latest overall data quality score",
+        ["tenant_id"],
     )
 
     def _alert_counter() -> Counter:

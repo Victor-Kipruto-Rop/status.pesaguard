@@ -1,8 +1,7 @@
-"""Extract route -> required-permission pairs from Core API route files.
+"""Extract explicit route-permission decorators from API source files.
 
-Dev helper for the authorization audit: reads @app.route/@bp.route decorators
-and the nearest @require_auth or @require_resource_access permission. Read-only;
-prints findings.
+This is independent evidence only: routes without a direct permission decorator
+are reported as UNMAPPED and are not inferred from authorization_policy.
 """
 
 import re
@@ -10,13 +9,19 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 FILES = [
+    "app.py",
     "api/dashboard_app.py",
     "app_3_features.py",
     "app_4_advanced_features.py",
     "export_routes.py",
     "tenant_org_routes.py",
     "tenant_settings.py",
+    "transaction_routes.py",
+    "public_status.py",
     "communications/product_routes.py",
     "communications/operations_routes.py",
     "communications/routes.py",
@@ -28,15 +33,16 @@ PREFIXES = {
     "export_routes.py": ["/v1", "/api/v1"],
     "tenant_org_routes.py": ["/api/v1"],
     "tenant_settings.py": ["/api/v1/settings"],
+    "transaction_routes.py": ["/api/v1"],
     "communications/product_routes.py": ["/api/v1/communications"],
     "communications/operations_routes.py": ["/api/v1/communications"],
     "communications/routes.py": [""],
 }
 
 ROUTE_RE = re.compile(
-    r'@(?:app|bp|blueprint|_idempotent_route)\.?(?:route)?\(\s*"([^"]+)"'
+    r'@\w+\.?(?:route)?\(\s*"([^"]*)"'
     r'(?:.*methods=\[([^\]]+)\])?'
-    r'|@(?:blueprint|bp|app)\.(get|post|put|patch|delete)\("([^"]+)"'
+    r'|@\w+\.(get|post|put|patch|delete)\("([^"]*)"'
 )
 PERM_RE = re.compile(
     r'@(?:require_auth|require_auth_fn)\(\s*(?:required_permission=)?"([A-Za-z0-9_:]+)"'
@@ -65,7 +71,7 @@ def main() -> int:
             match = ROUTE_RE.search(line)
             if not match:
                 continue
-            route = match.group(1) or match.group(4)
+            route = match.group(1) if match.group(1) is not None else match.group(4)
             permission = None
             for offset in range(index + 1, min(index + 6, len(lines))):
                 if DEF_RE.match(lines[offset]):
@@ -80,10 +86,9 @@ def main() -> int:
                 key = rel.replace("\\", "/")
                 for prefix in PREFIXES.get(key, [""]):
                     full = f"{prefix}{route}" if route.startswith("/") else f"{prefix}/{route}"
-                    if permission:
-                        print(f"{method} {full} -> {permission}")
-                    else:
-                        print(f"{method} {full} -> UNMAPPED")
+                    endpoint = f"{method} {full}"
+                    classification = permission or "UNMAPPED"
+                    print(f"{endpoint} -> {classification}")
     return 0
 
 

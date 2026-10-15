@@ -5,20 +5,26 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
 import os
+import tempfile
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, Mapping, Optional
 
 from ingestion import IngestionError, IngestionService
 from models import ImportJob
 from partitioning import raw_object_partition
+from sqlalchemy import and_, or_
+from sqlalchemy.exc import SQLAlchemyError
 
 
 SUPPORTED_FORMATS = {"csv", "json", "xlsx", "parquet"}
 MAX_IMPORT_BYTES = int(os.getenv("PESAGUARD_IMPORT_MAX_BYTES", str(50 * 1024 * 1024)))
 MAX_IMPORT_RECORDS = int(os.getenv("PESAGUARD_IMPORT_MAX_RECORDS", "250000"))
+IMPORT_JOB_LEASE_SECONDS = max(60, int(os.getenv("PESAGUARD_IMPORT_JOB_LEASE_SECONDS", "600")))
+logger = logging.getLogger("pesaguard.batch_ingestion")
 
 
 class BatchImportError(ValueError):
@@ -35,18 +41,49 @@ class ObjectStorage:
     def __init__(self, root: Optional[str] = None):
         self.root = Path(root or os.getenv("PESAGUARD_IMPORT_OBJECT_STORAGE", "var/imports"))
 
+    def _path_for(self, object_key: str) -> Path:
+        root = self.root.resolve()
+        destination = (root / object_key).resolve()
+        try:
+            if os.path.commonpath((str(root), str(destination))) != str(root):
+                raise BatchImportError("import object path is outside storage root")
+        except ValueError as exc:
+            raise BatchImportError("import object path is outside storage root") from exc
+        return destination
+
     def put(self, tenant_id: str, job_id: str, filename: str, content: bytes, *, source: str = "unknown", observed_at: Any = None) -> str:
         object_key = f"{raw_object_partition(tenant_id, source, observed_at)}/{job_id}/{filename}"
-        destination = self.root / object_key
+        destination = self._path_for(object_key)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(content)
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=".upload-", delete=False) as temporary:
+                temporary_path = Path(temporary.name)
+                temporary.write(content)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temporary_path, destination)
+        except OSError as exc:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+            raise BatchImportError("import object could not be stored") from exc
         return object_key
 
     def get(self, object_key: str) -> bytes:
-        path = self.root / object_key
+        path = self._path_for(object_key)
         if not path.is_file():
             raise BatchImportError("import object is not available")
-        return path.read_bytes()
+        try:
+            return path.read_bytes()
+        except OSError as exc:
+            raise BatchImportError("import object could not be read") from exc
+
+    def delete(self, object_key: str) -> None:
+        path = self._path_for(object_key)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            logger.exception("Failed to clean up uncommitted import object")
 
 
 def _format_for(filename: str) -> str:
@@ -147,7 +184,13 @@ class BatchImportService:
             status="queued",
         )
         session.add(job)
-        session.commit()
+        try:
+            session.commit()
+        except SQLAlchemyError:
+            session.rollback()
+            self.storage.delete(object_key)
+            logger.exception("Failed to persist import job metadata")
+            raise
         return job
 
     def process(self, session: Any, import_id: str, *, tenant_id: Optional[str] = None) -> ImportJob:
@@ -159,10 +202,46 @@ class BatchImportService:
             raise BatchImportError("import job not found")
         if job.status == "completed":
             return job
-        job.status = "running"
-        job.started_at = datetime.now(timezone.utc)
+
+        now = datetime.now(timezone.utc)
+        claim_filter = query.filter(
+            or_(
+                ImportJob.status.in_(("queued", "failed")),
+                and_(
+                    ImportJob.status == "running",
+                    or_(ImportJob.lease_expires_at.is_(None), ImportJob.lease_expires_at <= now),
+                ),
+            )
+        )
+        claimed = claim_filter.update(
+            {
+                ImportJob.status: "running",
+                ImportJob.attempts: ImportJob.attempts + 1,
+                ImportJob.records_received: 0,
+                ImportJob.records_valid: 0,
+                ImportJob.records_failed: 0,
+                ImportJob.error_summary: [],
+                ImportJob.started_at: now,
+                ImportJob.completed_at: None,
+                ImportJob.lease_expires_at: now + timedelta(seconds=IMPORT_JOB_LEASE_SECONDS),
+            },
+            synchronize_session=False,
+        )
         session.commit()
-        errors = list(job.error_summary or [])
+        if claimed != 1:
+            current = query.first()
+            if current is None:
+                raise BatchImportError("import job not found")
+            if current.status == "completed":
+                return current
+            if current.status == "running":
+                raise BatchImportError("import job is already running")
+            raise BatchImportError(f"import job cannot be processed from status {current.status}")
+        session.expire_all()
+        job = query.first()
+        if job is None:
+            raise BatchImportError("import job not found")
+        errors = []
         try:
             records = _records_from_bytes(job.filename, self.storage.get(job.object_key))
             for record in records:
@@ -176,16 +255,30 @@ class BatchImportService:
                     else:
                         job.records_failed += 1
                         if len(errors) < 20:
-                            errors.append({"record": job.records_received, "error": "transaction persistence failed"})
+                            error = (
+                                "record quarantined by data-quality gate"
+                                if result.result.value == "quarantined"
+                                else "transaction persistence failed"
+                            )
+                            errors.append({"record": job.records_received, "error": error})
                 except (IngestionError, ValueError, TypeError) as exc:
                     job.records_failed += 1
                     if len(errors) < 20:
                         errors.append({"record": job.records_received, "error": str(exc)[:500]})
                 if job.records_received % 100 == 0:
+                    job.lease_expires_at = datetime.now(timezone.utc) + timedelta(seconds=IMPORT_JOB_LEASE_SECONDS)
                     session.commit()
             job.status = "completed" if job.records_failed == 0 else "failed"
+            job.lease_expires_at = None
         except Exception as exc:
+            logger.exception("Import job %s failed", import_id)
+            session.rollback()
+            job = query.first()
+            if job is None:
+                raise BatchImportError("import job disappeared while processing") from exc
             job.status = "failed"
+            job.lease_expires_at = None
+            errors = list(job.error_summary or [])
             if len(errors) < 20:
                 errors.append({"record": job.records_received, "error": str(exc)[:500]})
         job.error_summary = errors

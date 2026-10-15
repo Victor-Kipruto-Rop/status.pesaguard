@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 import app_4_advanced_features as advanced_features
-from test_config import configure_test_database
+from test_config import configure_test_database, post_public_registration
 
 configure_test_database()
 
@@ -41,9 +41,10 @@ def _clean(email: str, tenant_id: str):
 
 
 def _create_user(client, username: str, email: str, tenant_id: str):
-    registration = client.post(
-        "/auth/register",
-        json={"username": username, "email": email, "password": "StrongPass123!", "tenant_id": tenant_id},
+    registration = post_public_registration(
+        client,
+        app,
+        {"username": username, "email": email, "password": "StrongPass123!", "tenant_id": tenant_id},
     )
     assert registration.status_code == 201
     payload = registration.get_json()

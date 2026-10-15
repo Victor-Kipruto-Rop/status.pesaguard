@@ -11,11 +11,21 @@ import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Mapping
 
 from .core.enums import CommunicationChannel, CommunicationPriority
 from .domain import is_allowed_now
+from normalization import (
+    DEFAULT_CURRENCY,
+    MAX_TRANSACTION_AMOUNT,
+    NormalizationError,
+    format_money,
+    normalize_amount,
+    normalize_currency,
+    parse_decimal,
+)
 
 
 class RiskClass(StrEnum):
@@ -100,22 +110,55 @@ def risk_class_for_score(score: float | None, config: Mapping[str, Any]) -> Risk
     return RiskClass.LOW
 
 
-def _amount(context: Mapping[str, Any]) -> float | None:
+def _amount(
+    context: Mapping[str, Any],
+    comparison_currency: str,
+    *,
+    allow_signed_derived: bool = False,
+) -> tuple[Decimal | None, str | None]:
     for key in ("amount", "value", "trans_amount"):
         value = context.get(key)
         if value is None:
             continue
         try:
-            return abs(float(value))
-        except (TypeError, ValueError):
-            continue
-    return None
+            currency_value = next(
+                (context[name] for name in ("currency", "Currency") if name in context),
+                comparison_currency,
+            )
+            currency = normalize_currency(currency_value)
+            if allow_signed_derived:
+                amount = parse_decimal(value)
+                format_money(abs(amount), currency)
+            else:
+                amount = Decimal(normalize_amount(value, currency=currency))
+        except NormalizationError:
+            return None, "invalid_monetary_value"
+        if abs(amount) > MAX_TRANSACTION_AMOUNT:
+            return None, "invalid_monetary_value"
+        if currency != comparison_currency:
+            return None, "currency_threshold_mismatch"
+        return abs(amount), None
+    return None, None
 
 
 def _reconciliation_escalation(context: Mapping[str, Any], config: Mapping[str, Any]) -> PolicyDecision:
-    difference = abs(_amount(context) or 0.0)
-    analyst_max = float(config["reconciliation_analyst_max"])
-    manager_max = float(config["reconciliation_manager_max"])
+    comparison_currency = normalize_currency(config.get("currency", DEFAULT_CURRENCY))
+    amount, amount_issue = _amount(
+        context,
+        comparison_currency,
+        allow_signed_derived=True,
+    )
+    if amount_issue:
+        return PolicyDecision(
+            channels=(CommunicationChannel.SMS, CommunicationChannel.EMAIL, CommunicationChannel.VOICE),
+            priority=CommunicationPriority.CRITICAL,
+            template="reconciliation.executive_review",
+            create_incident=True,
+            reasons=("reconciliation_amount_not_comparable", amount_issue),
+        )
+    difference = amount or Decimal("0")
+    analyst_max = parse_decimal(config["reconciliation_analyst_max"])
+    manager_max = parse_decimal(config["reconciliation_manager_max"])
     if difference <= analyst_max:
         return PolicyDecision(
             channels=(CommunicationChannel.EMAIL,),
@@ -220,8 +263,16 @@ class NotificationPolicyEngine:
     # -- individual event policies -------------------------------------------
 
     def _decide_transaction_completed(self, tenant_id: str, context: Mapping[str, Any], config: Mapping[str, Any]) -> PolicyDecision:
-        amount = _amount(context)
-        if amount is not None and amount >= float(config["very_high_value_threshold"]):
+        comparison_currency = normalize_currency(config.get("currency", DEFAULT_CURRENCY))
+        amount, amount_issue = _amount(context, comparison_currency)
+        if amount_issue:
+            return PolicyDecision(
+                channels=(CommunicationChannel.SMS,),
+                priority=CommunicationPriority.NORMAL,
+                template="transaction.receipt",
+                reasons=(amount_issue,),
+            )
+        if amount is not None and amount >= parse_decimal(config["very_high_value_threshold"]):
             return PolicyDecision(
                 channels=(CommunicationChannel.SMS, CommunicationChannel.EMAIL, CommunicationChannel.VOICE),
                 priority=CommunicationPriority.HIGH,
@@ -229,7 +280,7 @@ class NotificationPolicyEngine:
                 fallback_channels=(CommunicationChannel.EMAIL,),
                 reasons=("very_high_value_transaction",),
             )
-        if amount is not None and amount >= float(config["high_value_threshold"]):
+        if amount is not None and amount >= parse_decimal(config["high_value_threshold"]):
             return PolicyDecision(
                 channels=(CommunicationChannel.SMS, CommunicationChannel.EMAIL, CommunicationChannel.VOICE),
                 priority=CommunicationPriority.HIGH,

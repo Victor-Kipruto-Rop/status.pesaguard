@@ -10,6 +10,37 @@ This document defines the role of **Database Schema** within PesaGuard. It provi
 
 PesaGuard currently runs a Flask and SQLAlchemy backend with PostgreSQL as the production store, Redis and RQ for asynchronous work, Kafka for event transport, and Alembic for schema migration. M-Pesa/Daraja is the active payment scope. Capabilities described here must be marked as implemented, in progress, or planned rather than implied.
 
+## Financial data layers and ownership
+
+- The PostgreSQL operational schema stores immutable provider source fields
+  (`transactions.raw_payload` plus its hash/schema version), lifecycle state,
+  tenant-scoped idempotency, append-only `transaction_events`, outbox intent,
+  and reconciliation evidence.
+- `TransformationRecord`, `LineageRecord`, and `TransactionProvenance` record
+  raw/validated/normalized/enriched/processed stage evidence and the schema,
+  pipeline, or decision versions associated with that evidence. These are
+  logical stages in the operational schema, not separate raw/validated/curated
+  PostgreSQL databases. Curated metrics are derived and must not replace source
+  or audit evidence.
+- `ledgers`, `ledger_accounts`, `ledger_transactions`, and `ledger_entries`
+  provide tenant-scoped accounting records. Composite tenant/ledger foreign
+  keys prevent cross-tenant or cross-ledger references; balances are derived
+  from posted entries, not treated as independently editable source fields.
+- Schema changes are Alembic-owned. Do not use `Base.metadata.create_all()` to
+  provision production tables. Migration `20261016_double_entry_ledger`
+  enables and forces tenant RLS on all four ledger tables and grants the
+  runtime role only `SELECT`, `INSERT`, and `UPDATE`.
+- Migration `20261017_webhook_runtime_grants` grants the non-bypass runtime
+  role CRUD on tenant-scoped webhook configurations and only `SELECT`,
+  `INSERT`, and `UPDATE` on delivery history; delivery deletion remains
+  unavailable to the application role. These table-specific grants do not
+  replace deployment-wide privilege and role-membership verification.
+- Migration `20261018_transaction_ingestion_runtime_grants` grants only the
+  `SELECT`/`INSERT`/`UPDATE` operations used by durable ingestion on transaction
+  state, processing status, and outbox tables. Append-style transaction,
+  idempotency, audit, transformation, and lineage evidence is granted only
+  `SELECT`/`INSERT`; the runtime role receives no `DELETE` on these records.
+
 ## Design principles
 
 - **Tenant isolation:** every query, mutation, export, cache key, event, audit record, and replay operation carries an authorized tenant and provider-account scope.
@@ -67,6 +98,13 @@ At minimum, validate syntax and imports, focused unit behavior, cross-tenant iso
 
 ## Open work
 
-- Replace this design baseline with implementation-specific diagrams, schemas, examples, and measured SLOs as the capability matures.
-- Link the final implementation, migration revision, tests, dashboards, and runbook from this document.
-- Review this document whenever the public contract, ownership boundary, or recovery behavior changes.
+- Verify migrations and RLS with deployment credentials after rollout; local
+  PostgreSQL validation is not evidence about production role membership or
+  grants.
+- Physical partitioning of the transaction table is intentionally not enabled:
+  no representative production volume, query plan, retention benchmark, or
+  approved threshold currently justifies its operational cost.
+- Production object-store archival, approved retention periods, off-site backup
+  durability, restore/PITR drills, and measured RPO/RTO remain deployment
+  gates. See [Data Retention](./DATA_RETENTION.md),
+  [Data Archival](./DATA_ARCHIVAL.md), and [Backups](./BACKUPS.md).

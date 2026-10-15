@@ -30,6 +30,10 @@ def test_pitr_rejects_sql_dump_archives(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(backup_postgres, "STATUS_FILE", status_file)
 
     with pytest.raises(SystemExit):
-        backup_postgres.pitr_restore(artifact, target_time="2026-09-23 12:00:00")
+        backup_postgres.pitr_restore(
+            artifact,
+            target_time="2026-09-23 12:00:00",
+            confirm_target=True,
+        )
 
     assert "cannot be used for WAL replay" in status_file.read_text(encoding="utf-8")

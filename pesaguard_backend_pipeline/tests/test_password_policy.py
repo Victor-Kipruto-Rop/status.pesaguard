@@ -1,6 +1,6 @@
 import pytest
 
-from test_config import configure_test_database
+from test_config import configure_test_database, post_public_registration
 
 configure_test_database()
 
@@ -32,9 +32,10 @@ def test_passphrase_policy_change_and_admin_reset(client, monkeypatch):
     email = "policy-user@example.com"
     tenant_id = "policy-tenant"
     _clean(email, tenant_id)
-    registration = client.post(
-        "/auth/register",
-        json={"username": "policy-user", "email": email, "password": "Correct horse battery staple", "tenant_id": tenant_id},
+    registration = post_public_registration(
+        client,
+        app,
+        {"username": "policy-user", "email": email, "password": "Correct horse battery staple", "tenant_id": tenant_id},
     )
     assert registration.status_code == 201, registration.get_data(as_text=True)
     verification = client.post(
@@ -93,16 +94,18 @@ def test_common_maximum_and_breached_passwords_are_rejected(client, monkeypatch)
     tenant_id = "policy-tenant"
     _clean(email, tenant_id)
 
-    common = client.post(
-        "/auth/register",
-        json={"username": "common", "email": email, "password": "password123", "tenant_id": tenant_id},
+    common = post_public_registration(
+        client,
+        app,
+        {"username": "common", "email": email, "password": "password123", "tenant_id": tenant_id},
     )
     assert common.status_code == 400
     assert common.get_json()["error"] == "weak_password"
 
-    too_long = client.post(
-        "/auth/register",
-        json={"username": "long", "email": email, "password": "x" * 129, "tenant_id": tenant_id},
+    too_long = post_public_registration(
+        client,
+        app,
+        {"username": "long", "email": email, "password": "x" * 129, "tenant_id": tenant_id},
     )
     assert too_long.status_code == 400
 
@@ -114,11 +117,12 @@ def test_common_maximum_and_breached_passwords_are_rejected(client, monkeypatch)
     monkeypatch.setattr("app_4_advanced_features.requests.get", lambda *args, **kwargs: BreachResponse())
     breached_password = "Breach candidate passphrase 2026"
     import hashlib
-    digest = hashlib.sha1(breached_password.encode()).hexdigest().upper()
+    digest = hashlib.sha1(breached_password.encode(), usedforsecurity=False).hexdigest().upper()
     BreachResponse.text = f"{digest[5:]}:42\n"
-    breached = client.post(
-        "/auth/register",
-        json={"username": "breached", "email": email, "password": breached_password, "tenant_id": tenant_id},
+    breached = post_public_registration(
+        client,
+        app,
+        {"username": "breached", "email": email, "password": breached_password, "tenant_id": tenant_id},
     )
     assert breached.status_code == 400
     assert breached.get_json()["error"] == "weak_password"

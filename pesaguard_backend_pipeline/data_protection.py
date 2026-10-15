@@ -15,6 +15,7 @@ _ENCRYPTED_PREFIX = "enc:v1:"
 _SENSITIVE_KEYS = {
     "msisdn",
     "phone",
+    "phonenumber",
     "phone_number",
     "account_number",
     "bank_account",

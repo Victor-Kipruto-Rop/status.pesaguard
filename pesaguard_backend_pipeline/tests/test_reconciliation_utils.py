@@ -21,7 +21,7 @@ def test_normalize_daraja_flat_c2b():
     }
     n = normalize_daraja_event(payload)
     assert n["TransID"] == "ABC123"
-    assert n["TransAmount"] == 150.0
+    assert n["TransAmount"] == "150.00"
     assert ("timestamp" in n) or ("TransTime" in n)
 
 

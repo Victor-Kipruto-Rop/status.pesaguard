@@ -14,6 +14,7 @@ from typing import Any, Callable
 from sqlalchemy.orm import Session
 
 from data_protection import decrypt_value
+from tenant_context import tenant_scope
 import time
 from .core.enums import CommunicationChannel, CommunicationPriority
 from .core.error_categories import category_for_exception, is_retryable
@@ -42,7 +43,58 @@ def process_outbox_once(
     publish_events: bool = True,
 ) -> int:
     worker_id = worker_id or f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
-    entries = claim_entries(session, worker_id=worker_id, limit=limit)
+    if limit <= 0:
+        return 0
+    if session.get_bind().dialect.name == "postgresql":
+        from tenant_registry import list_active_tenant_ids
+
+        tenant_ids = list_active_tenant_ids()
+
+        processed = 0
+        remaining = limit
+        for tenant_id in tenant_ids:
+            if remaining <= 0:
+                break
+            with tenant_scope(tenant_id):
+                tenant_session = Session(bind=session.get_bind())
+                try:
+                    tenant_processed = _process_outbox_in_scope(
+                        tenant_session,
+                        worker_id=worker_id,
+                        limit=remaining,
+                        provider_factory=provider_factory,
+                        channel_provider_factory=channel_provider_factory,
+                        publish_events=publish_events,
+                        tenant_id=tenant_id,
+                    )
+                    processed += tenant_processed
+                    remaining -= tenant_processed
+                finally:
+                    tenant_session.close()
+        return processed
+
+    return _process_outbox_in_scope(
+        session,
+        worker_id=worker_id,
+        limit=limit,
+        provider_factory=provider_factory,
+        channel_provider_factory=channel_provider_factory,
+        publish_events=publish_events,
+        tenant_id=None,
+    )
+
+
+def _process_outbox_in_scope(
+    session: Session,
+    *,
+    worker_id: str,
+    limit: int,
+    provider_factory: Callable[[], Any],
+    channel_provider_factory: Callable[[CommunicationChannel], Any] | None,
+    publish_events: bool,
+    tenant_id: str | None,
+) -> int:
+    entries = claim_entries(session, worker_id=worker_id, limit=limit, tenant_id=tenant_id)
     provider_failures: dict[str, int] = {}
     for entry in entries:
         notification = session.query(CommunicationNotification).filter_by(id=entry.notification_id).one()
@@ -52,6 +104,7 @@ def process_outbox_once(
         attempt = CommunicationAttempt(
             id=f"attempt_{uuid.uuid4().hex}",
             notification_id=notification.id,
+            tenant_id=notification.tenant_id,
             attempt_number=entry.attempt_count,
             provider=notification.provider or "unknown",
             status="processing",

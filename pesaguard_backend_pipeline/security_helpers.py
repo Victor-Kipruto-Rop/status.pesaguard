@@ -75,7 +75,7 @@ def is_payload_within_limit(request: Request, max_body_bytes: int | None = None)
     if content_length is not None:
         return content_length <= max_body_bytes
 
-    body = request.get_data(cache=False, as_text=False)
+    body = request.get_data(cache=True, as_text=False)
     return len(body or b"") <= max_body_bytes
 
 
@@ -83,8 +83,12 @@ def is_allowed_source(client_ip: str, request: Request) -> bool:
     """Validate incoming Daraja webhook origin via constant-time HMAC secret or IP allowlist.
 
     Fails CLOSED (rejects requests) if neither `DARAJA_SHARED_SECRET` nor
-    `DARAJA_ALLOWED_IPS` is configured, unless explicitly overridden for local
-    development via `PESAGUARD_ALLOW_UNRESTRICTED_WEBHOOK_SOURCE=1`.
+    `DARAJA_ALLOWED_IPS` is configured. There is intentionally NO environment
+    override that relaxes this gate: any such "unrestricted webhook source"
+    switch would be a fail-open backdoor (Rules #55/#57/#65), so an override is
+    deliberately not implemented. Configure the shared secret and/or the IP
+    allowlist for the environment instead. `tests/test_webhook_source_gate.py`
+    pins this fail-closed contract.
 
     Args:
         client_ip: Resolved client IP address string

@@ -6,7 +6,7 @@ from typing import Any, Mapping
 
 from jsonschema import Draft202012Validator
 
-from normalization import NormalizationError, normalize_amount
+from normalization import NormalizationError, normalize_amount, normalize_currency
 
 
 class ApiContractError(ValueError):
@@ -26,8 +26,8 @@ TRANSACTION_CREATE_SCHEMA: dict[str, Any] = {
         "TransID": {"type": "string", "minLength": 1, "maxLength": 255},
         "BusinessShortCode": {"type": ["string", "number"], "minLength": 1},
         "provider": {"type": "string", "enum": ["mpesa", "safaricom", "airtel-money", "bank", "pos"]},
-        "TransAmount": {"type": ["string", "number"], "pattern": "^[+]?[0-9]+(\\.[0-9]{1,2})?$"},
-        "Currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+        "TransAmount": {"type": ["string", "number"]},
+        "Currency": {"type": "string", "minLength": 1},
         "MSISDN": {"type": "string", "pattern": "^254[17][0-9]{8}$"},
         "TransTime": {"type": "string", "minLength": 1},
     },
@@ -39,6 +39,20 @@ TRANSACTION_ACCEPTED_SCHEMA: dict[str, Any] = {
     "required": ["status", "duplicate", "idempotency_key"],
     "properties": {"status": {"const": "accepted"}, "duplicate": {"type": "boolean"}, "idempotency_key": {"type": "string", "minLength": 1}},
     "additionalProperties": False,
+}
+
+TRANSACTION_QUARANTINED_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["status", "idempotency_key"],
+    "properties": {
+        "status": {"const": "quarantined"},
+        "idempotency_key": {"type": "string", "minLength": 1},
+    },
+    "additionalProperties": False,
+}
+
+TRANSACTION_RESPONSE_SCHEMA: dict[str, Any] = {
+    "oneOf": [TRANSACTION_ACCEPTED_SCHEMA, TRANSACTION_QUARANTINED_SCHEMA],
 }
 
 
@@ -55,10 +69,11 @@ def validate_transaction_create(payload: Any) -> None:
         raise ApiContractError("request body must be a JSON object")
     _validate(payload, TRANSACTION_CREATE_SCHEMA, "transaction request")
     try:
-        normalize_amount(payload["TransAmount"])
+        currency = normalize_currency(payload["Currency"])
+        normalize_amount(payload["TransAmount"], currency=currency)
     except NormalizationError as exc:
-        raise ApiContractError(f"transaction amount is invalid: {exc}") from exc
+        raise ApiContractError(f"transaction amount or Currency is invalid: {exc}") from exc
 
 
 def validate_transaction_response(payload: Mapping[str, Any]) -> None:
-    _validate(payload, TRANSACTION_ACCEPTED_SCHEMA, "transaction response")
+    _validate(payload, TRANSACTION_RESPONSE_SCHEMA, "transaction response")

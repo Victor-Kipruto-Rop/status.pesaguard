@@ -10,6 +10,19 @@ This document defines the role of **Data Archival** within PesaGuard. It provide
 
 PesaGuard currently runs a Flask and SQLAlchemy backend with PostgreSQL as the production store, Redis and RQ for asynchronous work, Kafka for event transport, and Alembic for schema migration. M-Pesa/Daraja is the active payment scope. Capabilities described here must be marked as implemented, in progress, or planned rather than implied.
 
+`archival.py` provides policy-tier calculation, immutable hash-checked objects,
+and a local filesystem store for development/tests. It is not a production
+object-store adapter. `EventStore.mark_transaction_archived` records a
+tenant-scoped archive key and timestamp but does not itself verify object
+integrity, and no production caller currently connects these APIs into a
+scheduled archival workflow. Do not enable transaction deletion until that
+integration has a durable manifest, verified restore/read path, and
+tenant-scoped PostgreSQL integration tests.
+
+Raw import objects use tenant/source/date partition keys. Partition components
+are validated/encoded before being joined into storage paths; this is a
+physical object-key layout, not PostgreSQL table partitioning.
+
 ## Design principles
 
 - **Tenant isolation:** every query, mutation, export, cache key, event, audit record, and replay operation carries an authorized tenant and provider-account scope.
@@ -70,3 +83,5 @@ At minimum, validate syntax and imports, focused unit behavior, cross-tenant iso
 - Replace this design baseline with implementation-specific diagrams, schemas, examples, and measured SLOs as the capability matures.
 - Link the final implementation, migration revision, tests, dashboards, and runbook from this document.
 - Review this document whenever the public contract, ownership boundary, or recovery behavior changes.
+- Production object-store integration and archive-before-purge verification
+  remain required before destructive transaction retention can be enabled.

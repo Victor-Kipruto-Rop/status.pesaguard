@@ -25,8 +25,13 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
+    inspect as sa_inspect,
 )
 from sqlalchemy.orm import declarative_base
+
+# Registers transaction-local tenant context on all SQLAlchemy engines.
+import tenant_context as _tenant_context
 
 Base = declarative_base()
 
@@ -48,6 +53,13 @@ class Transaction(Base):
     __table_args__ = (
         UniqueConstraint("tenant_id", "provider_account_id", "trans_id", name="uq_transaction_scope_trans_id"),
         Index("ix_transaction_scope_trans_id", "tenant_id", "provider_account_id", "trans_id"),
+        Index(
+            "ix_transaction_tenant_provider_currency_created",
+            "tenant_id",
+            "provider",
+            "currency",
+            "created_at",
+        ),
         Index("ix_transaction_trans_id", "trans_id"),
         Index("ix_transaction_created_at", "created_at"),
         Index("ix_transaction_msisdn", "msisdn"),
@@ -70,12 +82,14 @@ class Transaction(Base):
     idempotency_key = Column(String(255), nullable=False, default=_transaction_key_default)
     external_reference = Column(String(255), nullable=True)
     provider_transaction_id = Column(String(255), nullable=False, default=_transaction_id_default)
-    trans_amount = Column(Numeric(18, 2), nullable=False)
+    trans_amount = Column(Numeric(19, 3), nullable=False)
     currency = Column(String(3), nullable=False, default="KES", server_default="KES")
     msisdn = Column(String, nullable=False)
     business_short_code = Column(String, nullable=False)
     trans_time = Column(String, nullable=False)  # Raw string timestamp format from Daraja
     raw_payload = Column(JSON, nullable=False)
+    raw_payload_hash = Column(String(64), nullable=True)
+    source_schema_version = Column(String(32), nullable=False, default="1.0", server_default="1.0")
     status = Column(String(32), nullable=False, default="RECEIVED", server_default="RECEIVED")
     lifecycle_stage = Column(String(16), nullable=False, default="STORED", server_default="STORED")
     archived_at = Column(DateTime(timezone=True), nullable=True)
@@ -84,6 +98,46 @@ class Transaction(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
     __mapper_args__ = {"version_id_col": version}
+
+
+@event.listens_for(Transaction, "before_update")
+def _prevent_transaction_source_mutation(_mapper, _connection, transaction):
+    state = sa_inspect(transaction)
+    changed = {
+        name
+        for name in (
+            "raw_payload",
+            "trans_id",
+            "tenant_id",
+            "provider_account_id",
+            "provider",
+            "idempotency_key",
+            "external_reference",
+            "provider_transaction_id",
+            "trans_amount",
+            "currency",
+            "msisdn",
+            "business_short_code",
+            "trans_time",
+            "raw_payload_hash",
+            "source_schema_version",
+        )
+        if state.attrs[name].history.has_changes()
+    }
+    raw_changed = "raw_payload" in changed
+    raw_payload = transaction.raw_payload
+    is_privacy_redaction = (
+        raw_changed
+        and isinstance(raw_payload, dict)
+        and raw_payload.get("redacted") is True
+    )
+    immutable_identity = changed - {"raw_payload", "msisdn"}
+    if immutable_identity:
+        raise ValueError("transaction source fields are immutable")
+    if "msisdn" in changed and not is_privacy_redaction:
+        raise ValueError("transaction source fields are immutable")
+    if raw_changed and not is_privacy_redaction:
+        raise ValueError("transaction raw payload is immutable")
 
 
 class TransformationRecord(Base):
@@ -114,9 +168,10 @@ class MerchantMetric(Base):
 
     __tablename__ = "merchant_metrics"
     __table_args__ = (
-        UniqueConstraint("tenant_id", "merchant_id", "granularity", "bucket_start", name="uq_merchant_metric_bucket"),
+        UniqueConstraint("tenant_id", "merchant_id", "currency", "granularity", "bucket_start", name="uq_merchant_metric_bucket_currency"),
         Index("ix_merchant_metrics_tenant_bucket", "tenant_id", "granularity", "bucket_start"),
         CheckConstraint("tenant_id IS NOT NULL AND tenant_id <> ''", name="ck_merchant_metrics_tenant_nonempty"),
+        CheckConstraint("length(currency) = 3 AND currency = upper(currency)", name="ck_merchant_metrics_currency_iso"),
         CheckConstraint("granularity IN ('hour', 'day', 'week')", name="ck_merchant_metrics_granularity"),
         CheckConstraint("transaction_count >= 0", name="ck_merchant_metrics_count_nonnegative"),
         CheckConstraint("failed_transactions >= 0", name="ck_merchant_metrics_failed_nonnegative"),
@@ -127,11 +182,12 @@ class MerchantMetric(Base):
     id = Column(String, primary_key=True, default=lambda: f"metric_{uuid.uuid4().hex}")
     tenant_id = Column(String, nullable=False)
     merchant_id = Column(String, nullable=False)
+    currency = Column(String(3), nullable=False, default="KES", server_default="KES")
     granularity = Column(String(8), nullable=False)
     bucket_start = Column(DateTime(timezone=True), nullable=False)
     transaction_count = Column(Integer, nullable=False, default=0, server_default="0")
-    total_volume = Column(Numeric(20, 2), nullable=False, default=0, server_default="0")
-    average_transaction = Column(Numeric(20, 2), nullable=False, default=0, server_default="0")
+    total_volume = Column(Numeric(21, 3), nullable=False, default=0, server_default="0")
+    average_transaction = Column(Numeric(21, 3), nullable=False, default=0, server_default="0")
     failed_transactions = Column(Integer, nullable=False, default=0, server_default="0")
     reconciled_transactions = Column(Integer, nullable=False, default=0, server_default="0")
     anomaly_count = Column(Integer, nullable=False, default=0, server_default="0")
@@ -257,6 +313,37 @@ class ReconciliationMatch(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
 
+class CustomerAccount(Base):
+    """One account per derived customer x currency; balance = sum of immutable transactions."""
+
+    __tablename__ = "customer_accounts"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "customer_key", "currency", name="uq_customer_accounts_tenant_key_currency"),
+        Index("ix_customer_accounts_tenant_key", "tenant_id", "customer_key"),
+        Index("ix_customer_accounts_tenant_currency", "tenant_id", "currency"),
+        CheckConstraint("tenant_id IS NOT NULL AND tenant_id <> ''", name="ck_customer_accounts_tenant_id_nonempty"),
+        CheckConstraint("length(currency) = 3 AND currency = upper(currency)", name="ck_customer_accounts_currency_iso"),
+        CheckConstraint("status IN ('active', 'suspended', 'closed')", name="ck_customer_accounts_status"),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: f"acct_{uuid.uuid4().hex}")
+    tenant_id = Column(String, nullable=False)
+    customer_key = Column(String(128), nullable=False)
+    currency = Column(String(3), nullable=False, server_default="KES")
+    status = Column(String(16), nullable=False, server_default="active")
+    total = Column(Numeric(19, 3), nullable=False, server_default="0")
+    transaction_count = Column(Integer, nullable=False, server_default="0")
+    first_seen = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    last_seen = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+    internal_ref = Column(String(255), nullable=False)
+
+
 class ReconciliationGroundTruth(Base):
     """Validated expected outcomes used to calculate certification metrics."""
 
@@ -283,6 +370,98 @@ class ReconciliationGroundTruth(Base):
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
+
+class Customer(Base):
+    """Derived customer identity keyed by a tokenized MSISDN (never raw phone data)."""
+
+    __tablename__ = "customers"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "customer_key", name="uq_customers_tenant_key"),
+        Index("ix_customers_tenant_status", "tenant_id", "status"),
+        Index("ix_customers_tenant_key", "tenant_id", "customer_key"),
+        CheckConstraint("tenant_id IS NOT NULL AND tenant_id <> ''", name="ck_customers_tenant_id_nonempty"),
+        CheckConstraint("status IN ('active', 'suspended', 'closed')", name="ck_customers_status"),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: f"cust_{uuid.uuid4().hex}")
+    tenant_id = Column(String, nullable=False)
+    customer_key = Column(String(128), nullable=False)
+    internal_ref = Column(String(255), nullable=False)
+    phone_number = Column(String(16), nullable=False)
+    label = Column(String(64), nullable=False)
+    status = Column(String(16), nullable=False, server_default="active")
+    total_volumes = Column(JSON, nullable=False, server_default="{}")
+    first_seen = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    last_seen = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    transaction_count = Column(Integer, nullable=False, server_default="0")
+    total_amount = Column(Numeric(19, 3), nullable=False, server_default="0")
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class AccountBalance(Base):
+    """Recomputed zero-decimal balance snapshot per customer x currency.
+
+    This is a derived read model: the value is computed from the immutable
+    ``transactions`` ledger on demand, never maintained independently, so the
+    stored total is always provably equal to the source sum.
+    """
+
+    __tablename__ = "account_balances"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "customer_key", "currency", name="uq_account_balances_tenant_key_currency"),
+        Index("ix_account_balances_tenant_currency", "tenant_id", "currency"),
+        Index("ix_account_balances_tenant_key", "tenant_id", "customer_key"),
+        CheckConstraint("tenant_id IS NOT NULL AND tenant_id <> ''", name="ck_account_balances_tenant_id_nonempty"),
+        CheckConstraint("length(currency) = 3 AND currency = upper(currency)", name="ck_account_balances_currency_iso"),
+        CheckConstraint("total >= 0", name="ck_account_balances_total_nonnegative"),
+        CheckConstraint("transaction_count >= 0", name="ck_account_balances_count_nonnegative"),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: f"bal_{uuid.uuid4().hex}")
+    tenant_id = Column(String, nullable=False)
+    customer_key = Column(String(128), nullable=False)
+    currency = Column(String(3), nullable=False, server_default="KES")
+    total = Column(Numeric(19, 2), nullable=False, server_default="0")
+    transaction_count = Column(Integer, nullable=False, server_default="0")
+    computed_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class AccountRelationship(Base):
+    """Observed customer <-> merchant relationship derived from reconciled pairs."""
+
+    __tablename__ = "account_relationships"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "customer_key", "merchant_id", name="uq_account_relationships_tenant_customer_merchant"),
+        Index("ix_account_relationships_tenant_customer", "tenant_id", "customer_key"),
+        Index("ix_account_relationships_tenant_merchant", "tenant_id", "merchant_id"),
+        CheckConstraint("tenant_id IS NOT NULL AND tenant_id <> ''", name="ck_account_relationships_tenant_id_nonempty"),
+        CheckConstraint("length(merchant_id) > 0", name="ck_account_relationships_merchant_nonempty"),
+        CheckConstraint("status IN ('active', 'closed')", name="ck_account_relationships_status"),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: f"rel_{uuid.uuid4().hex}")
+    tenant_id = Column(String, nullable=False)
+    customer_key = Column(String(128), nullable=False)
+    merchant_id = Column(String(255), nullable=False)
+    status = Column(String(16), nullable=False, server_default="active")
+    first_seen = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    last_seen = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    pair_count = Column(Integer, nullable=False, server_default="0")
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
 
 class TransactionEvent(Base):
     """Append-only source and lifecycle history for a financial transaction."""
@@ -414,6 +593,7 @@ class ImportJob(Base):
         CheckConstraint("records_received >= 0", name="ck_import_jobs_received_nonnegative"),
         CheckConstraint("records_valid >= 0", name="ck_import_jobs_valid_nonnegative"),
         CheckConstraint("records_failed >= 0", name="ck_import_jobs_failed_nonnegative"),
+        CheckConstraint("attempts >= 0", name="ck_import_jobs_attempts_nonnegative"),
     )
 
     id = Column(String, primary_key=True)
@@ -425,8 +605,10 @@ class ImportJob(Base):
     records_received = Column(Integer, nullable=False, default=0, server_default="0")
     records_valid = Column(Integer, nullable=False, default=0, server_default="0")
     records_failed = Column(Integer, nullable=False, default=0, server_default="0")
+    attempts = Column(Integer, nullable=False, default=0, server_default="0")
     started_at = Column(DateTime(timezone=True), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=True)
     status = Column(String(16), nullable=False, default="queued", server_default="queued")
     error_summary = Column(JSON, nullable=False, default=list, server_default="[]")
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
@@ -520,11 +702,13 @@ class InternalRecord(Base):
         Index("ix_internal_records_phone", "phone_number"),
         Index("ix_internal_records_synced", "synced_at"),
         CheckConstraint("tenant_id IS NOT NULL AND tenant_id <> ''", name="ck_internal_records_tenant_id_nonempty"),
+        CheckConstraint("length(currency) = 3 AND currency = upper(currency)", name="ck_internal_records_currency_iso"),
     )
 
     internal_ref = Column(String, primary_key=True)
     tenant_id = Column(String, nullable=False, default="default", server_default="default")
-    amount = Column(Numeric(18, 2), nullable=False)
+    amount = Column(Numeric(19, 3), nullable=False)
+    currency = Column(String(3), nullable=False, default="KES", server_default="KES")
     phone_number = Column(String, nullable=False)
     status = Column(String, nullable=False)
     synced_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
@@ -564,6 +748,7 @@ class WebhookDelivery(Base):
         Index("ix_webhook_deliveries_webhook_id", "webhook_id"),
         Index("ix_webhook_deliveries_tenant_webhook", "tenant_id", "webhook_id"),
         Index("ix_webhook_deliveries_created_at", "created_at"),
+        Index("ix_webhook_deliveries_recovery", "status", "updated_at"),
         CheckConstraint("tenant_id IS NOT NULL AND tenant_id <> ''", name="ck_webhook_deliveries_tenant_id_nonempty"),
     )
 
@@ -572,11 +757,17 @@ class WebhookDelivery(Base):
     webhook_id = Column(String, nullable=False)
     event_type = Column(String, nullable=False)
     payload = Column(JSON, nullable=False)
-    status = Column(String, nullable=False)  # success, failed, pending
+    status = Column(String, nullable=False)  # success, failed, pending, processing
     response_status = Column(Integer, nullable=True)
     response_body = Column(Text, nullable=True)
     attempt_count = Column(Integer, default=0)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
     delivered_at = Column(DateTime(timezone=True), nullable=True)
 
 
@@ -1227,6 +1418,7 @@ class TransactionProvenance(Base):
     reconciliation_checked_at = Column(DateTime(timezone=True), nullable=True)
     final_decision = Column(String, nullable=True)
     dq_status = Column(String(16), nullable=False, default="pass")
+    dq_overall_score = Column(Numeric(5, 4), nullable=False, default=1.0)
     dq_completeness = Column(Numeric(5, 4), nullable=False, default=1.0)
     dq_validity = Column(Numeric(5, 4), nullable=False, default=1.0)
     dq_accuracy = Column(Numeric(5, 4), nullable=False, default=1.0)
@@ -1235,6 +1427,7 @@ class TransactionProvenance(Base):
     dq_uniqueness = Column(Numeric(5, 4), nullable=False, default=1.0)
     dq_failures = Column(JSON, nullable=False, default=list)
     dq_warnings = Column(JSON, nullable=False, default=list)
+    dq_checks = Column(JSON, nullable=False, default=list)
     dq_checked_at = Column(DateTime(timezone=True), nullable=False)
     lineage_snapshot = Column(JSON, nullable=False, default=list)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
@@ -1251,6 +1444,13 @@ class QuarantineRecord(Base):
     __tablename__ = "quarantine_records"
     __table_args__ = (
         Index("ix_quarantine_tenant_reason", "tenant_id", "reason"),
+        UniqueConstraint("id", "tenant_id", name="uq_quarantine_records_id_tenant"),
+        UniqueConstraint(
+            "tenant_id",
+            "provider_id",
+            "deduplication_key",
+            name="uq_quarantine_records_deduplication_key",
+        ),
         CheckConstraint("tenant_id IS NOT NULL AND tenant_id <> ''", name="ck_quarantine_tenant_id_nonempty"),
     )
 
@@ -1265,7 +1465,76 @@ class QuarantineRecord(Base):
     payload_sha256 = Column(String(64), nullable=False)
     rejection_context = Column(JSON, nullable=True)
     source_ip = Column(String, nullable=True)
+    deduplication_key = Column(String(64), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class QuarantineRemediation(Base):
+    """Append-only, tenant-scoped audit entry for quarantine remediation."""
+
+    __tablename__ = "quarantine_remediations"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["quarantine_id", "tenant_id"],
+            ["quarantine_records.id", "quarantine_records.tenant_id"],
+            ondelete="RESTRICT",
+            name="fk_quarantine_remediations_quarantine",
+        ),
+        Index(
+            "ix_quarantine_remediations_scope_history",
+            "tenant_id",
+            "quarantine_id",
+            "created_at",
+        ),
+        CheckConstraint(
+            "tenant_id IS NOT NULL AND tenant_id <> ''",
+            name="ck_quarantine_remediations_tenant_id_nonempty",
+        ),
+        CheckConstraint(
+            "action IN ('review_started', 'correction_recorded', "
+            "'replay_requested', 'replay_completed', 'resolved', 'false_positive')",
+            name="ck_quarantine_remediations_action",
+        ),
+        CheckConstraint(
+            "to_status IN ('reviewing', 'corrected', 'replay_pending', "
+            "'resolved', 'false_positive')",
+            name="ck_quarantine_remediations_status",
+        ),
+        CheckConstraint(
+            "(action = 'review_started' AND from_status = 'open' AND to_status = 'reviewing') "
+            "OR (action = 'correction_recorded' AND from_status IN ('open', 'reviewing') "
+            "AND to_status = 'corrected') "
+            "OR (action = 'replay_requested' AND from_status = 'corrected' "
+            "AND to_status = 'replay_pending') "
+            "OR (action = 'replay_completed' AND from_status = 'replay_pending' "
+            "AND to_status = 'resolved') "
+            "OR (action = 'resolved' AND from_status IN "
+            "('open', 'reviewing', 'corrected', 'replay_pending') AND to_status = 'resolved') "
+            "OR (action = 'false_positive' AND from_status IN "
+            "('open', 'reviewing', 'corrected') AND to_status = 'false_positive')",
+            name="ck_quarantine_remediations_transition",
+        ),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: f"qr_{uuid.uuid4().hex}")
+    tenant_id = Column(String, nullable=False)
+    quarantine_id = Column(String, nullable=False)
+    action = Column(String(32), nullable=False)
+    from_status = Column(String(24), nullable=True)
+    to_status = Column(String(24), nullable=False)
+    actor_id = Column(String(128), nullable=False)
+    evidence_sha256 = Column(String(64), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+@event.listens_for(QuarantineRemediation, "before_update")
+def _prevent_quarantine_remediation_update(_mapper, _connection, _record):
+    raise ValueError("quarantine remediation history is append-only")
+
+
+@event.listens_for(QuarantineRemediation, "before_delete")
+def _prevent_quarantine_remediation_delete(_mapper, _connection, _record):
+    raise ValueError("quarantine remediation history is append-only")
 
 
 class TenantUsage(Base):
@@ -1685,18 +1954,20 @@ class ProjectEnvironment(Base):
 
 
 class Settlement(Base):
-    """Tenant-scoped settlement batch aggregating reconciled transactions.
+    """Tenant-scoped internal calculation over caller-supplied settlement lines.
 
     Financial safety: all monetary columns use NUMERIC (Decimal), never Float.
     Every row is tenant-isolated and carries a non-empty tenant_id constraint so
     cross-tenant leakage is impossible at the database layer. The unique
-    (tenant_id, settlement_key) constraint makes settlement creation idempotent
-    per tenant period/currency so retried or replayed jobs cannot double-count.
+    (tenant_id, settlement_key, currency) constraint makes settlement creation
+    idempotent per tenant period and currency. Internal statuses do not verify
+    provider statements or attest that funds were transferred.
     """
 
     __tablename__ = "settlements"
     __table_args__ = (
-        UniqueConstraint("tenant_id", "settlement_key", name="uq_settlements_tenant_key"),
+        UniqueConstraint("tenant_id", "settlement_key", "currency", name="uq_settlements_tenant_key_currency"),
+        UniqueConstraint("id", "tenant_id", name="uq_settlements_id_tenant"),
         Index("ix_settlements_tenant_period", "tenant_id", "period_start", "period_end"),
         Index("ix_settlements_tenant_status", "tenant_id", "status"),
         CheckConstraint("tenant_id IS NOT NULL AND tenant_id <> ''", name="ck_settlements_tenant_id_nonempty"),
@@ -1704,7 +1975,8 @@ class Settlement(Base):
         CheckConstraint("fee_amount >= 0", name="ck_settlements_fee_nonnegative"),
         CheckConstraint("net_amount >= 0", name="ck_settlements_net_nonnegative"),
         CheckConstraint("transaction_count >= 0", name="ck_settlements_count_nonnegative"),
-        CheckConstraint("currency <> ''", name="ck_settlements_currency_nonempty"),
+        CheckConstraint("version >= 1", name="ck_settlements_version_positive"),
+        CheckConstraint("length(currency) = 3 AND currency = upper(currency)", name="ck_settlements_currency_iso"),
         CheckConstraint(
             "status IN ('pending','calculating','calculated','reconciling',"
             "'reconciled','settled','failed','disputed')",
@@ -1716,21 +1988,22 @@ class Settlement(Base):
     id = Column(String, primary_key=True, default=lambda: f"stl_{uuid.uuid4().hex}")
     tenant_id = Column(String, nullable=False)
     settlement_key = Column(String(255), nullable=False)
-    currency = Column(String(8), nullable=False, default="KES", server_default="KES")
+    currency = Column(String(3), nullable=False, default="KES", server_default="KES")
     period_start = Column(DateTime(timezone=True), nullable=False)
     period_end = Column(DateTime(timezone=True), nullable=False)
     status = Column(String(32), nullable=False, default="pending", server_default="pending")
     transaction_count = Column(Integer, nullable=False, default=0, server_default="0")
-    gross_amount = Column(Numeric(18, 2), nullable=False, default=0, server_default="0")
-    fee_amount = Column(Numeric(18, 2), nullable=False, default=0, server_default="0")
-    net_amount = Column(Numeric(18, 2), nullable=False, default=0, server_default="0")
+    gross_amount = Column(Numeric(19, 3), nullable=False, default=0, server_default="0")
+    fee_amount = Column(Numeric(19, 3), nullable=False, default=0, server_default="0")
+    net_amount = Column(Numeric(19, 3), nullable=False, default=0, server_default="0")
     # Reconciliation targets supplied by the provider statement (nullable until
     # a statement is imported). variance_amount is derived: expected - net.
-    expected_net_amount = Column(Numeric(18, 2), nullable=True)
-    variance_amount = Column(Numeric(18, 2), nullable=True)
+    expected_net_amount = Column(Numeric(19, 3), nullable=True)
+    variance_amount = Column(Numeric(19, 3), nullable=True)
     computed_at = Column(DateTime(timezone=True), nullable=True)
     reconciled_at = Column(DateTime(timezone=True), nullable=True)
     settled_at = Column(DateTime(timezone=True), nullable=True)
+    version = Column(Integer, nullable=False, default=1, server_default="1")
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     notes = Column(Text, nullable=True)
@@ -1738,6 +2011,46 @@ class Settlement(Base):
     @property
     def is_terminal(self) -> bool:
         return self.status in {"settled", "failed", "disputed"}
+
+    __mapper_args__ = {"version_id_col": version}
+
+
+class SettlementAuditEvent(Base):
+    """Append-only record of internal settlement calculations and decisions."""
+
+    __tablename__ = "settlement_audit_events"
+    __table_args__ = (
+        CheckConstraint(
+            "tenant_id IS NOT NULL AND tenant_id <> ''",
+            name="ck_settlement_audit_events_tenant_id_nonempty",
+        ),
+        CheckConstraint(
+            "event_type IN ('calculated', 'reconciled', 'status_transition', "
+            "'transition_rejected')",
+            name="ck_settlement_audit_events_type",
+        ),
+        ForeignKeyConstraint(
+            ["settlement_id", "tenant_id"],
+            ["settlements.id", "settlements.tenant_id"],
+            name="fk_settlement_audit_events_settlement_tenant",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_settlement_audit_events_scope_history",
+            "tenant_id",
+            "settlement_id",
+            "created_at",
+        ),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: f"sta_{uuid.uuid4().hex}")
+    tenant_id = Column(String, nullable=False)
+    settlement_id = Column(String, nullable=False)
+    event_type = Column(String(32), nullable=False)
+    from_status = Column(String(32), nullable=True)
+    to_status = Column(String(32), nullable=True)
+    details = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
 
 class SettlementLine(Base):
@@ -1759,9 +2072,9 @@ class SettlementLine(Base):
     transaction_id = Column(String, nullable=False)
     trans_id = Column(String, nullable=True)
     provider = Column(String, nullable=True)
-    amount = Column(Numeric(18, 2), nullable=False, default=0, server_default="0")
-    fee = Column(Numeric(18, 2), nullable=False, default=0, server_default="0")
-    net = Column(Numeric(18, 2), nullable=False, default=0, server_default="0")
+    amount = Column(Numeric(19, 3), nullable=False, default=0, server_default="0")
+    fee = Column(Numeric(19, 3), nullable=False, default=0, server_default="0")
+    net = Column(Numeric(19, 3), nullable=False, default=0, server_default="0")
     status = Column(String(32), nullable=False, default="included", server_default="included")
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
@@ -1777,12 +2090,22 @@ class ScheduledJob(Base):
     __tablename__ = "scheduled_jobs"
     __table_args__ = (
         UniqueConstraint("tenant_id", "job_key", name="uq_scheduled_jobs_tenant_key"),
+        UniqueConstraint("id", "tenant_id", name="uq_scheduled_jobs_id_tenant"),
         Index("ix_scheduled_jobs_due", "enabled", "next_run_at"),
         Index("ix_scheduled_jobs_tenant_task", "tenant_id", "task_name"),
         CheckConstraint("tenant_id IS NOT NULL AND tenant_id <> ''", name="ck_scheduled_jobs_tenant_id_nonempty"),
         CheckConstraint("interval_seconds > 0", name="ck_scheduled_jobs_interval_positive"),
         CheckConstraint("run_count >= 0", name="ck_scheduled_jobs_run_count_nonnegative"),
         CheckConstraint("failure_count >= 0", name="ck_scheduled_jobs_failure_count_nonnegative"),
+        CheckConstraint("max_attempts BETWEEN 1 AND 5", name="ck_scheduled_jobs_max_attempts"),
+        CheckConstraint(
+            "retry_backoff_seconds BETWEEN 1 AND 3600",
+            name="ck_scheduled_jobs_retry_backoff",
+        ),
+        CheckConstraint(
+            "timeout_seconds IS NULL OR timeout_seconds BETWEEN 1 AND 3600",
+            name="ck_scheduled_jobs_timeout",
+        ),
     )
 
     id = Column(String, primary_key=True, default=lambda: f"sched_{uuid.uuid4().hex}")
@@ -1792,13 +2115,285 @@ class ScheduledJob(Base):
     interval_seconds = Column(Integer, nullable=False)
     enabled = Column(Boolean, nullable=False, default=True, server_default="true")
     next_run_at = Column(DateTime(timezone=True), nullable=True)
+    retry_at = Column(DateTime(timezone=True), nullable=True)
     last_run_at = Column(DateTime(timezone=True), nullable=True)
     locked_until = Column(DateTime(timezone=True), nullable=True)
     lock_owner = Column(String(255), nullable=True)
     run_count = Column(Integer, nullable=False, default=0, server_default="0")
     failure_count = Column(Integer, nullable=False, default=0, server_default="0")
+    max_attempts = Column(Integer, nullable=False, default=3, server_default="3")
+    retry_backoff_seconds = Column(Integer, nullable=False, default=30, server_default="30")
+    timeout_seconds = Column(Integer, nullable=True)
     last_error = Column(Text, nullable=True)
     payload = Column(JSON, nullable=False, default=dict, server_default="{}")
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
+
+class ScheduledJobRun(Base):
+    """Tenant-scoped durable record for each attempt of a scheduled occurrence."""
+
+    __tablename__ = "scheduled_job_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "job_id",
+            "tenant_id",
+            "scheduled_for",
+            "attempt_number",
+            name="uq_scheduled_job_runs_occurrence_attempt",
+        ),
+        ForeignKeyConstraint(
+            ["job_id", "tenant_id"],
+            ["scheduled_jobs.id", "scheduled_jobs.tenant_id"],
+            name="fk_scheduled_job_runs_job_tenant",
+        ),
+        ForeignKeyConstraint(
+            ["backfill_id", "tenant_id"],
+            ["scheduled_job_backfills.id", "scheduled_job_backfills.tenant_id"],
+            name="fk_scheduled_job_runs_backfill_tenant",
+        ),
+        Index("ix_scheduled_job_runs_tenant_job_started", "tenant_id", "job_key", "started_at"),
+        Index("ix_scheduled_job_runs_status_started", "status", "started_at"),
+        CheckConstraint(
+            "tenant_id IS NOT NULL AND tenant_id <> ''",
+            name="ck_scheduled_job_runs_tenant_id_nonempty",
+        ),
+        CheckConstraint(
+            "attempt_number BETWEEN 1 AND 5",
+            name="ck_scheduled_job_runs_attempt_number",
+        ),
+        CheckConstraint(
+            "status IN ('running', 'interrupted', 'failed', 'succeeded')",
+            name="ck_scheduled_job_runs_status",
+        ),
+        CheckConstraint(
+            "trigger_type IN ('scheduled', 'backfill')",
+            name="ck_scheduled_job_runs_trigger_type",
+        ),
+        CheckConstraint(
+            "(trigger_type = 'scheduled' AND backfill_id IS NULL) OR "
+            "(trigger_type = 'backfill' AND backfill_id IS NOT NULL)",
+            name="ck_scheduled_job_runs_backfill_reference",
+        ),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: f"jobrun_{uuid.uuid4().hex}")
+    job_id = Column(String, nullable=False)
+    tenant_id = Column(String, nullable=False)
+    job_key = Column(String(255), nullable=False)
+    scheduled_for = Column(DateTime(timezone=True), nullable=False)
+    attempt_number = Column(Integer, nullable=False)
+    status = Column(String(16), nullable=False)
+    trigger_type = Column(String(16), nullable=False, default="scheduled", server_default="scheduled")
+    backfill_id = Column(String, nullable=True)
+    worker_id = Column(String(255), nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    error_type = Column(String(255), nullable=True)
+    resolution_by = Column(String(255), nullable=True)
+    resolution_reason = Column(Text, nullable=True)
+
+
+class ScheduledJobDependency(Base):
+    """Tenant-local dependency edge between two scheduled jobs."""
+
+    __tablename__ = "scheduled_job_dependencies"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["job_id", "tenant_id"],
+            ["scheduled_jobs.id", "scheduled_jobs.tenant_id"],
+            name="fk_scheduled_job_dependencies_job_tenant",
+        ),
+        ForeignKeyConstraint(
+            ["depends_on_job_id", "tenant_id"],
+            ["scheduled_jobs.id", "scheduled_jobs.tenant_id"],
+            name="fk_scheduled_job_dependencies_parent_tenant",
+        ),
+        CheckConstraint("job_id <> depends_on_job_id", name="ck_scheduled_job_dependencies_not_self"),
+        Index("ix_scheduled_job_dependencies_parent", "tenant_id", "depends_on_job_id"),
+    )
+
+    tenant_id = Column(String, primary_key=True)
+    job_id = Column(String, primary_key=True)
+    depends_on_job_id = Column(String, primary_key=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class ScheduledJobBackfill(Base):
+    """Auditable, idempotent historical execution request for one scheduled job."""
+
+    __tablename__ = "scheduled_job_backfills"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "job_id",
+            "idempotency_key",
+            name="uq_scheduled_job_backfills_idempotency",
+        ),
+        UniqueConstraint("id", "tenant_id", name="uq_scheduled_job_backfills_id_tenant"),
+        ForeignKeyConstraint(
+            ["job_id", "tenant_id"],
+            ["scheduled_jobs.id", "scheduled_jobs.tenant_id"],
+            name="fk_scheduled_job_backfills_job_tenant",
+        ),
+        CheckConstraint(
+            "status IN ('queued', 'running', 'retrying', 'succeeded', 'failed', 'interrupted')",
+            name="ck_scheduled_job_backfills_status",
+        ),
+        CheckConstraint("attempt_count BETWEEN 0 AND 5", name="ck_scheduled_job_backfills_attempt_count"),
+        CheckConstraint("end_at > start_at", name="ck_scheduled_job_backfills_window"),
+        Index("ix_scheduled_job_backfills_due", "tenant_id", "status", "retry_at"),
+        Index("ix_scheduled_job_backfills_job_created", "tenant_id", "job_id", "created_at"),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: f"backfill_{uuid.uuid4().hex}")
+    tenant_id = Column(String, nullable=False)
+    job_id = Column(String, nullable=False)
+    job_key = Column(String(255), nullable=False)
+    start_at = Column(DateTime(timezone=True), nullable=False)
+    end_at = Column(DateTime(timezone=True), nullable=False)
+    idempotency_key = Column(String(255), nullable=False)
+    status = Column(String(16), nullable=False, default="queued", server_default="queued")
+    attempt_count = Column(Integer, nullable=False, default=0, server_default="0")
+    max_attempts = Column(Integer, nullable=False, default=3, server_default="3")
+    retry_at = Column(DateTime(timezone=True), nullable=True)
+    requested_by = Column(String(255), nullable=False)
+    reason = Column(Text, nullable=False)
+    error_type = Column(String(255), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class Ledger(Base):
+    """A double-entry ledger: the top-level books for one tenant product scope."""
+
+    __tablename__ = "ledgers"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "slug", name="uq_ledgers_tenant_slug"),
+        UniqueConstraint("tenant_id", "id", name="uq_ledgers_tenant_id"),
+        Index("ix_ledgers_tenant_status", "tenant_id", "status"),
+        CheckConstraint("tenant_id IS NOT NULL AND tenant_id <> ''", name="ck_ledgers_tenant_id_nonempty"),
+        CheckConstraint("status IN ('active', 'archived')", name="ck_ledgers_status"),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: f"ledger_{uuid.uuid4().hex[:12]}")
+    tenant_id = Column(String, nullable=False)
+    slug = Column(String(80), nullable=False)
+    name = Column(String(120), nullable=False)
+    description = Column(Text, nullable=True)
+    status = Column(String(16), nullable=False, default="active", server_default="active")
+    version = Column(Integer, nullable=False, default=1, server_default="1")
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __mapper_args__ = {"version_id_col": version}
+
+
+class LedgerAccount(Base):
+    """A balance holder inside one Ledger (user wallet, operating, fees)."""
+
+    __tablename__ = "ledger_accounts"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "ledger_id", "code", name="uq_ledger_accounts_ledger_code"),
+        UniqueConstraint("tenant_id", "id", name="uq_ledger_accounts_tenant_id"),
+        UniqueConstraint("tenant_id", "ledger_id", "id", name="uq_ledger_accounts_ledger_id"),
+        ForeignKeyConstraint(
+            ["ledger_id", "tenant_id"],
+            ["ledgers.id", "ledgers.tenant_id"],
+            name="fk_ledger_accounts_ledger_tenant",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_ledger_accounts_scope", "tenant_id", "ledger_id", "status"),
+        CheckConstraint("tenant_id IS NOT NULL AND tenant_id <> ''", name="ck_ledger_accounts_tenant_id_nonempty"),
+        CheckConstraint("status IN ('active', 'suspended', 'closed')", name="ck_ledger_accounts_status"),
+        CheckConstraint("normal_balance IN ('debit', 'credit')", name="ck_ledger_accounts_normal_balance"),
+        CheckConstraint("length(currency) = 3 AND currency = upper(currency)", name="ck_ledger_accounts_currency_iso"),
+        CheckConstraint("lock_version >= 1", name="ck_ledger_accounts_lock_version_positive"),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: f"lacc_{uuid.uuid4().hex[:12]}")
+    tenant_id = Column(String, nullable=False)
+    ledger_id = Column(String, nullable=False)
+    code = Column(String(80), nullable=False)
+    name = Column(String(120), nullable=False)
+    currency = Column(String(3), nullable=False, default="KES", server_default="KES")
+    normal_balance = Column(String(8), nullable=False, default="debit", server_default="debit")
+    status = Column(String(16), nullable=False, default="active", server_default="active")
+    lock_version = Column(Integer, nullable=False, default=1, server_default="1")
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __mapper_args__ = {"version_id_col": lock_version}
+
+
+class LedgerTransaction(Base):
+    """One atomic financial event: >=2 entries balancing per currency."""
+
+    __tablename__ = "ledger_transactions"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "ledger_id", "external_id", name="uq_ledger_tx_ledger_external"),
+        UniqueConstraint("tenant_id", "id", name="uq_ledger_tx_tenant_id"),
+        UniqueConstraint("tenant_id", "ledger_id", "id", name="uq_ledger_tx_ledger_id"),
+        ForeignKeyConstraint(
+            ["ledger_id", "tenant_id"],
+            ["ledgers.id", "ledgers.tenant_id"],
+            name="fk_ledger_tx_ledger_tenant",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_ledger_tx_scope_status", "tenant_id", "ledger_id", "status", "effective_at"),
+        CheckConstraint("tenant_id IS NOT NULL AND tenant_id <> ''", name="ck_ledger_tx_tenant_id_nonempty"),
+        CheckConstraint("status IN ('pending', 'posted', 'voided')", name="ck_ledger_tx_status"),
+        CheckConstraint("version >= 1", name="ck_ledger_tx_version_positive"),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: f"ltxn_{uuid.uuid4().hex[:12]}")
+    tenant_id = Column(String, nullable=False)
+    ledger_id = Column(String, nullable=False)
+    external_id = Column(String(180), nullable=False)
+    description = Column(Text, nullable=True)
+    status = Column(String(16), nullable=False, default="pending", server_default="pending")
+    effective_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    posted_at = Column(DateTime(timezone=True), nullable=True)
+    version = Column(Integer, nullable=False, default=1, server_default="1")
+    ledger_metadata = Column("metadata", JSON, nullable=False, default=dict, server_default="{}")
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __mapper_args__ = {"version_id_col": version}
+
+
+class LedgerEntry(Base):
+    """One debit or credit line of a LedgerTransaction against one account."""
+
+    __tablename__ = "ledger_entries"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_ledger_entries_tenant_id"),
+        ForeignKeyConstraint(
+            ["tenant_id", "ledger_id", "ledger_transaction_id"],
+            ["ledger_transactions.tenant_id", "ledger_transactions.ledger_id", "ledger_transactions.id"],
+            name="fk_ledger_entries_tx_ledger_tenant",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "ledger_id", "ledger_account_id"],
+            ["ledger_accounts.tenant_id", "ledger_accounts.ledger_id", "ledger_accounts.id"],
+            name="fk_ledger_entries_account_ledger_tenant",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_ledger_entries_tx", "tenant_id", "ledger_transaction_id"),
+        Index("ix_ledger_entries_account", "tenant_id", "ledger_account_id"),
+        CheckConstraint("tenant_id IS NOT NULL AND tenant_id <> ''", name="ck_ledger_entries_tenant_id_nonempty"),
+        CheckConstraint("direction IN ('debit', 'credit')", name="ck_ledger_entries_direction"),
+        CheckConstraint("amount_minor > 0", name="ck_ledger_entries_amount_positive"),
+        CheckConstraint("length(currency) = 3 AND currency = upper(currency)", name="ck_ledger_entries_currency_iso"),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: f"lent_{uuid.uuid4().hex[:12]}")
+    tenant_id = Column(String, nullable=False)
+    ledger_id = Column(String, nullable=False)
+    ledger_transaction_id = Column(String, nullable=False)
+    ledger_account_id = Column(String, nullable=False)
+    direction = Column(String(8), nullable=False)
+    amount_minor = Column(Integer, nullable=False)
+    currency = Column(String(3), nullable=False, default="KES", server_default="KES")
+    memo = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)

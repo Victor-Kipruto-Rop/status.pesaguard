@@ -25,6 +25,11 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.mark.integration
 def test_alertmanager_routes_a_test_alert_to_the_pesa_guard_webhook():
+    webhook_secret = os.getenv("PESAGUARD_ALERTMANAGER_WEBHOOK_SECRET", "")
+    assert len(webhook_secret.encode("utf-8")) >= 32, (
+        "set PESAGUARD_ALERTMANAGER_WEBHOOK_SECRET to the receiver's "
+        "configured secret before running the live Alertmanager check"
+    )
     alertmanager_url = os.getenv("PESAGUARD_LIVE_ALERTMANAGER_URL", "http://localhost:9093").rstrip("/")
     gateway_url = os.getenv("PESAGUARD_LIVE_GATEWAY_URL", "https://api.pesaguard.co.ke").rstrip("/")
     timeout = float(os.getenv("PESAGUARD_LIVE_TIMEOUT_SECONDS", "15"))
@@ -63,9 +68,10 @@ def test_alertmanager_routes_a_test_alert_to_the_pesa_guard_webhook():
     webhook_probe = requests.post(
         f"{gateway_url}/ops/alerts",
         json={"alerts": [{"labels": {"alertname": alert_name, "severity": "critical"}, "status": "firing"}]},
+        headers={"Authorization": "Bearer " + webhook_secret},
         timeout=timeout,
     )
     assert webhook_probe.status_code == 200, "gateway /ops/alerts receiver did not accept the delivery"
-    payload = webhook_probe.get_json()
+    payload = webhook_probe.json()
     assert payload.get("status") == "accepted"
     assert payload.get("alerts") == 1

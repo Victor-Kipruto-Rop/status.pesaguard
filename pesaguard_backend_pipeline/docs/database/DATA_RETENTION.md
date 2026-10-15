@@ -1,64 +1,64 @@
 # PesaGuard Data Retention
 
-## Retention Policy
-- Transaction payloads and reconciliation records: retain for 90 days.
-- Discrepancy records and incident history: retain for 180 days.
-- Audit log entries: retain for 365 days.
-- Application logs: retain according to the logging/storage provider policy, but keep at least 90 days of operational logs for incident investigation.
+## Authoritative policy
 
-> Note: These retention periods are placeholders. Confirm final retention periods with customers and compliance requirements.
+[`retention_policy.json`](../../retention_policy.json) is the configured policy
+source. Its values and environment overrides are **not evidence of legal,
+contractual, or customer approval**. The named policy owners must approve each
+effective period before production cleanup is enabled. The discrepancy cleanup
+period must be set through an approved `discrepancies` category or the
+`PESAGUARD_RETENTION_DAYS_DISCREPANCIES` deployment override. While neither is
+configured, cleanup fails closed for discrepancies and reconciliation outbox
+records; it does not inherit the transaction period. Obtain owner approval and
+bind the exact effective value to each cleanup approval before enabling those
+deletions.
 
-## What is retained
-- Raw transaction callbacks from M-Pesa.
-- Matched and unmatched transaction reconciliation records.
-- Discrepancy details and resolution history.
-- Audit trails of changes to discrepancies and settings.
+Do not copy retention periods into SQL, a second configuration file, or an
+operator command. The cleanup process hashes the effective policy and its
+active cleanup windows; the external approval must match that exact hash and
+tenant scope.
 
-## Deletion / Archival Process
-### Automatic retention enforcement
-- Run a periodic cleanup job that deletes records older than the configured retention window.
-- Example SQL cleanup for Postgres:
-  ```sql
-  DELETE FROM discrepancy WHERE detected_at < NOW() - INTERVAL '180 days';
-  DELETE FROM transaction WHERE created_at < NOW() - INTERVAL '90 days';
-  DELETE FROM action_audit WHERE created_at < NOW() - INTERVAL '365 days';
-  ```
+## Cleanup controls
 
-### Suggested archive approach
-- If historical data needs to be preserved beyond retention, export older records to object storage before deletion.
-- Keep the archive file naming convention like `pesaguard-archive-YYYY-MM-DD.json`.
+Destructive cleanup is available only through
+[`retention_cleanup.py`](../../retention_cleanup.py) with the external
+one-time-approval workflow in
+[`RETENTION_PROCEDURES.md`](../operations/RETENTION_PROCEDURES.md). Do not
+purge data with ad-hoc SQL. Cleanup is tenant-scoped when a tenant is supplied,
+deletes in bounded batches, honors active legal holds, and writes append-only
+audit events. A failed run can have committed earlier batches; review its run
+audit before retrying.
 
-## Tenant Offboarding
-### Offboarding process
-1. Verify the tenant has no active reconciliation workloads.
-2. Export tenant transaction and discrepancy data:
-   - `tenant_id`
-   - transaction records
-   - discrepancy records
-   - audit trail entries
-3. Delete tenant data from the production database.
-4. Confirm deletion and provide a copy of the exported data to the customer if requested.
+Transaction rows are eligible only when both `archived_at` and a non-empty
+`archive_object_key` are present. Those columns alone do not prove that the
+archive object is retrievable or intact. The current `ArchiveManager` uses a
+local object-store implementation and is not wired as a production archival
+worker or as a verifier for the transaction purge path. Until a production
+object-store adapter, durable manifest verification, and end-to-end archive
+workflow are configured and exercised, keep destructive transaction cleanup
+disabled.
 
-### Grace period
-- Hold tenant data for 30 days after churn for recovery or export requests.
-- After the grace period, purge the tenant data permanently.
+Published outbox records, expired processed-transaction records, discrepancies,
+and dead letters have separate cleanup code paths. Audit records remain
+append-only; cleanup reports eligible audit archival candidates and does not
+delete them.
 
-### Offboarding verification
-- Confirm no remaining records exist for the tenant:
-  ```sql
-  SELECT count(*) FROM discrepancy WHERE tenant_id = 'tenant-a';
-  SELECT count(*) FROM transaction WHERE tenant_id = 'tenant-a';
-  SELECT count(*) FROM action_audit WHERE tenant_id = 'tenant-a';
-  ```
+## Tenant offboarding and erasure
 
-## Audit Log Retention
-- Keep audit logs separately from operational reconciliation data.
-- Suggested audit retention: 365 days.
-- Example cleanup command:
-  ```sql
-  DELETE FROM action_audit WHERE created_at < NOW() - INTERVAL '365 days';
-  ```
+Tenant export, legal-hold review, authorization, retention approval, and
+deletion must use the approved offboarding workflow. This document does not
+define a grace period or authorize direct database deletion. Verify tenant
+scope and dependent records, preserve required financial and audit evidence,
+and record the request, decision, execution, and verification in the audit
+trail.
 
-## Notes
-- If a tenant requests full deletion, handle the export and deletion within the 30-day grace period.
-- Document any retention exceptions in the customer agreement.
+## Production gates
+
+- Record owner approval for every effective retention period, including
+  discrepancies and raw provider evidence.
+- Verify the external approval authority's identity, review, scope binding,
+  one-time consumption, availability, and alerting controls.
+- Connect the archival writer and verifier to the production object store;
+  prove integrity and retrieval before enabling archive-before-purge.
+- Exercise a tenant-scoped dry run and a reviewed isolated cleanup/restore
+  drill. Verify legal holds and audit evidence before staged rollout.

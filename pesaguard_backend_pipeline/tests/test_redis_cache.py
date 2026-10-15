@@ -1,4 +1,7 @@
 """Test redis caching for duplicate check lookup."""
+import hashlib
+import hmac
+import json
 import sys
 import os
 import pytest
@@ -13,6 +16,7 @@ def webhook_client(monkeypatch):
         monkeypatch.setenv("DATABASE_URL", f"sqlite:///{os.path.join(tmpdir, 'pesaguard_test.db')}")
         monkeypatch.setenv("DARAJA_ALLOWED_IPS", "127.0.0.1")
         monkeypatch.setenv("DARAJA_SHARED_SECRET", "test-secret")
+        monkeypatch.setenv("DARAJA_WEBHOOK_SIGNING_SECRET", "test-signing-secret")
         monkeypatch.setenv("TENANT_ID", "tenant-test")
 
         # Import and reload app with test DB
@@ -46,6 +50,21 @@ def webhook_client(monkeypatch):
             nested_store = getattr(getattr(getattr(app_2, "batch_import_service", None), "ingestion_service", None), "event_store", None)
             if nested_store is not None and hasattr(nested_store, "engine") and nested_store.engine is not None:
                 nested_store.engine.dispose()
+
+
+def _post_signed(client, payload):
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    signature = hmac.new(b"test-signing-secret", body, hashlib.sha256).hexdigest()
+    return client.post(
+        "/webhook/mpesa/confirmation",
+        data=body,
+        content_type="application/json",
+        headers={
+            "X-Daraja-Shared-Secret": "test-secret",
+            "X-Daraja-Signature": signature,
+        },
+    )
+
 
 def test_redis_cache_used(webhook_client, monkeypatch):
     """Test that Redis cache is used for duplicate detection."""
@@ -81,20 +100,12 @@ def test_redis_cache_used(webhook_client, monkeypatch):
     }
 
     # First request
-    r1 = webhook_client.post(
-        "/webhook/mpesa/confirmation",
-        json=payload,
-        headers={"X-Daraja-Shared-Secret": "test-secret"}
-    )
+    r1 = _post_signed(webhook_client, payload)
     assert r1.status_code == 200
 
     assert "processed_trans_id:REDIS-123" in fake_redis_instance.store
 
     # Second request should hit redis and return duplicate accepted
-    r2 = webhook_client.post(
-        "/webhook/mpesa/confirmation",
-        json=payload,
-        headers={"X-Daraja-Shared-Secret": "test-secret"}
-    )
+    r2 = _post_signed(webhook_client, payload)
     assert r2.status_code == 200
     assert "duplicate ignored" in r2.json["ResultDesc"].lower()

@@ -8,13 +8,14 @@ and fallback thread-safe in-memory Token Bucket algorithm for standalone single-
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 import time
 from functools import wraps
 from typing import Any, Dict, Optional, Tuple
 
-from flask import Response, g, jsonify, request
+from flask import current_app, g, jsonify, request
 from environment import runtime_environment
 from security_helpers import get_client_ip
 
@@ -158,7 +159,7 @@ class TokenBucketRateLimiter:
 
             self.buckets[bucket_key] = (tokens, current_time)
             needed = tokens_required - tokens
-            reset_in = int(needed / self.refill_rate) + 1
+            reset_in = math.ceil(needed / self.refill_rate)
             return False, {
                 "remaining": 0,
                 "limit": self.max_tokens_per_minute,
@@ -498,13 +499,13 @@ def rate_limit(
                 resp.headers["X-RateLimit-Reset"] = str(retry_after)
                 return resp
 
-            response = func(*args, **kwargs)
-
-            # Attach telemetry headers to valid responses
-            if isinstance(response, Response):
-                response.headers["X-RateLimit-Limit"] = str(status.get("limit", max_requests_per_minute))
-                response.headers["X-RateLimit-Remaining"] = str(status.get("remaining", 0))
-
+            response = current_app.make_response(func(*args, **kwargs))
+            response.headers["X-RateLimit-Limit"] = str(
+                status.get("limit", max_requests_per_minute)
+            )
+            response.headers["X-RateLimit-Remaining"] = str(
+                status.get("remaining", 0)
+            )
             return response
 
         return decorated_function

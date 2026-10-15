@@ -171,6 +171,14 @@ def _validate_payload_schema(payload: Dict[str, Any]) -> None:
     """Enforce strict runtime validation for mandatory event fields before dispatching."""
     if not isinstance(payload, dict):
         raise ValueError("Event payload must be a JSON object dictionary.")
+
+    tenant_id = payload.get("tenant_id") or payload.get("TenantID")
+    if not isinstance(tenant_id, str) or not tenant_id.strip():
+        raise ValueError("Event payload must include a tenant_id.")
+    from tenant_context import tenant_scope
+
+    with tenant_scope(tenant_id.strip()):
+        pass
     
     if payload.get("event_id") and payload.get("event_type") and payload.get("event_version"):
         from event_bus import EventEnvelope
@@ -194,13 +202,18 @@ def _fallback_to_dead_letter_queue(topic: str, payload: Dict[str, Any], error_re
         import uuid
         from datetime import datetime, timezone
 
-        tenant_id = payload.get("tenant_id") or payload.get("TenantID") or "default"
+        tenant_id = payload.get("tenant_id") or payload.get("TenantID")
+        if not isinstance(tenant_id, str) or not tenant_id.strip():
+            tenant_id = os.getenv("PESAGUARD_UNATTRIBUTED_TENANT_ID", "pesaguard-unattributed")
+        tenant_id = tenant_id.strip()
         trans_id = payload.get("TransID") or payload.get("trans_id") or payload.get("aggregate_id") or payload.get("event_id") or "unknown"
         event_type = payload.get("event_type") or "legacy.event"
         event_id = payload.get("event_id") or "unknown"
         event_key = hashlib.sha256(f"{tenant_id}:{trans_id}:{topic}:{error_reason[:200]}".encode("utf-8")).hexdigest()
         
-        with SessionLocal() as session:
+        from tenant_context import tenant_scope
+
+        with tenant_scope(tenant_id), SessionLocal() as session:
             dlq_record = DeadLetter(
                 id=f"dlq_{event_key[:24]}",
                 tenant_id=tenant_id,
@@ -279,7 +292,10 @@ def publish_transaction_event(
     if correlation_id:
         msg_headers.append(("correlation_id", correlation_id.encode("utf-8")))
     
-    tenant_id = str(payload.get("tenant_id") or payload.get("TenantID") or "default")
+    tenant_id = payload.get("tenant_id") or payload.get("TenantID")
+    if not isinstance(tenant_id, str) or not tenant_id.strip():
+        raise ValueError("Event payload must include a tenant_id.")
+    tenant_id = tenant_id.strip()
     msg_headers.append(("tenant_id", tenant_id.encode("utf-8")))
 
     trans_id = payload.get("TransID") or payload.get("trans_id") or payload.get("aggregate_id") or payload.get("event_id")

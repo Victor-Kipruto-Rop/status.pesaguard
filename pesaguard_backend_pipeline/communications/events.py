@@ -145,8 +145,14 @@ def publish_status_event(payload: Mapping[str, Any], topic: str = NOTIFICATION_S
 
         from ..producer import _producer_manager
 
+        tenant_id = payload.get("tenant_id")
+        if not isinstance(tenant_id, str) or not tenant_id.strip():
+            logging.getLogger("pesaguard.communications").error(
+                "notification status event missing tenant_id; refusing Kafka publication"
+            )
+            return False
+        tenant_id = tenant_id.strip()
         producer = _producer_manager.get_producer()
-        tenant_id = str(payload.get("tenant_id") or "default")
         key = str(payload.get("notification_id") or "").encode("utf-8") or None
         producer.send(topic, key=key, value=dict(payload), headers=[("tenant_id", tenant_id.encode("utf-8"))])
         return True

@@ -73,6 +73,11 @@ def test_restore_drill_reports_validation_result(tmp_path, monkeypatch):
     output = tmp_path / "restore-drill.json"
     monkeypatch.setattr(restore_drill.subprocess, "run", lambda *args, **kwargs: type("Result", (), {"returncode": 0, "stderr": ""})())
     monkeypatch.setattr(restore_drill.validate_restore, "validate", lambda _url: {"status": "passed", "counts": {"transactions": 1}})
+    monkeypatch.setattr(
+        restore_drill.restore_safety,
+        "validate_restore_target",
+        lambda *args, **kwargs: "localhost:5432/isolated",
+    )
 
     result = restore_drill.run_restore_drill(backup, "postgresql://restore:secret@localhost/isolated", output)
 

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Sequence
 
+from normalization import NormalizationError, currency_quantum, normalize_amount, normalize_currency
 from purchase_orders import LedgerEntry, PurchaseOrder
 
 
@@ -97,8 +98,8 @@ class LedgerMatcher:
             errors.append("missing_po_number")
         if order is not None and order.amount is None:
             errors.append("missing_amount")
-        elif order is not None and order.amount is not None and order.amount <= 0:
-            errors.append("invalid_amount")
+        elif order is not None and order.amount is not None:
+            errors.extend(self._money_errors(order.amount, order.currency))
         if order is not None and order.phone_number and not order.phone_number.startswith("+254"):
             warnings.append("non_standard_phone_format")
         return ValidationReport("validated" if not errors else "rejected", tuple(errors), tuple(warnings))
@@ -110,18 +111,36 @@ class LedgerMatcher:
             errors.append("missing_entry_id")
         if entry is not None and entry.amount is None:
             errors.append("missing_amount")
-        elif entry is not None and entry.amount is not None and entry.amount <= 0:
-            errors.append("invalid_amount")
+        elif entry is not None and entry.amount is not None:
+            errors.extend(self._money_errors(entry.amount, entry.currency))
         if entry is not None and entry.phone_number and not entry.phone_number.startswith("+254"):
             warnings.append("non_standard_phone_format")
         return ValidationReport("validated" if not errors else "rejected", tuple(errors), tuple(warnings))
 
     @staticmethod
-    def _dedupe_key(order: PurchaseOrder, entry: LedgerEntry) -> tuple[str, str, str]:
+    def _money_errors(amount: Decimal, currency: str) -> list[str]:
+        try:
+            normalized_currency = normalize_currency(currency)
+        except NormalizationError:
+            return ["invalid_currency"]
+        try:
+            normalize_amount(amount, currency=normalized_currency)
+        except NormalizationError:
+            return ["invalid_amount"]
+        return []
+
+    @staticmethod
+    def _dedupe_key(order: PurchaseOrder, entry: LedgerEntry) -> tuple[str, str, str, str, str]:
+        order_currency = normalize_currency(order.currency)
+        entry_currency = normalize_currency(entry.currency)
+        order_amount = normalize_amount(order.amount, currency=order_currency)
+        entry_amount = normalize_amount(entry.amount, currency=entry_currency)
         return (
             (order.reference or order.po_number or "").upper(),
             (entry.reference or entry.entry_id or "").upper(),
-            str((order.amount or Decimal("0"), entry.amount or Decimal("0"))),
+            order_currency,
+            entry_currency,
+            str((order_amount, entry_amount)),
         )
 
     def match_one(self, order: PurchaseOrder, ledger_entries: Sequence[LedgerEntry]) -> dict[str, Any] | None:
@@ -142,7 +161,7 @@ class LedgerMatcher:
             }
 
         best = None
-        seen_pairs: set[tuple[str, str, str]] = set()
+        seen_pairs: set[tuple[str, str, str, str, str]] = set()
         for entry in ledger_entries:
             if entry is None:
                 continue
@@ -175,7 +194,7 @@ class LedgerMatcher:
 
     def match_many(self, purchase_orders: Sequence[PurchaseOrder], ledger_entries: Sequence[LedgerEntry]) -> list[dict[str, Any]]:
         matches: list[dict[str, Any]] = []
-        seen_order_pairs: set[tuple[str, str, str]] = set()
+        seen_order_pairs: set[tuple[str, str, str, str, str]] = set()
         for order in purchase_orders:
             if order is None:
                 continue
@@ -265,6 +284,19 @@ class LedgerMatcher:
         return records
 
     def _score(self, order: PurchaseOrder, entry: LedgerEntry) -> tuple[int, list[str]]:
+        try:
+            order_currency = normalize_currency(order.currency)
+            entry_currency = normalize_currency(entry.currency)
+        except NormalizationError:
+            return 0, ["invalid_currency"]
+        if order_currency != entry_currency:
+            return 0, ["currency_mismatch"]
+        try:
+            order_amount = Decimal(normalize_amount(order.amount, currency=order_currency))
+            entry_amount = Decimal(normalize_amount(entry.amount, currency=entry_currency))
+        except NormalizationError:
+            return 0, ["invalid_amount"]
+
         reasons: list[str] = []
         score = 0
 
@@ -281,14 +313,13 @@ class LedgerMatcher:
             score += 20
             reasons.append("po_reference")
 
-        if order.amount is not None and entry.amount is not None:
-            delta = abs(entry.amount - order.amount)
-            if delta == 0:
-                score += 35
-                reasons.append("amount")
-            elif delta <= self.tolerance_amount:
-                score += 18
-                reasons.append("amount_tolerance")
+        delta = abs(entry_amount - order_amount)
+        if delta == 0:
+            score += 35
+            reasons.append("amount")
+        elif delta <= max(currency_quantum(order_currency), self.tolerance_amount):
+            score += 18
+            reasons.append("amount_tolerance")
 
         if order.phone_number and entry.phone_number and order.phone_number == entry.phone_number:
             score += 15

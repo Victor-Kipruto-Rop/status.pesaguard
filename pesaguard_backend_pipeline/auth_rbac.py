@@ -467,6 +467,7 @@ class AuthRBAC:
             "read:metrics",
             "send:communications",
             "read:communications",
+            "manage:communications",
             "export:communications",
             "manage:api_keys",
             "manage:mfa",
@@ -498,6 +499,7 @@ class AuthRBAC:
             "read:metrics",
             "send:communications",
             "read:communications",
+            "manage:communications",
             "export:communications",
             "manage:api_keys",
             "manage:mfa",
@@ -577,6 +579,7 @@ class AuthRBAC:
             "read:metrics",
             "send:communications",
             "read:communications",
+            "manage:communications",
             "export:communications",
             "manage:api_keys",
             "manage:mfa",
@@ -961,9 +964,16 @@ class AuthRBAC:
         except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
             return None
 
-        if payload.get("type", "access") != "access":
+        tenant_id = payload.get("tenant_id")
+        if payload.get("type", "access") != "access" or not _valid_tenant_id(tenant_id):
             return None
+        from tenant_context import tenant_scope
 
+        with tenant_scope(tenant_id):
+            return cls._verify_access_payload(payload, tenant_id)
+
+    @classmethod
+    def _verify_access_payload(cls, payload: Dict[str, Any], tenant_id: str) -> Optional[User]:
         jti = payload.get("jti")
         if not isinstance(jti, str) or not jti.strip():
             return None
@@ -974,7 +984,6 @@ class AuthRBAC:
         try:
             user_id = payload.get("sub") or payload["user_id"]
             username = payload.get("username") or payload.get("sub") or "unknown-user"
-            tenant_id = payload["tenant_id"]
         except KeyError as exc:
             logger.warning("JWT payload missing mandatory claim: %s", exc)
             return None
@@ -984,9 +993,6 @@ class AuthRBAC:
             return None
         if not isinstance(username, str) or not username.strip():
             logger.warning("JWT payload has invalid username claim")
-            return None
-        if not _valid_tenant_id(tenant_id):
-            logger.warning("JWT payload has invalid tenant_id claim")
             return None
         principal_type = payload.get("principal_type")
         if principal_type is not None:
@@ -1067,7 +1073,21 @@ class AuthRBAC:
 
         if payload.get("type", "access") != "refresh":
             return None
+        tenant_id = payload.get("tenant_id")
+        if not _valid_tenant_id(tenant_id):
+            return None
+        from tenant_context import tenant_scope
 
+        with tenant_scope(tenant_id):
+            return cls._verify_refresh_payload(token, payload, tenant_id)
+
+    @classmethod
+    def _verify_refresh_payload(
+        cls,
+        token: str,
+        payload: Dict[str, Any],
+        tenant_id: str,
+    ) -> Optional[User]:
         jti = payload.get("jti")
         family_id = payload.get("family_id")
         if not isinstance(jti, str) or not jti.strip() or not isinstance(family_id, str):
@@ -1095,7 +1115,6 @@ class AuthRBAC:
         try:
             user_id = payload["user_id"]
             username = payload["username"]
-            tenant_id = payload["tenant_id"]
         except KeyError as exc:
             logger.warning("JWT payload missing mandatory claim: %s", exc)
             return None
@@ -1105,9 +1124,6 @@ class AuthRBAC:
             return None
         if not isinstance(username, str) or not username.strip():
             logger.warning("JWT payload has invalid username claim")
-            return None
-        if not _valid_tenant_id(tenant_id):
-            logger.warning("JWT payload has invalid tenant_id claim")
             return None
         if not _session_is_active(payload.get("session_id"), user_id, tenant_id):
             logger.warning("JWT payload references an inactive or unknown session")
@@ -1616,19 +1632,29 @@ class AuthRBAC:
             return None
 
         _ensure_revocation_store_ready()
-        try:
-            from pesaguard_backend_pipeline.models import ApiKeyRecord
-        except ImportError:
-            from models import ApiKeyRecord
 
         key_hash = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
         session = _RevocationSession()
         try:
-            record = session.query(ApiKeyRecord).filter(
-                ApiKeyRecord.key_hash == key_hash,
-                ApiKeyRecord.active.is_(True),
-                ApiKeyRecord.revoked_at.is_(None),
-            ).first()
+            if session.get_bind().dialect.name == "postgresql":
+                record = session.execute(
+                    text(
+                        "SELECT id, tenant_id, key_prefix, scopes, api_metadata, expires_at "
+                        "FROM public.pesaguard_authenticate_api_key(:key_hash)"
+                    ),
+                    {"key_hash": key_hash},
+                ).first()
+                session.commit()
+            else:
+                try:
+                    from pesaguard_backend_pipeline.models import ApiKeyRecord
+                except ImportError:
+                    from models import ApiKeyRecord
+                record = session.query(ApiKeyRecord).filter(
+                    ApiKeyRecord.key_hash == key_hash,
+                    ApiKeyRecord.active.is_(True),
+                    ApiKeyRecord.revoked_at.is_(None),
+                ).first()
             now = datetime.now(timezone.utc)
             if record is None or (record.expires_at is not None and record.expires_at <= now):
                 return None
@@ -1653,8 +1679,9 @@ class AuthRBAC:
                     return None
             # The role column is retained for compatibility and display only.
             # Every API key is authorized solely by validated persisted scopes.
-            record.last_used_at = now
-            session.commit()
+            if session.get_bind().dialect.name != "postgresql":
+                record.last_used_at = now
+                session.commit()
             return User(
                 user_id=record.id,
                 username=f"api-key:{record.key_prefix}",
@@ -1717,60 +1744,63 @@ def require_auth(required_permission: Optional[str] = None):
                 _record_security_event()
                 return jsonify({"error": "invalid_token", "message": "Token is invalid, expired, or revoked."}), 401
 
-            if getattr(user, "principal_type", "") == "developer_api_key" and user.api_key_ip_allowlist:
-                try:
-                    from security_helpers import get_client_ip
+            from tenant_context import tenant_scope
 
-                    client_ip = ipaddress.ip_address(get_client_ip(request))
-                    ip_permitted = any(
-                        client_ip in ipaddress.ip_network(network, strict=False)
-                        for network in user.api_key_ip_allowlist
-                    )
-                except ValueError:
-                    ip_permitted = False
-                if not ip_permitted:
-                    _record_security_event()
-                    return jsonify({"error": "ip_not_allowed", "message": "This API key is not allowed from this IP address."}), 403
-
-            if required_permission:
-                try:
-                    permitted = AuthRBAC.check_permission(user, required_permission)
-                except AuthenticationUnavailable:
-                    _record_security_event()
-                    return jsonify({
-                        "error": "authorization_unavailable",
-                        "message": "Authorization state is temporarily unavailable.",
-                    }), 503
-                if not permitted:
-                    _record_security_event()
-                    # Safe denial: internal reason stays server-side; the
-                    # caller learns only the mapped public error code.
+            with tenant_scope(user.tenant_id):
+                if getattr(user, "principal_type", "") == "developer_api_key" and user.api_key_ip_allowlist:
                     try:
-                        from pesaguard_backend_pipeline.authorization_policy import (
-                            safe_public_error,
-                        )
-                    except ImportError:
-                        from authorization_policy import safe_public_error
-                    internal_reason = (
-                        "missing_scope"
-                        if required_permission not in user.permissions
-                        else "resource_denied"
-                    )
-                    logger.warning(
-                        "authorization.denied reason=%s user=%s permission=%s",
-                        user.user_id, internal_reason, required_permission,
-                    )
-                    public_error = safe_public_error(internal_reason)
-                    status = 403
-                    return jsonify({"error": public_error, "message": "Access denied."}), status
+                        from security_helpers import get_client_ip
 
-            g.user = user
-            try:
-                from logging_utils import bind_observability_context
-                bind_observability_context(tenant_id=user.tenant_id)
-            except Exception:
-                logger.debug("Unable to bind authenticated observability context", exc_info=True)
-            return f(*args, **kwargs)
+                        client_ip = ipaddress.ip_address(get_client_ip(request))
+                        ip_permitted = any(
+                            client_ip in ipaddress.ip_network(network, strict=False)
+                            for network in user.api_key_ip_allowlist
+                        )
+                    except ValueError:
+                        ip_permitted = False
+                    if not ip_permitted:
+                        _record_security_event()
+                        return jsonify({"error": "ip_not_allowed", "message": "This API key is not allowed from this IP address."}), 403
+
+                if required_permission:
+                    try:
+                        permitted = AuthRBAC.check_permission(user, required_permission)
+                    except AuthenticationUnavailable:
+                        _record_security_event()
+                        return jsonify({
+                            "error": "authorization_unavailable",
+                            "message": "Authorization state is temporarily unavailable.",
+                        }), 503
+                    if not permitted:
+                        _record_security_event()
+                        # Safe denial: internal reason stays server-side; the
+                        # caller learns only the mapped public error code.
+                        try:
+                            from pesaguard_backend_pipeline.authorization_policy import (
+                                safe_public_error,
+                            )
+                        except ImportError:
+                            from authorization_policy import safe_public_error
+                        internal_reason = (
+                            "missing_scope"
+                            if required_permission not in user.permissions
+                            else "resource_denied"
+                        )
+                        logger.warning(
+                            "authorization.denied reason=%s user=%s permission=%s",
+                            user.user_id, internal_reason, required_permission,
+                        )
+                        public_error = safe_public_error(internal_reason)
+                        status = 403
+                        return jsonify({"error": public_error, "message": "Access denied."}), status
+
+                g.user = user
+                try:
+                    from logging_utils import bind_observability_context
+                    bind_observability_context(tenant_id=user.tenant_id)
+                except Exception:
+                    logger.debug("Unable to bind authenticated observability context", exc_info=True)
+                return f(*args, **kwargs)
 
         setattr(decorated_function, "required_permission", required_permission)
         return decorated_function
@@ -1812,7 +1842,10 @@ def require_tenant_access():
                 logger.warning("Tenant access violation attempt by user %s on tenant %s", g.user.user_id, tenant_id)
                 return jsonify({"error": "tenant_access_denied", "message": "Access to this tenant scope is forbidden."}), 403
 
-            return f(*args, **kwargs)
+            from tenant_context import tenant_scope
+
+            with tenant_scope(tenant_id):
+                return f(*args, **kwargs)
 
         return decorated_function
 
@@ -1852,7 +1885,10 @@ def require_resource_access(required_permission: str, resource_id_argument: str 
                 if not AuthRBAC.check_permission(user, required_permission):
                     return jsonify({"error": "insufficient_scope", "message": "The credential lacks the required scope."}), 403
                 return jsonify({"error": "resource_not_found", "message": "The requested resource was not found."}), 404
-            return f(*args, **kwargs)
+            from tenant_context import tenant_scope
+
+            with tenant_scope(user.tenant_id):
+                return f(*args, **kwargs)
         return decorated_function
     return decorator
 

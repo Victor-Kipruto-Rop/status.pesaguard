@@ -151,7 +151,11 @@ def test_pitr_restore_writes_recovery_config(tmp_path, monkeypatch):
 
     # Mock restore_backup to avoid actually calling pg_restore
     with patch.object(backup_postgres, "restore_backup"):
-        backup_postgres.pitr_restore(backup, target_time="2026-09-13 12:00:00")
+        backup_postgres.pitr_restore(
+            backup,
+            target_time="2026-09-13 12:00:00",
+            confirm_target=True,
+        )
 
         conf = (pg_data / "postgresql.auto.conf").read_text(encoding="utf-8")
     assert "recovery_target_time = '2026-09-13 12:00:00'" in conf

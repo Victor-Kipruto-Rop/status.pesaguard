@@ -107,7 +107,7 @@ def create_operations_blueprint(session_factory, require_auth_fn, current_user_f
             session.close()
 
     @blueprint.post("/saved-filters")
-    @require_auth_fn("read:communications")
+    @require_auth_fn("manage:communications")
     def create_saved_filter_route():
         payload = request.get_json(silent=True) or {}
         name = str(payload.get("name") or "").strip()
@@ -129,7 +129,7 @@ def create_operations_blueprint(session_factory, require_auth_fn, current_user_f
             session.close()
 
     @blueprint.delete("/saved-filters/<filter_id>")
-    @require_auth_fn("read:communications")
+    @require_auth_fn("manage:communications")
     def delete_saved_filter_route(filter_id: str):
         session = session_factory()
         try:

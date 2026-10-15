@@ -12,8 +12,9 @@ from models import UserAccount, UserIdentity, UserSession
 
 
 @pytest.fixture
-def client():
-    app.config["TESTING"] = True
+def client(monkeypatch):
+    monkeypatch.setitem(app.config, "TESTING", True)
+    monkeypatch.setitem(app.config, "PUBLIC_REGISTRATION_TENANT_ID", "login-tenant")
     with app.test_client() as test_client:
         yield test_client
 

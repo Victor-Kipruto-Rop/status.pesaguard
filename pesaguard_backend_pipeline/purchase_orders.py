@@ -5,9 +5,11 @@ import io
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
+
+from normalization import DEFAULT_CURRENCY, normalize_amount, normalize_currency
 
 
 def _clean_text(value: Any) -> str:
@@ -45,14 +47,22 @@ def _normalize_phone(value: Any) -> str:
     return "+" + digits
 
 
-def _coerce_decimal(value: Any) -> Decimal:
+def _coerce_decimal(value: Any, currency: str = DEFAULT_CURRENCY) -> Decimal:
     if value is None or value == "":
         raise ValueError("amount is missing")
-    text = str(value).strip().replace(",", "")
     try:
-        return Decimal(text)
-    except (InvalidOperation, ValueError) as exc:
+        return Decimal(normalize_amount(value, currency=currency))
+    except (TypeError, ValueError) as exc:
         raise ValueError(f"invalid numeric amount: {value!r}") from exc
+
+
+def _record_currency(row: Mapping[str, Any]) -> str:
+    for key in ("currency", "Currency"):
+        if key in row:
+            if row[key] is None or not str(row[key]).strip():
+                raise ValueError("currency must not be empty when supplied")
+            return normalize_currency(row[key])
+    return DEFAULT_CURRENCY
 
 
 def _coerce_timestamp(value: Any) -> datetime | None:
@@ -111,13 +121,14 @@ class PurchaseOrder:
         )
         if not po_number:
             raise ValueError("purchase order number is required")
+        currency = _record_currency(row)
         amount_value = row.get("amount")
-        amount = _coerce_decimal(amount_value) if amount_value not in (None, "") else None
+        amount = _coerce_decimal(amount_value, currency) if amount_value not in (None, "") else None
         return cls(
             po_number=po_number,
             vendor=_clean_text(row.get("vendor") or row.get("supplier") or row.get("merchant") or row.get("company")),
             amount=amount,
-            currency=_clean_text(row.get("currency") or "KES").upper() or "KES",
+            currency=currency,
             status=_clean_text(row.get("status") or "pending").lower(),
             phone_number=_normalize_phone(row.get("phone_number") or row.get("phone") or row.get("msisdn") or row.get("customer_phone")),
             timestamp=_coerce_timestamp(row.get("timestamp") or row.get("date") or row.get("created_at") or row.get("trans_time")),
@@ -136,6 +147,7 @@ class LedgerEntry:
     reference: str | None = None
     source: str = "manual"
     raw: dict[str, Any] = field(default_factory=dict)
+    currency: str = DEFAULT_CURRENCY
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any], *, source: str = "manual") -> "LedgerEntry":
@@ -151,8 +163,9 @@ class LedgerEntry:
             or row.get("ledger_id")
             or "ledger-entry"
         )
+        currency = _record_currency(row)
         amount_value = row.get("amount") or row.get("trans_amount") or row.get("gross_amount")
-        amount = _coerce_decimal(amount_value) if amount_value not in (None, "") else None
+        amount = _coerce_decimal(amount_value, currency) if amount_value not in (None, "") else None
         return cls(
             entry_id=entry_id,
             amount=amount,
@@ -162,6 +175,7 @@ class LedgerEntry:
             reference=_normalize_reference(row.get("reference") or row.get("ref") or row.get("po_number") or row.get("transaction_ref")),
             source=source,
             raw=dict(row),
+            currency=currency,
         )
 
 

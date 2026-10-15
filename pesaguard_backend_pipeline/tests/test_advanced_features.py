@@ -132,8 +132,10 @@ class TestAuthentication:
 class TestWebhooks:
     """Test webhook functionality."""
 
-    def test_create_webhook(self, client, admin_token):
+    def test_create_webhook(self, client, admin_token, monkeypatch):
         """Test webhook creation."""
+        import webhook_manager
+        monkeypatch.setattr(webhook_manager, "_validate_webhook_url", lambda _: None)
         response = client.post(
             "/webhooks",
             headers={"Authorization": f"Bearer {admin_token}"},
@@ -149,6 +151,118 @@ class TestWebhooks:
         data = response.get_json()
         assert "id" in data
         assert data["url"] == "https://example.com/webhooks"
+        assert data["signing_secret"].startswith("whsec_")
+        assert response.headers["Cache-Control"] == "no-store"
+
+    def test_legacy_webhook_update_accepts_tenant_id_once(self, admin_token):
+        import app_3_features
+
+        webhook_id = "legacy-update-webhook"
+        with app_3_features.SessionLocal() as session:
+            session.query(WebhookConfig).filter_by(
+                id=webhook_id,
+                tenant_id="test-tenant",
+            ).delete()
+            session.add(WebhookConfig(
+                id=webhook_id,
+                tenant_id="test-tenant",
+                url="https://example.com/webhooks",
+                event_types=["escalation"],
+                signing_secret="whsec_legacy_update_secret",
+                active=True,
+            ))
+            session.commit()
+
+        try:
+            with app_3_features.app.test_client() as legacy_client:
+                response = legacy_client.put(
+                    f"/webhooks/{webhook_id}",
+                    headers={"Authorization": f"Bearer {admin_token}"},
+                    json={"tenant_id": "test-tenant", "active": False},
+                )
+
+            assert response.status_code == 200, response.get_json()
+            assert "signing_secret" not in response.get_json()
+            with app_3_features.SessionLocal() as session:
+                webhook = session.query(WebhookConfig).filter_by(
+                    id=webhook_id,
+                    tenant_id="test-tenant",
+                ).one()
+                assert webhook.active is False
+        finally:
+            with app_3_features.SessionLocal() as session:
+                session.query(WebhookConfig).filter_by(
+                    id=webhook_id,
+                    tenant_id="test-tenant",
+                ).delete()
+                session.commit()
+
+    def test_secret_rotation_revocation_and_cross_tenant_denial(
+        self, client, admin_token, monkeypatch
+    ):
+        import webhook_manager
+        monkeypatch.setattr(webhook_manager, "_validate_webhook_url", lambda _: None)
+        headers = {"Authorization": f"Bearer {admin_token}"}
+        created = client.post(
+            "/webhooks",
+            headers=headers,
+            json={
+                "tenant_id": "test-tenant",
+                "url": "https://example.com/webhooks",
+                "event_types": ["escalation"],
+            },
+        )
+        assert created.status_code == 201, created.get_json()
+        webhook_id = created.get_json()["id"]
+        first_secret = created.get_json()["signing_secret"]
+
+        with SessionLocal() as session:
+            session.add(WebhookConfig(
+                id="other-tenant-webhook",
+                tenant_id="other-tenant",
+                url="https://example.com/other",
+                event_types=["escalation"],
+                signing_secret="whsec_other_tenant_secret",
+                active=True,
+            ))
+            session.commit()
+
+        denied = client.post(
+            "/webhooks/other-tenant-webhook/rotate-secret",
+            headers=headers,
+        )
+        assert denied.status_code in {403, 404}
+        assert "whsec_other_tenant_secret" not in denied.get_data(as_text=True)
+
+        rotated = client.post(
+            f"/webhooks/{webhook_id}/rotate-secret",
+            headers=headers,
+        )
+        assert rotated.status_code == 200
+        assert rotated.headers["Cache-Control"] == "no-store"
+        rotated_secret = rotated.get_json()["signing_secret"]
+        assert rotated_secret != first_secret
+
+        listing = client.get(
+            "/webhooks?tenant_id=test-tenant",
+            headers=headers,
+        )
+        assert listing.status_code == 200
+        assert rotated_secret not in listing.get_data(as_text=True)
+
+        revoked = client.post(
+            f"/webhooks/{webhook_id}/revoke-secret",
+            headers=headers,
+        )
+        assert revoked.status_code == 200
+        assert "signing_secret" not in revoked.get_json()
+
+        reenable = client.put(
+            f"/webhooks/{webhook_id}",
+            headers=headers,
+            json={"active": True, "tenant_id": "test-tenant"},
+        )
+        assert reenable.status_code == 409
 
     def test_list_webhooks(self, client, admin_token):
         """Test listing webhooks."""

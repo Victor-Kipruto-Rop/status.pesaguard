@@ -14,11 +14,14 @@ without live infrastructure.
 from __future__ import annotations
 
 import importlib
+import hashlib
+import hmac
 import json
 import logging
 import os
 import tempfile
 import uuid
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -28,6 +31,7 @@ from event_consumer import ConsumerGroup, EventConsumer
 
 
 DARAJA_SECRET = "e2e-trace-secret"
+DARAJA_SIGNING_SECRET = "e2e-callback-signing-secret"
 
 
 @pytest.fixture()
@@ -36,6 +40,7 @@ def gateway(monkeypatch):
         monkeypatch.setenv("DATABASE_URL", f"sqlite:///{os.path.join(tmpdir, 'e2e.db')}")
         monkeypatch.setenv("DARAJA_ALLOWED_IPS", "127.0.0.1")
         monkeypatch.setenv("DARAJA_SHARED_SECRET", DARAJA_SECRET)
+        monkeypatch.setenv("DARAJA_WEBHOOK_SIGNING_SECRET", DARAJA_SIGNING_SECRET)
         monkeypatch.setenv("TENANT_ID", "tenant-a")
         import app as webhook_app
 
@@ -77,13 +82,17 @@ def test_gateway_to_notification_trace_survives_every_boundary(monkeypatch, capl
         "MSISDN": "254700000000",
         "BillRefNumber": transaction_id,
     }
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    signature = hmac.new(DARAJA_SIGNING_SECRET.encode(), body, hashlib.sha256).hexdigest()
 
     # 1. Gateway boundary: submit a real webhook through the Flask gateway.
     response = gateway.app.test_client().post(
         "/webhook/mpesa/confirmation",
-        json=payload,
+        data=body,
+        content_type="application/json",
         headers={
             "X-Daraja-Shared-Secret": DARAJA_SECRET,
+            "X-Daraja-Signature": signature,
             "X-Trace-ID": trace_id,
             "X-Correlation-ID": correlation_id,
             "X-Tenant-ID": "tenant-a",
@@ -192,7 +201,23 @@ def test_gateway_to_notification_trace_survives_every_boundary(monkeypatch, capl
 
     persist_result = reconciliation_job._persist_atomically(
         payload,
-        {"status": "missing_payment", "anomalies": ["missing_payment"]},
+        {
+            "status": "missing_payment",
+            "phase3_status": "UNMATCHED",
+            "severity": "critical",
+            "match": {"match_type": "none"},
+            "anomalies": ["missing_payment"],
+            "event": payload,
+            "tenant_id": "tenant-a",
+            "evidence": {
+                "matched_record": None,
+                "matching_rules": ["no_matching_candidate"],
+                "match_score": 0.0,
+                "match_timestamp": datetime.now(timezone.utc).isoformat(),
+                "engine_version": "phase3.3",
+                "rule_version": "phase3.3",
+            },
+        },
         transaction_id,
         "tenant-a",
     )

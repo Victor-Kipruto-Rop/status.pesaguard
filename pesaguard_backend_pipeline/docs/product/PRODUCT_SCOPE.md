@@ -13,6 +13,8 @@ This document satisfies requirements **SCOPE-1** through **SCOPE-4** from Addend
 | Supported M-Pesa C2B/STK callback ingestion | Airtel Money |
 | Internal-ledger matching (Postgres, Sheets, REST) against M-Pesa records | Card payments, PayPal, other rails |
 | Anomaly detection on M-Pesa reconciliation gaps | Multi-rail unified payment inbox |
+| Internal settlement calculation, variance reconciliation, and reporting (no fund movement) | |
+| M-Pesa transaction completeness, validity, consistency, freshness and outlier checks; tenant-scoped quarantine | |
 | | Daraja transaction-status query workflow |
 | | Settlement execution, payouts/disbursements, or movement of funds |
 
@@ -28,11 +30,11 @@ This document satisfies requirements **SCOPE-1** through **SCOPE-4** from Addend
 
 ## Settlement and money-movement boundary
 
-PesaGuard currently records provider callbacks and compares them with internal ledger records. It does **not** execute or confirm settlements, initiate B2C payouts or refunds, transfer funds, maintain a settlement ledger, or expose a provider transaction-status query workflow. Refund/reversal matching in reconciliation is classification against supplied records, not a request to move money.
+PesaGuard records provider callbacks and compares them with internal ledger records. It also has an internal settlement domain for calculating totals from caller-supplied lines, comparing a calculated net to a caller-supplied expected net, recording variances, tracking internal status, and producing tenant-scoped read-only summaries. It does not currently load or verify those lines against authoritative transaction records or import provider statements; an expected net is supplied evidence, not a verified provider statement. Those records do **not** execute or confirm a provider settlement, initiate B2C payouts or refunds, or transfer funds. Refund/reversal matching in reconciliation is classification against supplied records, not a request to move money.
 
-B2C result callbacks are structurally validated, but ingestion rejects them until an explicit provider-account mapping is available. The generic Daraja OAuth/HTTP client is not a transaction-status or payout implementation. The `Settlement` shape in `schemas/reconciliation-1.0.json` is a schema definition only; there is no corresponding settlement persistence model, executable API, or worker workflow.
+B2C result callbacks are structurally validated, but ingestion rejects them until an explicit provider-account mapping is available. The generic Daraja OAuth/HTTP client is not a transaction-status or payout implementation. Reconciliation has a tenant-scoped scheduled worker and an authenticated, allow-listed operator interface for schedules, history, recovery, and backfills of already-ingested transactions. This does not retrieve missing provider history. Settlement calculation and reporting remain service-layer capabilities and are not exposed through an HTTP route or worker workflow. A `reconciled` or `settled` internal status is not evidence that a provider transferred funds or confirmed a payout.
 
-Do not describe these capabilities as implemented or infer settlement state from a matched reconciliation result. Any settlement or money-movement feature requires a separately scoped design, provider-specific test contract, accounting invariants, and test-only validation before implementation.
+Do not infer settlement state from a matched reconciliation result. Explicitly unsupported capabilities include provider-statement import/verification, provider settlement confirmation, payment execution, payouts/disbursements, refunds, and any movement of funds. Any such feature requires a separately scoped design, provider-specific test contract, accounting invariants, and test-only validation before implementation.
 
 ---
 

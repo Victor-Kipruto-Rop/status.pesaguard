@@ -67,6 +67,15 @@ CORE_PERMISSIONS: Dict[str, PermissionDefinition] = {
     "write:transactions": PermissionDefinition(
         "write:transactions", "Create transaction records (restricted).",
         "Transactions", "transactions", "write", "High", True),
+    "read:ledgers": PermissionDefinition(
+        "read:ledgers", "Read double-entry ledger accounts, balances, and transactions.",
+        "Ledgers", "ledgers", "read", "Low", True),
+    "write:ledgers": PermissionDefinition(
+        "write:ledgers", "Post or void balanced double-entry ledger transactions.",
+        "Ledgers", "ledgers", "write", "High", True),
+    "admin:ledgers": PermissionDefinition(
+        "admin:ledgers", "Create ledgers and ledger accounts (structural, restricted).",
+        "Ledgers", "ledgers", "manage", "High", True),
     "read:reports": PermissionDefinition(
         "read:reports", "Read generated reports.",
         "Reports", "reports", "read", "Low", True),
@@ -258,7 +267,7 @@ def safe_public_error(internal_reason: str) -> str:
 
 
 ENDPOINT_PERMISSIONS: Dict[str, str] = {
-    "DELETE /api/v1/communications/saved-filters/<filter_id>": "read:communications",
+    "DELETE /api/v1/communications/saved-filters/<filter_id>": "manage:communications",
     "GET /activity-feed": "read:discrepancies",
     "GET /analytics/incident-trends": "read:discrepancies",
     "GET /analytics/operator-stats": "read:discrepancies",
@@ -275,6 +284,7 @@ ENDPOINT_PERMISSIONS: Dict[str, str] = {
     "GET /api/v1/communications/incidents": "read:communications",
     "GET /api/v1/communications/messages": "read:communications",
     "GET /api/v1/communications/messages/<message_id>": "read:communications",
+    "GET /api/v1/communications/preferences/<path:recipient>": "read:communications",
     "GET /api/v1/communications/providers/health": "read:communications",
     "GET /api/v1/communications/quotas": "read:communications",
     "GET /api/v1/communications/saved-filters": "read:communications",
@@ -294,7 +304,10 @@ ENDPOINT_PERMISSIONS: Dict[str, str] = {
     "GET /api/v1/imports/<import_id>": "read:transactions",
     "GET /api/v1/lineage/transactions/<transaction_id>": "read:analytics",
     "GET /api/v1/metrics/merchants": "read:analytics",
+    "GET /api/v1/operations/dead-letters": "read:analytics",
     "GET /api/v1/operations/outbox": "read:analytics",
+    "GET /api/v1/operations/scheduled-jobs": "read:analytics",
+    "GET /api/v1/operations/scheduled-jobs/<job_key>/history": "read:analytics",
     "GET /api/v1/organizations": "read:settings",
     "GET /api/v1/organizations/<organization_id>": "read:settings",
     "GET /api/v1/organizations/<organization_id>/departments": "manage:departments",
@@ -337,7 +350,7 @@ ENDPOINT_PERMISSIONS: Dict[str, str] = {
     "GET /webhooks/<webhook_id>/deliveries": "manage:webhooks",
     "PATCH /api/v1/iam/api-clients/<client_id>": "manage:api_keys",
     "PATCH /api/v1/iam/service-identities/<identity_id>": "manage:users",
-    "PATCH /api/v1/organizations/<organization_id>": "read:settings",
+    "PATCH /api/v1/organizations/<organization_id>": "manage:organizations",
     "PATCH /providers/<provider_id>": "manage:providers",
     "POST /api/v1/communications/campaigns": "send:communications",
     "POST /api/v1/communications/campaigns/<campaign_id>/cancel": "manage:communications",
@@ -350,7 +363,8 @@ ENDPOINT_PERMISSIONS: Dict[str, str] = {
     "POST /api/v1/communications/otp": "send:communications",
     "POST /api/v1/communications/otp/<challenge_id>/verify": "send:communications",
     "POST /api/v1/communications/policy/preview": "read:communications",
-    "POST /api/v1/communications/saved-filters": "read:communications",
+    "POST /api/v1/communications/push": "send:communications",
+    "POST /api/v1/communications/saved-filters": "manage:communications",
     "POST /api/v1/communications/sms": "send:communications",
     "POST /api/v1/communications/templates": "send:communications",
     "POST /api/v1/communications/templates/<template_id>/approve": "manage:communications",
@@ -367,6 +381,9 @@ ENDPOINT_PERMISSIONS: Dict[str, str] = {
     "POST /api/v1/iam/tenants": "manage:all_tenants",
     "POST /api/v1/imports": "write:transactions",
     "POST /api/v1/operations/dead-letters/<dead_letter_id>/replay": "resolve:discrepancies",
+    "POST /api/v1/operations/scheduled-jobs": "manage:settings",
+    "POST /api/v1/operations/scheduled-jobs/<job_key>/backfills": "manage:settings",
+    "POST /api/v1/operations/scheduled-runs/<run_id>/resolve": "manage:settings",
     "POST /api/v1/organizations": "manage:organizations",
     "POST /api/v1/organizations/<organization_id>/approvals": "manage:organizations",
     "POST /api/v1/organizations/<organization_id>/approvals/<approval_id>/review": "manage:organizations",
@@ -402,7 +419,7 @@ ENDPOINT_PERMISSIONS: Dict[str, str] = {
     "POST /escalation-rules": "write:escalation_rules",
     "POST /incidents/auto-escalate": "bulk:operations",
     "POST /incidents/bulk-assign": "bulk:operations",
-    "POST /incidents/filters/presets": "read:discrepancies",
+    "POST /incidents/filters/presets": "write:discrepancies",
     "POST /on-call/bulk": "manage:on_call",
     "POST /on-call/rotations": "manage:on_call",
     "POST /providers": "manage:providers",
@@ -413,6 +430,8 @@ ENDPOINT_PERMISSIONS: Dict[str, str] = {
     "POST /tenants/<tenant_id>/settings": "write:settings",
     "POST /v1/settings": "write:settings",
     "POST /webhooks": "manage:webhooks",
+    "POST /webhooks/<webhook_id>/rotate-secret": "manage:webhooks",
+    "POST /webhooks/<webhook_id>/revoke-secret": "manage:webhooks",
     "PUT /api/v1/communications/consent/<path:recipient>": "manage:communications",
     "PUT /api/v1/communications/preferences/<path:recipient>": "manage:communications",
     "PUT /api/v1/communications/quotas/<scope>": "manage:communications",
@@ -422,95 +441,122 @@ ENDPOINT_PERMISSIONS: Dict[str, str] = {
     "PUT /webhooks/<webhook_id>": "manage:webhooks",
 }
 
-# Unmapped routes are explicit exceptions, not implicit permissions. These
-# labels describe the route's authentication boundary; they never grant a
-# customer API scope.
+# Routes without a customer scope are classified by their authentication
+# mechanism. The runtime route checks in the authorization tests validate
+# these classifications against the handlers' actual decorators.
 ENDPOINT_EXEMPTIONS: Dict[str, str] = {
-    "GET /api/v1/iam/identity": "session",
-    "GET /auth/devices": "session",
-    "GET /auth/mfa/factors": "session",
-    "GET /auth/mfa/policy": "session",
-    "GET /auth/sessions": "session",
-    "GET /auth/sso/oidc/callback": "session",
-    "GET /auth/verify": "session",
+    "GET /api/v1/iam/identity": "authenticated_session",
+    "GET /auth/devices": "authenticated_session",
+    "GET /auth/mfa/factors": "authenticated_session",
+    "GET /auth/mfa/policy": "authenticated_session",
+    "GET /auth/sessions": "authenticated_session",
+    "GET /auth/sso/oidc/callback": "oidc_callback",
+    "GET /auth/verify": "authenticated_session",
     "GET /docs": "public",
     "GET /health": "public",
+    "GET /live": "public",
     "GET /internal/v1/tenants/resolve": "internal",
     "GET /openapi.json": "public",
-    "POST /api/v1/webhooks/africastalking/delivery": "public",
-    "POST /auth/client-token": "session",
-    "POST /auth/devices/<device_id>/logout": "session",
-    "POST /auth/devices/<device_id>/rename": "session",
-    "POST /auth/devices/<device_id>/revoke": "session",
-    "POST /auth/devices/<device_id>/trust": "session",
-    "POST /auth/login": "session",
-    "POST /auth/logout": "session",
-    "POST /auth/logout-all": "session",
-    "POST /auth/mfa/email/request": "session",
-    "POST /auth/mfa/email/verify": "session",
-    "POST /auth/mfa/enroll": "session",
-    "POST /auth/mfa/enroll/verify": "session",
-    "POST /auth/mfa/factors/<factor_id>/revoke": "session",
-    "POST /auth/mfa/recovery-codes/regenerate": "session",
-    "POST /auth/mfa/reset/confirm": "session",
-    "POST /auth/mfa/reset/request": "session",
-    "POST /auth/mfa/webauthn/enroll/options": "session",
-    "POST /auth/mfa/webauthn/enroll/verify": "session",
-    "POST /auth/mfa/webauthn/login/verify": "session",
-    "POST /auth/mfa/webauthn/step-up/options": "session",
-    "POST /auth/mfa/webauthn/step-up/verify": "session",
-    "POST /auth/password/change": "session",
-    "POST /auth/password-reset/confirm": "session",
-    "POST /auth/password-reset/request": "session",
-    "POST /auth/register": "session",
-    "POST /auth/revoke/device": "session",
-    "POST /auth/revoke/refresh": "session",
-    "POST /auth/sessions/<session_id>/renew": "session",
-    "POST /auth/sessions/<session_id>/revoke": "session",
-    "POST /auth/sso/oidc/callback": "session",
-    "POST /auth/sso/oidc/token": "session",
-    "POST /auth/verify-email": "session",
-    "POST /auth/verify-email/resend": "session",
+    "GET /ready": "public",
+    "GET /version": "public",
+    "POST /api/v1/webhooks/africastalking/delivery": "webhook_signature",
+    "POST /auth/client-token": "client_credentials",
+    "POST /auth/devices/<device_id>/logout": "authenticated_session",
+    "POST /auth/devices/<device_id>/rename": "authenticated_session",
+    "POST /auth/devices/<device_id>/revoke": "authenticated_session",
+    "POST /auth/devices/<device_id>/trust": "authenticated_session",
+    "POST /auth/login": "user_credentials",
+    "POST /auth/logout": "authenticated_session",
+    "POST /auth/logout-all": "authenticated_session",
+    "POST /auth/mfa/email/request": "authenticated_session",
+    "POST /auth/mfa/email/verify": "authenticated_session",
+    "POST /auth/mfa/enroll": "authenticated_session",
+    "POST /auth/mfa/enroll/verify": "authenticated_session",
+    "POST /auth/mfa/factors/<factor_id>/revoke": "authenticated_session",
+    "POST /auth/mfa/recovery-codes/regenerate": "authenticated_session",
+    "POST /auth/mfa/reset/confirm": "authenticated_session",
+    "POST /auth/mfa/reset/request": "authenticated_session",
+    "POST /auth/mfa/webauthn/enroll/options": "authenticated_session",
+    "POST /auth/mfa/webauthn/enroll/verify": "authenticated_session",
+    "POST /auth/mfa/webauthn/login/verify": "mfa_challenge",
+    "POST /auth/mfa/webauthn/step-up/options": "authenticated_session",
+    "POST /auth/mfa/webauthn/step-up/verify": "authenticated_session",
+    "POST /auth/password/change": "authenticated_session",
+    "POST /auth/password-reset/confirm": "password_reset_token",
+    "POST /auth/password-reset/request": "password_reset",
+    "POST /auth/register": "public_registration",
+    "POST /auth/refresh": "refresh_token",
+    "POST /auth/revoke/device": "authenticated_session",
+    "POST /auth/revoke/refresh": "authenticated_session",
+    "POST /auth/sessions/<session_id>/renew": "authenticated_session",
+    "POST /auth/sessions/<session_id>/revoke": "authenticated_session",
+    "POST /auth/sso/oidc/callback": "oidc_callback",
+    "POST /auth/sso/oidc/token": "oidc_token_endpoint",
+    "POST /auth/verify-email": "email_verification_token",
+    "POST /auth/verify-email/resend": "email_verification",
     "POST /internal/v1/developer-api-keys/sync": "service",
+    "POST /internal/v1/keys/<key_id>/revoke": "service",
+    "POST /internal/v1/keys/<key_id>/suspend": "service",
 }
 
-# The checked-in audit snapshot predates resource-level decorators in the
-# runtime route definitions. These exact UNMAPPED observations are reconciled
-# to the permissions required by those decorators.
-ROUTE_AUDIT_UNMAPPED_WITH_RUNTIME_PERMISSION: Dict[str, str] = {
-    "PATCH /api/v1/iam/api-clients/<client_id>": "manage:api_keys",
-    "PATCH /api/v1/iam/service-identities/<identity_id>": "manage:users",
-    "POST /api/v1/iam/api-clients/<client_id>/rotate-secret": "manage:api_keys",
-    "POST /api/v1/iam/service-identities/<identity_id>/rotate-secret": "manage:users",
-    "POST /auth/api-keys/<key_id>/revoke": "manage:api_keys",
-    "POST /auth/api-keys/<key_id>/rotate": "manage:api_keys",
-}
+# Routes exposed by the two deployed HTTP services but not represented in the
+# original source-file snapshot.
+ENDPOINT_PERMISSIONS.update({
+    "GET /api/v1/fraud/<transaction_id>": "read:transactions",
+    "GET /api/v1/reconciliation/<transaction_id>": "read:transactions",
+    "GET /api/v1/transactions/<transaction_id>": "read:transactions",
+    "GET /api/v1/transactions/<transaction_id>/status": "read:transactions",
+    "GET /api/v1/transactions/search": "read:transactions",
+    "POST /api/v1/fraud/analyse": "write:transactions",
+    "POST /api/v1/ingest/safaricom": "write:transactions",
+    "POST /api/v1/reconciliation/requests": "write:transactions",
+    "POST /api/v1/transactions": "write:transactions",
+    # Double-entry ledger API (see ledger_routes.py).
+    "GET /api/v1/ledger-transactions/<transaction_id>": "read:ledgers",
+    "GET /api/v1/ledgers/<ledger_id>/accounts/<account_code>/balance": "read:ledgers",
+    "POST /api/v1/ledgers": "admin:ledgers",
+    "POST /api/v1/ledgers/<ledger_id>/accounts": "admin:ledgers",
+    "POST /api/v1/ledgers/<ledger_id>/transactions": "write:ledgers",
+    "POST /api/v1/ledger-transactions/<transaction_id>/void": "write:ledgers",
+})
 
-# Four duplicate audit rows disagree only because the older route scanner
-# missed @require_resource_access; app_4_advanced_features.py confirms each
-# permission explicitly. All other conflicting duplicates fail validation.
-ROUTE_AUDIT_RESOLVED_CONFLICTS: Dict[str, str] = {
-    "GET /on-call/schedule/<operator_id>": "read:discrepancies",
-    "GET /webhooks/<webhook_id>/deliveries": "manage:webhooks",
-    "PUT /escalation-rules/<rule_id>": "write:escalation_rules",
-    "PUT /webhooks/<webhook_id>": "manage:webhooks",
-}
+ENDPOINT_EXEMPTIONS.update({
+    "GET /admin/tenant/<tenant_id>": "admin_token",
+    "GET /admin/tenant/<tenant_id>/residency": "admin_token",
+    "GET /public/status": "public",
+    "GET /static/<path:filename>": "framework_static",
+    "POST /admin/tenant/<tenant_id>": "admin_token",
+    "POST /admin/tenant/<tenant_id>/locale": "admin_token",
+    "POST /ops/alerts": "alertmanager_secret",
+    "POST /public/status/monitor": "service_token",
+    "POST /public/status/subscriptions": "public_email_confirmation",
+    "POST /public/status/subscriptions/confirm": "status_confirmation_token",
+    "POST /public/status/subscriptions/unsubscribe": "status_unsubscribe_token",
+    "POST /webhook/mpesa/confirmation": "daraja_signature",
+    "POST /webhook/mpesa/validation": "daraja_signature",
+})
+
+# The FastAPI control plane mounts the same authentication routes at both
+# /auth and /api/v1/auth; their permission boundaries are identical.
+for endpoint, permission in tuple(ENDPOINT_PERMISSIONS.items()):
+    method, path = endpoint.split(" ", 1)
+    if path.startswith("/auth/"):
+        ENDPOINT_PERMISSIONS[f"{method} /api/v1{path}"] = permission
+for endpoint, boundary in tuple(ENDPOINT_EXEMPTIONS.items()):
+    method, path = endpoint.split(" ", 1)
+    if path.startswith("/auth/"):
+        ENDPOINT_EXEMPTIONS[f"{method} /api/v1{path}"] = boundary
 
 
 def validate_route_audit_records(records: Iterable[str]) -> Dict[str, int]:
     """Validate that each audited route has one explicit, evidence-backed class.
 
-    Returns counts for the unique route inventory. ``UNMAPPED`` is only
-    accepted for routes listed in ENDPOINT_EXEMPTIONS; the small reconciliation
-    allowlists above account for known stale scanner observations.
+    Exempt routes carry an explicit ``EXEMPT:<boundary>`` classification; a
+    missing permission or exemption is never accepted as an implicit default.
     """
     known_routes = set(ENDPOINT_PERMISSIONS) | set(ENDPOINT_EXEMPTIONS)
     if set(ENDPOINT_PERMISSIONS) & set(ENDPOINT_EXEMPTIONS):
         raise ValueError("routes cannot be both permission-mapped and exempt")
-    if set(ROUTE_AUDIT_UNMAPPED_WITH_RUNTIME_PERMISSION) - set(ENDPOINT_PERMISSIONS):
-        raise ValueError("runtime permission reconciliation is missing a policy mapping")
-    if set(ROUTE_AUDIT_RESOLVED_CONFLICTS) - set(ENDPOINT_PERMISSIONS):
-        raise ValueError("resolved audit conflict is missing a policy mapping")
 
     observed: Dict[str, List[str]] = {}
     for number, raw in enumerate(records, start=1):
@@ -533,14 +579,10 @@ def validate_route_audit_records(records: Iterable[str]) -> Dict[str, int]:
     for endpoint, values in observed.items():
         unique_values = set(values)
         expected_permission = ENDPOINT_PERMISSIONS.get(endpoint)
-        if endpoint in ROUTE_AUDIT_RESOLVED_CONFLICTS:
-            expected_values = {ROUTE_AUDIT_RESOLVED_CONFLICTS[endpoint], "UNMAPPED"}
-        elif endpoint in ROUTE_AUDIT_UNMAPPED_WITH_RUNTIME_PERMISSION:
-            expected_values = {"UNMAPPED"}
-        elif expected_permission is not None:
+        if expected_permission is not None:
             expected_values = {expected_permission}
         else:
-            expected_values = {"UNMAPPED"}
+            expected_values = {f"EXEMPT:{ENDPOINT_EXEMPTIONS[endpoint]}"}
         if unique_values != expected_values:
             raise ValueError(
                 f"inconsistent classification for {endpoint}: "

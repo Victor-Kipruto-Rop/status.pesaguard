@@ -237,7 +237,9 @@ def test_broker_unavailable_raises_without_acknowledging_event(monkeypatch):
     producer._circuit_breaker.state = "CLOSED"
     producer._circuit_breaker.failure_count = 0
     with pytest.raises(ConnectionError):
-        producer.publish_transaction_event("mpesa.transactions.raw", {"TransID": "broker-down"})
+        producer.publish_transaction_event(
+            "mpesa.transactions.raw", {"TransID": "broker-down", "tenant_id": "tenant-a"}
+        )
 
 
 def test_batch_publish_preserves_per_message_delivery_results(monkeypatch):
@@ -271,7 +273,11 @@ def test_batch_publish_preserves_per_message_delivery_results(monkeypatch):
 
     results = producer.publish_transaction_batch_results(
         "mpesa.transactions.raw",
-        [{"TransID": "tx-1"}, {"TransID": "tx-2"}, {"TransID": "tx-3"}],
+        [
+            {"TransID": "tx-1", "tenant_id": "tenant-a"},
+            {"TransID": "tx-2", "tenant_id": "tenant-a"},
+            {"TransID": "tx-3", "tenant_id": "tenant-a"},
+        ],
     )
 
     assert results == [True, False, True]

@@ -1,5 +1,6 @@
 import pytest
 
+from test_config import post_public_registration
 from app_4_advanced_features import SessionLocal, app
 from models import PasswordCredential, PasswordHistory, PasswordResetState, UserAccount, UserIdentity
 
@@ -29,9 +30,10 @@ def test_argon2id_credential_rotation_history_and_single_use_reset(client):
     tenant_id = "credential-tenant"
     _clean(email, tenant_id)
 
-    registration = client.post(
-        "/auth/register",
-        json={"username": "credential-user", "email": email, "password": "OriginalPass123!", "tenant_id": tenant_id},
+    registration = post_public_registration(
+        client,
+        app,
+        {"username": "credential-user", "email": email, "password": "OriginalPass123!", "tenant_id": tenant_id},
     )
     assert registration.status_code == 201, registration.get_data(as_text=True)
     verification_token = registration.get_json()["verification_token"]

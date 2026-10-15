@@ -1,8 +1,8 @@
 """Regenerate ENDPOINT_PERMISSIONS in authorization_policy.py from the audit.
 
 Reads routes_audit.txt (produced by audit_endpoints.py), validates every route
-against its explicit permission or exemption, then rewrites the permission
-block. Run from the repo root.
+against its explicit permission or exemption boundary, then rewrites the
+permission block. Run from the repo root.
 """
 
 import re
@@ -15,7 +15,6 @@ POLICY = ROOT / "pesaguard_backend_pipeline" / "authorization_policy.py"
 
 sys.path.insert(0, str(POLICY.parent))
 from authorization_policy import (  # noqa: E402
-    ROUTE_AUDIT_UNMAPPED_WITH_RUNTIME_PERMISSION,
     validate_route_audit_records,
 )
 
@@ -39,14 +38,13 @@ def main() -> int:
         if not line or "->" not in line:
             continue
         target, permission = (part.strip() for part in line.rsplit("->", 1))
-        if permission == "UNMAPPED":
+        if permission.startswith("EXEMPT:"):
             continue
         existing = entries.get(target)
         if existing and existing != permission:
             conflicts.append(f"{target}: {existing} vs {permission}")
             continue
         entries[target] = permission
-    entries.update(ROUTE_AUDIT_UNMAPPED_WITH_RUNTIME_PERMISSION)
     if conflicts:
         print("CONFLICTS (fix manually):")
         for conflict in conflicts:

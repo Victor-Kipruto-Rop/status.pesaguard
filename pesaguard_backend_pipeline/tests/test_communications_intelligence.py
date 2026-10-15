@@ -190,6 +190,39 @@ def test_policy_engine_decides_channels_priorities_and_escalations():
     assert executive.priority is CommunicationPriority.CRITICAL and executive.create_incident is True
 
 
+def test_policy_monetary_thresholds_do_not_compare_different_currencies():
+    engine = NotificationPolicyEngine()
+
+    unmatched_currency = engine.decide(
+        "transaction.completed",
+        tenant_id="tenant-a",
+        context={"amount": "250000.00", "currency": "USD"},
+    )
+    configured_currency = engine.decide(
+        "transaction.completed",
+        tenant_id="tenant-a",
+        context={"amount": "250000.00", "currency": "USD"},
+        tenant_config={"currency": "USD"},
+    )
+    invalid_precision = engine.decide(
+        "transaction.completed",
+        tenant_id="tenant-a",
+        context={"amount": "250000.001", "currency": "KES"},
+    )
+    reconciliation = engine.decide(
+        "reconciliation.exception_created",
+        tenant_id="tenant-a",
+        context={"amount": "500.00", "currency": "USD"},
+    )
+
+    assert unmatched_currency.priority is CommunicationPriority.NORMAL
+    assert "currency_threshold_mismatch" in unmatched_currency.reasons
+    assert configured_currency.priority is CommunicationPriority.HIGH
+    assert "invalid_monetary_value" in invalid_precision.reasons
+    assert reconciliation.priority is CommunicationPriority.CRITICAL
+    assert "currency_threshold_mismatch" in reconciliation.reasons
+
+
 def test_policy_quiet_hours_defers_normal_but_not_critical():
     quiet_config = {"quiet_hours_start": "22:00", "quiet_hours_end": "06:00", "quiet_hours_timezone": "UTC"}
     engine = NotificationPolicyEngine(now=datetime(2026, 9, 8, 23, 0, tzinfo=timezone.utc))

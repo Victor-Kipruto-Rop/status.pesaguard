@@ -103,6 +103,23 @@ def test_alerting_consumer_processes_discrepancy_messages():
     assert results[0]["status"] == "queued"
 
 
+def test_alerting_consumer_rejects_messages_without_tenant_scope():
+    calls = []
+
+    class DummyService:
+        def handle_discrepancy(self, discrepancy):
+            calls.append(discrepancy)
+            return {"status": "queued"}
+
+    consumer = AlertingConsumer(alert_service=DummyService())
+    result = consumer.process_messages([{"trans_id": "TX-NO-TENANT"}])
+
+    assert result == [
+        {"status": "failed", "trans_id": "TX-NO-TENANT", "reason": "missing_tenant_id"}
+    ]
+    assert calls == []
+
+
 def test_reconciliation_job_publishes_discrepancies_to_topic(monkeypatch):
     published = []
     closed = []
@@ -133,7 +150,13 @@ def test_reconciliation_job_publishes_discrepancies_to_topic(monkeypatch):
             self._polls += 1
             if self._polls == 1:
                 message = SimpleNamespace(
-                    value={"TransID": "TX-100", "TransAmount": "100.00", "MSISDN": "254700000000", "TransTime": "20260704120000"},
+                    value={
+                        "tenant_id": "tenant-a",
+                        "TransID": "TX-100",
+                        "TransAmount": "100.00",
+                        "MSISDN": "254700000000",
+                        "TransTime": "20260704120000",
+                    },
                     topic="mpesa.transactions.raw",
                     partition=0,
                     offset=0,

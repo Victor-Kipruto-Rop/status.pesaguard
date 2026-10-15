@@ -47,10 +47,21 @@ class DataRetentionRule:
 
 
 class RetentionPolicy:
-    def __init__(self, rules: Mapping[str, DataRetentionRule]):
+    def __init__(
+        self,
+        rules: Mapping[str, DataRetentionRule],
+        approval_required: bool = True,
+        version: str = "1",
+    ):
         self.rules = dict(rules)
         if not self.rules:
             raise RetentionPolicyError("retention policy must contain at least one rule")
+        if not isinstance(approval_required, bool):
+            raise RetentionPolicyError("approval_required must be a boolean")
+        if not isinstance(version, str) or not version.strip():
+            raise RetentionPolicyError("retention policy version must be a non-empty string")
+        self.approval_required = approval_required
+        self.version = version.strip()
 
     def rule(self, category: str) -> DataRetentionRule:
         try:
@@ -69,7 +80,13 @@ class RetentionPolicy:
             rules = {key: DataRetentionRule.from_dict(value) for key, value in document["categories"].items()}
         except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
             raise RetentionPolicyError(f"could not load retention policy: {path}") from exc
-        return cls(rules)
+        approval_required = document.get("approval_required")
+        if not isinstance(approval_required, bool):
+            raise RetentionPolicyError("approval_required must be a boolean")
+        version = document.get("version")
+        if not isinstance(version, str) or not version.strip():
+            raise RetentionPolicyError("retention policy version must be a non-empty string")
+        return cls(rules, approval_required=approval_required, version=version)
 
 
 def load_retention_policy(path: Optional[str] = None) -> RetentionPolicy:

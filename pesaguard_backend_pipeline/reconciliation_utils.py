@@ -9,7 +9,15 @@
 Designed to be dependency-light (stdlib only).
 """
 from __future__ import annotations
+from decimal import Decimal
 from typing import Dict, Iterable, Optional
+
+from normalization import (
+    DEFAULT_CURRENCY,
+    NormalizationError,
+    normalize_amount,
+    normalize_currency,
+)
 from datetime import datetime, timedelta
 import logging
 import re
@@ -57,16 +65,24 @@ def _get_reference(record: Dict) -> Optional[str]:
     return None
 
 
-def _get_amount(record: Dict) -> Optional[float]:
-    """Extract numeric amount if present."""
+def _get_currency(record: Dict) -> str:
+    """Normalize an explicit record currency or apply the legacy KES default."""
+    for key in ("Currency", "currency"):
+        if key in record:
+            if record[key] is None or not str(record[key]).strip():
+                raise NormalizationError("currency must not be empty when supplied")
+            return normalize_currency(record[key])
+    return DEFAULT_CURRENCY
+
+
+def _get_amount(record: Dict) -> Optional[Decimal]:
+    """Extract an exact amount at the record currency's minor-unit scale."""
     for k in ("TransAmount", "amount", "amt", "transaction_amount"):
         v = record.get(k)
         if v is None:
             continue
-        try:
-            return float(v)
-        except Exception:
-            continue
+        currency = _get_currency(record)
+        return Decimal(normalize_amount(v, currency=currency))
     return None
 
 
@@ -100,18 +116,21 @@ def normalize_daraja_event(payload: Dict, tenant_id: str = "default") -> Dict:
         out["TransID"] = str(trans_id).strip()
 
     # Amount
-    amt = None
-    try:
-        # Some nested shapes may have numeric values or strings
-        amt = payload.get("TransAmount") or payload.get("amount") or payload.get("Amount")
-    except Exception:
-        amt = None
+    amt = next(
+        (
+            payload[key]
+            for key in ("TransAmount", "amount", "Amount")
+            if payload.get(key) is not None
+        ),
+        None,
+    )
     if amt is not None:
-        try:
-            out["TransAmount"] = float(amt)
-            out["amount"] = float(amt)
-        except Exception:
-            pass
+        currency = _get_currency(payload)
+        normalized_amount = normalize_amount(amt, currency=currency)
+        out["TransAmount"] = normalized_amount
+        out["amount"] = normalized_amount
+        out["Currency"] = currency
+        out["currency"] = currency
 
     # Timestamp
     tt = payload.get("TransTime") or payload.get("TransactionDate") or payload.get("timestamp")
@@ -148,11 +167,16 @@ def exact_match(tx: Dict, settlement: Dict) -> bool:
     if ref_tx != ref_st:
         return False
 
-    amt_tx = _get_amount(tx)
-    amt_st = _get_amount(settlement)
+    try:
+        if _get_currency(tx) != _get_currency(settlement):
+            return False
+        amt_tx = _get_amount(tx)
+        amt_st = _get_amount(settlement)
+    except NormalizationError:
+        return False
     if (amt_tx is not None) and (amt_st is not None):
         return amt_tx == amt_st
-    return True
+    return amt_tx is None and amt_st is None
 
 
 def find_exact_match(tx: Dict, settlements: Iterable[Dict]) -> Optional[Dict]:
@@ -176,13 +200,23 @@ def time_window_match(tx: Dict, settlements: Iterable[Dict], window_seconds: int
     if exact:
         return exact
 
+    try:
+        tx_currency = _get_currency(tx)
+        amt_tx = _get_amount(tx)
+    except NormalizationError:
+        return None
     tx_ts = _get_timestamp(tx)
     ref_tx = _get_reference(tx)
-    amt_tx = _get_amount(tx)
 
     window = timedelta(seconds=window_seconds)
 
     for s in settlements:
+        try:
+            if tx_currency != _get_currency(s):
+                continue
+            amt_s = _get_amount(s)
+        except NormalizationError:
+            continue
         s_ts = _get_timestamp(s)
         # Match by reference inside window
         if ref_tx:
@@ -192,7 +226,6 @@ def time_window_match(tx: Dict, settlements: Iterable[Dict], window_seconds: int
                     return s
         # Fallback: amount + timestamp
         if amt_tx is not None:
-            amt_s = _get_amount(s)
             if (amt_s is not None) and (amt_s == amt_tx):
                 if (tx_ts is None) or (s_ts is None) or (abs(tx_ts - s_ts) <= window):
                     return s

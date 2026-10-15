@@ -15,7 +15,6 @@ x-observability-env: &observability-env
   PROMETHEUS_MULTIPROC_DIR: /tmp/pesaguard-prometheus
   KAFKA_LAG_TOPICS: ${KAFKA_LAG_TOPICS:-pesaguard.transactions.raw,pesaguard.reconciliation.exceptions,pesaguard.notifications.requested}
   KAFKA_LAG_GROUPS: ${KAFKA_LAG_GROUPS:-reconciliation,communications}
-  PESAGUARD_ALERTMANAGER_WEBHOOK_SECRET: ${PESAGUARD_ALERTMANAGER_WEBHOOK_SECRET:-}
   PYTHONPATH: /app:/app/pesaguard_backend_pipeline
 
 services:
@@ -41,6 +40,8 @@ services:
     volumes:
       - ../../monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
       - alertmanager_data:/alertmanager
+    secrets:
+      - alertmanager_webhook_secret
     command: ["--config.file=/etc/alertmanager/alertmanager.yml"]
     depends_on:
       - webhook_receiver
@@ -160,6 +161,7 @@ services:
       PESAGUARD_BIND_HOST: ${PESAGUARD_BIND_HOST_DOCKER:?PESAGUARD_BIND_HOST_DOCKER must be set}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
       PESAGUARD_PROMETHEUS_TOKEN_FILE: /run/secrets/dashboard_metrics_token
+      PESAGUARD_ALERTMANAGER_WEBHOOK_SECRET_FILE: /run/secrets/alertmanager_webhook_secret
       SENTRY_DSN: ${SENTRY_DSN:-}
       SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
       SENTRY_RELEASE: ${SENTRY_RELEASE:-}
@@ -168,6 +170,7 @@ services:
       SENTRY_SEND_DEFAULT_PII: ${SENTRY_SEND_DEFAULT_PII:-false}
     secrets:
       - dashboard_metrics_token
+      - alertmanager_webhook_secret
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/live', timeout=4).read()"]
       interval: 30s
@@ -184,8 +187,23 @@ services:
     build:
       context: ../..
       dockerfile: infra/docker/Dockerfile
-    command: ["python", "pesaguard_backend_pipeline/reconciliation_job.py"]
+    # Module invocation: bare sibling imports (environment, models, ...) and the
+    # package-internal `from .x import y` forms only resolve on the PYTHONPATH
+    # baked into the image (/app + /app/pesaguard_backend_pipeline). A relative
+    # script path (python pesaguard_backend_pipeline/reconciliation_job.py) maps
+    # the script directory -- not /app -- onto sys.path[0] and breaks startup.
+    command: ["python", "-m", "pesaguard_backend_pipeline.reconciliation_job"]
     restart: unless-stopped
+    # File-mtime liveness probe (Rule #40): the consumer has no HTTP port, so
+    # run() touches PESAGUARD_RECONCILIATION_HEARTBEAT_FILE every loop pass.
+    # The default matches HEARTBEAT_STALE_SECONDS (120s); keep both in sync.
+    # No `test:`-only-DB tricks here: a wedged consumer must go unhealthy.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os,time; p=os.getenv('PESAGUARD_RECONCILIATION_HEARTBEAT_FILE','/tmp/pesaguard-reconciliation.heartbeat'); s=max(1,int(os.getenv('PESAGUARD_RECONCILIATION_HEARTBEAT_STALE_SECONDS','120'))); raise SystemExit(0 if (time.time()-os.stat(p).st_mtime) < s else 1)\""]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
     env_file:
       - ${PESAGUARD_COMPOSE_ENV_FILE:-../../.env}
     environment:
@@ -266,6 +284,40 @@ services:
       redpanda:
         condition: service_healthy
 
+  scheduler_worker:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+    command: ["/bin/sh", "pesaguard_backend_pipeline/worker_entrypoint.sh"]
+    restart: unless-stopped
+    env_file:
+      - ${PESAGUARD_COMPOSE_ENV_FILE:-../../.env}
+    environment:
+      <<: [*residency-env, *observability-env]
+      DATABASE_URL: ${DATABASE_URL_DOCKER:?DATABASE_URL_DOCKER must be set}
+      PESAGUARD_TENANT_REGISTRY_DATABASE_URL: ${PESAGUARD_TENANT_REGISTRY_DATABASE_URL_DOCKER:?Least-privilege tenant registry URL must be set}
+      REDIS_URL: ${REDIS_URL_DOCKER:?REDIS_URL_DOCKER must be set}
+      SCHEDULER_WORKER_MODE: "1"
+      SCHEDULER_POLL_SECONDS: ${SCHEDULER_POLL_SECONDS:-15}
+      PESAGUARD_SCHEDULER_HEARTBEAT_FILE: /tmp/pesaguard-scheduler.heartbeat
+      PESAGUARD_SCHEDULER_HEARTBEAT_STALE_SECONDS: ${PESAGUARD_SCHEDULER_HEARTBEAT_STALE_SECONDS:-120}
+      PESAGUARD_ENVIRONMENT: ${PESAGUARD_ENVIRONMENT:-production}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
+      SENTRY_RELEASE: ${SENTRY_RELEASE:-}
+      SENTRY_SEND_DEFAULT_PII: ${SENTRY_SEND_DEFAULT_PII:-false}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os,time; p=os.getenv('PESAGUARD_SCHEDULER_HEARTBEAT_FILE','/tmp/pesaguard-scheduler.heartbeat'); s=max(1,int(os.getenv('PESAGUARD_SCHEDULER_HEARTBEAT_STALE_SECONDS','120'))); raise SystemExit(0 if (time.time()-os.stat(p).st_mtime) < s else 1)\""]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
   communications_worker:
     build:
       context: ../..
@@ -303,3 +355,5 @@ volumes:
 secrets:
   dashboard_metrics_token:
     file: ${PESAGUARD_PROMETHEUS_TOKEN_FILE:?PESAGUARD_PROMETHEUS_TOKEN_FILE must point to a protected token file}
+  alertmanager_webhook_secret:
+    file: ${PESAGUARD_ALERTMANAGER_WEBHOOK_SECRET_FILE:?PESAGUARD_ALERTMANAGER_WEBHOOK_SECRET_FILE must point to a protected secret file}

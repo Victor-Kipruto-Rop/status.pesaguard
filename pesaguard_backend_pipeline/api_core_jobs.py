@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from typing import Any
+from tenant_context import tenant_scoped_argument
 
 
+@tenant_scoped_argument()
 def process_reconciliation_request(tenant_id: str, transaction_id: str) -> dict[str, Any]:
     """Process a stored tenant transaction through the canonical reconciliation worker."""
     import reconciliation_job

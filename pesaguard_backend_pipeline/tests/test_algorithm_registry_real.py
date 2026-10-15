@@ -27,8 +27,24 @@ def test_transaction_validation_algorithm_passes_valid_transaction():
     result = ALGORITHMS.evaluate_algorithm("Transaction Validation Algorithm", tx)
 
     assert result["status"] == "passed"
-    assert result["metadata"]["amount"] == 2500.0
+    assert result["metadata"]["amount"] == "2500.00"
     assert result["metadata"]["state"] == "VALIDATED"
+
+
+@pytest.mark.parametrize("amount", ["NaN", "Infinity", "-Infinity", "1.001", "1e100"])
+def test_transaction_validation_does_not_accept_invalid_money(amount):
+    result = ALGORITHMS.evaluate_algorithm(
+        "Transaction Validation Algorithm",
+        {
+            "transaction_id": "TX-INVALID-MONEY",
+            "amount": amount,
+            "currency": "KES",
+            "timestamp": "2024-06-01T12:00:00Z",
+            "status": "VALIDATED",
+        },
+    )
+
+    assert result["status"] != "passed"
 
 
 def test_transaction_validation_algorithm_rejects_unknown_lifecycle_state():
@@ -86,6 +102,32 @@ def test_transaction_normalization_rejects_invalid_amount_without_defaulting():
     assert "normalized" not in result["metadata"]
 
 
+def test_transaction_normalization_uses_currency_minor_units():
+    valid = ALGORITHMS.evaluate_algorithm(
+        "Transaction Normalization Algorithm",
+        {
+            "TransID": "MP-BHD",
+            "TransAmount": "1.234",
+            "Currency": "BHD",
+            "TransTime": "20240601120000",
+        },
+    )
+    invalid = ALGORITHMS.evaluate_algorithm(
+        "Transaction Normalization Algorithm",
+        {
+            "TransID": "MP-KES",
+            "TransAmount": "1.001",
+            "Currency": "KES",
+            "TransTime": "20240601120000",
+        },
+    )
+
+    assert valid["status"] == "passed"
+    assert valid["metadata"]["normalized"]["amount"] == "1.234"
+    assert invalid["status"] == "failed"
+    assert "normalized" not in invalid["metadata"]
+
+
 def test_transaction_classification_uses_canonical_type_mapping():
     result = ALGORITHMS.evaluate_algorithm(
         "Transaction Classification Algorithm",
@@ -123,6 +165,16 @@ def test_transaction_deduplication_detects_reused_provider_transaction_id():
 
     assert result["status"] == "failed"
     assert result["metadata"]["duplicate_count"] == 1
+
+
+def test_transaction_deduplication_fails_closed_on_invalid_amount():
+    result = ALGORITHMS.evaluate_algorithm(
+        "Transaction Deduplication Algorithm",
+        {"transactions": [{"TransID": "BAD-AMOUNT", "TransAmount": "NaN"}]},
+    )
+
+    assert result["status"] == "failed"
+    assert result["metadata"]["invalid_record_indices"] == [0]
 
 
 def test_transaction_deduplication_does_not_match_records_without_identity():
@@ -249,6 +301,26 @@ def test_risk_scoring_algorithm_uses_fraud_engine():
     assert result["status"] in {"passed", "needs_review"}
     assert "risk_score" in result["metadata"], result
     assert 0.0 <= float(result["metadata"]["risk_score"]) <= 1.0
+
+
+def test_risk_scoring_accepts_derived_baselines_with_subminor_precision():
+    result = ALGORITHMS.evaluate_algorithm(
+        "Risk Score Calculation Algorithm",
+        {
+            "TransID": "DERIVED-BASELINE",
+            "TransAmount": "10.00",
+            "Currency": "KES",
+            "TransTime": "20240601120000",
+            "tenant_baseline": {
+                "currency": "KES",
+                "mean_amount": "10.005",
+                "std_amount": "1.001",
+            },
+        },
+    )
+
+    assert result["status"] in {"passed", "needs_review"}
+    assert "risk_score" in result["metadata"]
 
 
 def test_risk_scoring_algorithm_routes_high_risk_to_human_review():

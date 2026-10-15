@@ -21,7 +21,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any, Callable, Dict, Iterable, List, Tuple
 
 
@@ -67,26 +67,47 @@ def _as_mapping(value: Any) -> Mapping[str, Any]:
     return {}
 
 
-def _coerce_float(value: Any, default: float = 0.0) -> float:
+def _money_contract() -> Any:
+    normalizer = _load_module("normalization")
+    if normalizer is not None and callable(getattr(normalizer, "normalize_amount", None)):
+        return normalizer
     try:
-        if value is None:
-            return default
-        return float(value)
-    except (TypeError, ValueError):
-        return default
+        return importlib.import_module("normalization")
+    except ImportError as exc:
+        raise RuntimeError("Authoritative monetary normalization is unavailable.") from exc
 
 
-def _finite_decimal(value: Any) -> Decimal | None:
-    if value is None or isinstance(value, bool):
-        return None
+def _money_fields(record: Mapping[str, Any], *, default_currency: str = "KES") -> tuple[str, str]:
+    normalizer = _money_contract()
+    raw_amount = record.get("amount")
+    if raw_amount is None:
+        raw_amount = record.get("TransAmount")
+    raw_currency = record.get("currency")
+    if raw_currency is None:
+        raw_currency = record.get("Currency")
+    currency = normalizer.normalize_currency(raw_currency, default=default_currency)
+    amount = normalizer.normalize_amount(raw_amount, currency=currency)
+    return amount, currency
+
+
+def _finite_decimal(
+    value: Any,
+    currency: str = "KES",
+    *,
+    allow_derived_precision: bool = False,
+) -> Decimal | None:
     try:
-        number = Decimal(str(value))
-        representable = math.isfinite(float(number))
-    except (InvalidOperation, TypeError, ValueError):
+        normalizer = _money_contract()
+        number = normalizer.parse_decimal(value)
+        if abs(number) > normalizer.MAX_TRANSACTION_AMOUNT:
+            return None
+        if allow_derived_precision:
+            return number
+        quantum = normalizer.currency_quantum(currency)
+        normalized = normalizer.quantize_money(number, currency=currency)
+        return number if (number == normalized and abs(number) >= quantum) or number == 0 else None
+    except (ArithmeticError, TypeError, ValueError):
         return None
-    except OverflowError:
-        return None
-    return number if number.is_finite() and representable else None
 
 
 def _hash_value(value: Any) -> str:
@@ -173,12 +194,18 @@ def _evaluate_transaction_payload(payload: Any, *, algorithm_name: str, category
         )
 
     tx_id = str(transaction.get("transaction_id") or transaction.get("TransID") or transaction.get("trans_id") or "").strip()
-    amount = _coerce_float(transaction.get("amount") or transaction.get("TransAmount"), 0.0)
-    currency = str(transaction.get("currency") or transaction.get("Currency") or "").strip()
+    raw_currency = transaction.get("currency")
+    if raw_currency is None:
+        raw_currency = transaction.get("Currency")
+    currency = str(raw_currency or "").strip()
+    try:
+        amount, currency = _money_fields(transaction)
+    except (TypeError, ValueError, RuntimeError):
+        amount = None
     ts = transaction.get("timestamp") or transaction.get("TransTime") or transaction.get("created_at")
     state = str(transaction.get("status") or transaction.get("state") or "").strip().upper()
 
-    if not tx_id or not currency or amount <= 0 or not ts:
+    if not tx_id or not currency or amount is None or not ts:
         return AlgorithmResult(
             algorithm=algorithm_name,
             category=category,
@@ -419,7 +446,17 @@ def _evaluate_ledger_payload(payload: Any, *, algorithm_name: str, category: str
             metadata={"missing_fields": missing_fields, "input_hash": _hash_value(entry)},
         )
 
-    values = {field: _finite_decimal(entry[field]) for field in required_fields}
+    try:
+        currency = _money_contract().normalize_currency(
+            entry.get("currency", entry.get("Currency", "KES")),
+            default="KES",
+        )
+    except (TypeError, ValueError, RuntimeError):
+        currency = None
+    values = {
+        field: _finite_decimal(entry[field], currency) if currency is not None else None
+        for field in required_fields
+    }
     invalid_fields = [field for field, value in values.items() if value is None]
     if invalid_fields:
         return AlgorithmResult(
@@ -443,7 +480,7 @@ def _evaluate_ledger_payload(payload: Any, *, algorithm_name: str, category: str
         )
 
     expected_balance = credit - debit
-    if abs(balance - expected_balance) > Decimal("0.01"):
+    if abs(balance - expected_balance) > _money_contract().currency_quantum(currency):
         return AlgorithmResult(
             algorithm=algorithm_name,
             category=category,
@@ -511,9 +548,13 @@ def _evaluate_fraud_payload(payload: Any, *, algorithm_name: str, category: str)
     raw_amount = transaction.get("TransAmount")
     if raw_amount is None:
         raw_amount = transaction.get("amount")
-    amount = _finite_decimal(raw_amount)
+    try:
+        amount, currency = _money_fields(transaction)
+    except (TypeError, ValueError, RuntimeError):
+        amount = None
+        currency = "KES"
     timestamp = transaction.get("TransTime") or transaction.get("timestamp") or transaction.get("created_at")
-    if not transaction_id or amount is None or amount <= 0 or not _valid_risk_timestamp(timestamp):
+    if not transaction_id or amount is None or not _valid_risk_timestamp(timestamp):
         return AlgorithmResult(
             algorithm=algorithm_name,
             category=category,
@@ -540,14 +581,13 @@ def _evaluate_fraud_payload(payload: Any, *, algorithm_name: str, category: str)
         )
     invalid_history_indices = []
     for index, item in enumerate(history):
-        raw_history_amount = item.get("TransAmount")
-        if raw_history_amount is None:
-            raw_history_amount = item.get("amount")
-        history_amount = _finite_decimal(raw_history_amount)
+        try:
+            history_amount, _ = _money_fields(item, default_currency=currency)
+        except (TypeError, ValueError, RuntimeError):
+            history_amount = None
         history_timestamp = item.get("TransTime") or item.get("timestamp") or item.get("created_at")
         if (
             history_amount is None
-            or history_amount <= 0
             or (history_timestamp is not None and not _valid_risk_timestamp(history_timestamp))
         ):
             invalid_history_indices.append(index)
@@ -570,13 +610,35 @@ def _evaluate_fraud_payload(payload: Any, *, algorithm_name: str, category: str)
             metadata={"input_hash": _hash_value(transaction)},
         )
     if isinstance(baseline, Mapping):
+        try:
+            baseline_currency = _money_contract().normalize_currency(
+                baseline.get("currency", baseline.get("Currency", currency)),
+                default=currency,
+            )
+        except (TypeError, ValueError, RuntimeError):
+            baseline_currency = None
+        if baseline_currency != currency:
+            return AlgorithmResult(
+                algorithm=algorithm_name,
+                category=category,
+                status="failed",
+                confidence=1.0,
+                evidence="Fraud assessment baseline currency does not match the transaction currency.",
+                metadata={"input_hash": _hash_value(transaction)},
+            )
         baseline_fields = ("mean_amount", "std_amount", "customer_mean_amount")
         invalid_baseline_fields = [
             field
             for field in baseline_fields
             if field in baseline
             and (
-                (value := _finite_decimal(baseline[field])) is None
+                (
+                    value := _finite_decimal(
+                        baseline[field],
+                        currency,
+                        allow_derived_precision=True,
+                    )
+                ) is None
                 or value < 0
             )
         ]
@@ -685,11 +747,11 @@ def _evaluate_statement_payload(payload: Any, *, algorithm_name: str, category: 
 
 
 def _duplicate_signature(item: Mapping[str, Any]) -> str:
-    amount = _coerce_float(item.get("TransAmount") or item.get("amount"), 0.0)
+    amount, currency = _money_fields(item)
     reference = str(item.get("BillRefNumber") or item.get("reference") or item.get("transaction_id") or item.get("TransID") or "").strip()
     phone = str(item.get("MSISDN") or item.get("phone_number") or item.get("msisdn") or "").strip()
     ts = str(item.get("TransTime") or item.get("timestamp") or item.get("created_at") or "").strip()
-    return hashlib.sha256(f"{reference}|{amount}|{phone}|{ts}".encode("utf-8")).hexdigest()
+    return hashlib.sha256(f"{reference}|{amount}|{currency}|{phone}|{ts}".encode("utf-8")).hexdigest()
 
 
 def _evaluate_exact_transaction_match(payload: Any, *, algorithm_name: str, category: str) -> AlgorithmResult:
@@ -767,14 +829,30 @@ def _evaluate_duplicate_payment_detection(payload: Any, *, algorithm_name: str, 
 
     seen = {}
     duplicates = []
+    invalid_indices = []
     for idx, item in enumerate(records):
         if not isinstance(item, Mapping):
+            invalid_indices.append(idx)
             continue
-        sig = _duplicate_signature(item)
+        try:
+            sig = _duplicate_signature(item)
+        except (TypeError, ValueError, RuntimeError):
+            invalid_indices.append(idx)
+            continue
         if sig in seen:
             duplicates.append({"first_index": seen[sig], "duplicate_index": idx, "signature": sig})
         else:
             seen[sig] = idx
+
+    if invalid_indices:
+        return AlgorithmResult(
+            algorithm=algorithm_name,
+            category=category,
+            status="failed",
+            confidence=1.0,
+            evidence="Duplicate detection cannot proceed: records contain invalid monetary values.",
+            metadata={"invalid_record_indices": invalid_indices, "input_hash": _hash_value(transaction)},
+        )
 
     if duplicates:
         return AlgorithmResult(
@@ -794,6 +872,207 @@ def _evaluate_duplicate_payment_detection(payload: Any, *, algorithm_name: str, 
         evidence="No duplicate payment signatures were found across the evaluated transaction set.",
         metadata={"duplicate_count": 0},
     )
+
+
+# --- New specialized transaction handlers (normalization, classification, idempotency, ordering)
+
+def _evaluate_transaction_normalization(payload: Any, *, algorithm_name: str, category: str) -> AlgorithmResult:
+    transaction = _as_mapping(payload)
+    if not transaction:
+        return AlgorithmResult(
+            algorithm=algorithm_name,
+            category=category,
+            status="failed",
+            confidence=0.0,
+            evidence="No transaction payload supplied for normalization.",
+            metadata={"input_hash": _hash_value(payload)},
+        )
+
+    try:
+        normalizer = _money_contract()
+        transaction_id = transaction.get("TransID") or transaction.get("transaction_id")
+        transaction_type = transaction.get("TransactionType") or transaction.get("transaction_type")
+        provider_value = transaction.get("Provider") or transaction.get("provider")
+        timestamp = transaction.get("TransTime") or transaction.get("timestamp")
+        amount, currency = _money_fields(transaction)
+        normalized = {
+            "transaction_id": normalizer.normalize_identifier(transaction_id),
+            "amount": amount,
+            "currency": currency,
+            "timestamp": normalizer.normalize_timestamp(timestamp),
+            "transaction_type": (
+                normalizer.normalize_transaction_type(transaction_type)
+                if transaction_type
+                else ""
+            ),
+            "provider": normalizer.normalize_provider(provider_value) if provider_value else "",
+        }
+
+        return AlgorithmResult(
+            algorithm=algorithm_name,
+            category=category,
+            status="passed",
+            confidence=0.95,
+            evidence="Transaction normalized using canonical domain rules.",
+            metadata={"normalized": normalized, "input_hash": _hash_value(transaction)},
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        return AlgorithmResult(
+            algorithm=algorithm_name,
+            category=category,
+            status="failed",
+            confidence=0.0,
+            evidence=f"Normalization error: {exc}",
+            metadata={"input_hash": _hash_value(transaction)},
+        )
+
+
+def _evaluate_transaction_classification(payload: Any, *, algorithm_name: str, category: str) -> AlgorithmResult:
+    transaction = _as_mapping(payload)
+    ttype = str(transaction.get("TransactionType") or transaction.get("transaction_type") or "").strip().upper()
+    mapping = {"STK PUSH": "PAYMENT", "C2B": "PAYMENT", "B2C": "PAYOUT"}
+    mapped = mapping.get(ttype, "UNKNOWN")
+    status = "passed" if mapped != "UNKNOWN" else "needs_review"
+    evidence = "Mapped transaction type to canonical classification." if mapped != "UNKNOWN" else "Could not classify transaction type."
+    return AlgorithmResult(
+        algorithm=algorithm_name,
+        category=category,
+        status=status,
+        confidence=0.9 if mapped != "UNKNOWN" else 0.5,
+        evidence=evidence,
+        metadata={"transaction_type": mapped, "input_type": ttype, "input_hash": _hash_value(transaction)},
+    )
+
+
+def _evaluate_transaction_state_machine(payload: Any, *, algorithm_name: str, category: str) -> AlgorithmResult:
+    data = _as_mapping(payload)
+    from_state = str(data.get("from_state") or "").strip().upper()
+    to_state = str(data.get("to_state") or "").strip().upper()
+    if not from_state or not to_state:
+        return AlgorithmResult(algorithm=algorithm_name, category=category, status="failed", confidence=0.0, evidence="Missing from_state or to_state", metadata={"input_hash": _hash_value(payload)})
+    lifecycle = _load_module("lifecycle")
+    if lifecycle is not None and hasattr(lifecycle, "transition_transaction"):
+        try:
+            lifecycle.transition_transaction(from_state, to_state)
+            ok = True
+        except Exception:
+            ok = False
+    else:
+        # Simple fallback graph
+        allowed = {("RECEIVED", "VALIDATED"), ("VALIDATED", "RECONCILED")}
+        ok = (from_state, to_state) in allowed
+    return AlgorithmResult(
+        algorithm=algorithm_name,
+        category=category,
+        status=("passed" if ok else "failed"),
+        confidence=(0.95 if ok else 0.9),
+        evidence=("Transition is valid in lifecycle model." if ok else f"Transition from {from_state} to {to_state} is not allowed."),
+        metadata={"from_state": from_state, "to_state": to_state, "input_hash": _hash_value(payload)},
+    )
+
+
+def _evaluate_transaction_deduplication(payload: Any, *, algorithm_name: str, category: str) -> AlgorithmResult:
+    transaction = _as_mapping(payload)
+    if not transaction:
+        return AlgorithmResult(
+            algorithm=algorithm_name,
+            category=category,
+            status="failed",
+            confidence=0.0,
+            evidence="No transaction set supplied for deduplication.",
+            metadata={"input_hash": _hash_value(payload)},
+        )
+
+    records = transaction.get("transactions") or transaction.get("records") or transaction.get("payment_history") or []
+    if not isinstance(records, Sequence):
+        records = [records]
+
+    seen = {}
+    duplicates = []
+    invalid_indices = []
+
+    identity_fields = ("TransID", "transaction_id", "BillRefNumber", "reference", "MSISDN", "msisdn", "phone_number")
+
+    for idx, item in enumerate(records):
+        if not isinstance(item, Mapping):
+            invalid_indices.append(idx)
+            continue
+        has_identity = any((item.get(f) for f in identity_fields))
+        if not has_identity:
+            invalid_indices.append(idx)
+            continue
+        try:
+            sig = _duplicate_signature(item)
+        except (TypeError, ValueError, RuntimeError):
+            invalid_indices.append(idx)
+            continue
+        if sig in seen:
+            duplicates.append({"first_index": seen[sig], "duplicate_index": idx, "signature": sig})
+        else:
+            seen[sig] = idx
+
+    if invalid_indices:
+        return AlgorithmResult(
+            algorithm=algorithm_name,
+            category=category,
+            status="failed",
+            confidence=0.95,
+            evidence="Deduplication cannot proceed: records are missing identity fields or contain invalid monetary values.",
+            metadata={"invalid_record_indices": invalid_indices, "input_hash": _hash_value(transaction)},
+        )
+
+    if duplicates:
+        return AlgorithmResult(
+            algorithm=algorithm_name,
+            category=category,
+            status="failed",
+            confidence=0.99,
+            evidence=f"Duplicate payment signatures detected: {len(duplicates)} repeated transaction fingerprints.",
+            metadata={"duplicate_count": len(duplicates), "duplicates": duplicates},
+        )
+
+    return AlgorithmResult(
+        algorithm=algorithm_name,
+        category=category,
+        status="passed",
+        confidence=0.95,
+        evidence="No duplicate payment signatures were found across the evaluated transaction set.",
+        metadata={"duplicate_count": 0, "input_hash": _hash_value(transaction)},
+    )
+
+
+def _evaluate_idempotency_key(payload: Any, *, algorithm_name: str, category: str) -> AlgorithmResult:
+    txn = _as_mapping(payload)
+    if not txn:
+        return AlgorithmResult(algorithm=algorithm_name, category=category, status="failed", confidence=0.0, evidence="No payload", metadata={"input_hash": _hash_value(payload)})
+    amount = str(txn.get("TransAmount") or txn.get("amount") or "")
+    ts = str(txn.get("TransTime") or txn.get("timestamp") or "")
+    msisdn = str(txn.get("MSISDN") or txn.get("msisdn") or txn.get("phone_number") or "")
+    msisdn_hash = hashlib.sha256(msisdn.encode("utf-8")).hexdigest() if msisdn else ""
+    canonical = json.dumps({"amount": amount, "timestamp": ts, "msisdn_hash": msisdn_hash}, sort_keys=True)
+    key = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return AlgorithmResult(algorithm=algorithm_name, category=category, status="passed", confidence=0.98, evidence="Stable idempotency key produced.", metadata={"idempotency_key": key, "input_hash": _hash_value(payload)})
+
+
+def _evaluate_out_of_order_events(payload: Any, *, algorithm_name: str, category: str) -> AlgorithmResult:
+    data = _as_mapping(payload)
+    records = data.get("transactions") or []
+    indices = []
+    last_ts = None
+    for idx, rec in enumerate(records):
+        ts = str((rec or {}).get("TransTime") or (rec or {}).get("timestamp") or "")
+        try:
+            cur = datetime.fromisoformat(ts)
+        except Exception:
+            try:
+                cur = datetime.strptime(ts, "%Y%m%d%H%M%S")
+            except Exception:
+                continue
+        if last_ts is not None and cur < last_ts:
+            indices.append(idx)
+        last_ts = cur
+    status = "needs_review" if indices else "passed"
+    return AlgorithmResult(algorithm=algorithm_name, category=category, status=status, confidence=0.75 if indices else 0.98, evidence=("Out-of-order events detected." if indices else "Event ordering is in sequence."), metadata={"out_of_order_indices": indices, "input_hash": _hash_value(payload)})
 
 
 def _evaluate_callback_replay_protection(payload: Any, *, algorithm_name: str, category: str) -> AlgorithmResult:
@@ -910,11 +1189,25 @@ CATEGORY_IMPLEMENTERS: Dict[str, Callable[[Any, str, str], AlgorithmResult]] = {
 }
 
 SPECIALIZED_ALGORITHM_HANDLERS: Dict[str, Callable[[Any, str, str], AlgorithmResult]] = {
+    # Reconciliation / matching
     _normalize_name("Exact Transaction Matching Algorithm"): _evaluate_exact_transaction_match,
+    # Duplicate and deduplication handlers
     _normalize_name("Duplicate Payment Detection Algorithm"): _evaluate_duplicate_payment_detection,
+    _normalize_name("Transaction Deduplication Algorithm"): _evaluate_transaction_deduplication,
+    # Callback / replay protection
     _normalize_name("Callback Replay Protection Algorithm"): _evaluate_callback_replay_protection,
+    # Daraja / callback signature verification
+    _normalize_name("Callback Signature Verification Algorithm"): _evaluate_daraja_payload,
+    # Ledger and risk
     _normalize_name("Debit-Credit Balance Validation Algorithm"): _evaluate_ledger_payload,
     _normalize_name("Risk Score Calculation Algorithm"): _evaluate_fraud_payload,
+    # New transaction-processing specialized handlers
+    _normalize_name("Transaction Normalization Algorithm"): _evaluate_transaction_normalization,
+    _normalize_name("Transaction Classification Algorithm"): _evaluate_transaction_classification,
+    _normalize_name("Transaction State Machine Algorithm"): _evaluate_transaction_state_machine,
+    _normalize_name("Idempotency Key Algorithm"): _evaluate_idempotency_key,
+    _normalize_name("Out-of-Order Event Processing Algorithm"): _evaluate_out_of_order_events,
+    _normalize_name("Transaction Ordering Algorithm"): _evaluate_out_of_order_events,
 }
 
 

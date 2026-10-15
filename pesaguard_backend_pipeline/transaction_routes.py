@@ -177,10 +177,17 @@ def create_transaction_blueprint(
         normalized = dict(payload)
         normalized.setdefault("TransID", provider_transaction_id)
         normalized.setdefault("BusinessShortCode", provider_account)
+        quality_processor = None
+        if str(payload.get("provider") or "").strip().lower() in {"mpesa", "safaricom"}:
+            from ingestion import IngestionService
+
+            quality_processor = IngestionService._quality_processor
+
         result = event_store.mark_processed(
             normalized,
             tenant_id=tenant_id,
             idempotency_key_override=idempotency_key,
+            quality_processor=quality_processor,
         )
         if result is ProcessResult.CONFLICT:
             return jsonify({
@@ -189,6 +196,13 @@ def create_transaction_blueprint(
             }), 409
         if result is ProcessResult.ERROR:
             return jsonify({"error": "transaction_not_persisted", "message": "Transaction could not be persisted."}), 500
+        if result is ProcessResult.QUARANTINED:
+            response_payload = {
+                "status": "quarantined",
+                "idempotency_key": idempotency_key,
+            }
+            validate_transaction_response(response_payload)
+            return jsonify(response_payload), 202
 
         response_payload = {
             "status": "accepted",
@@ -277,9 +291,20 @@ def create_transaction_blueprint(
             ).one_or_none()
             if transaction is None:
                 return jsonify({"error": "not_found", "message": "Transaction not found."}), 404
+            processed = session.query(ProcessedTransaction).filter(
+                ProcessedTransaction.tenant_id == tenant_id,
+                ProcessedTransaction.provider_account_id == transaction.provider_account_id,
+                ProcessedTransaction.daraja_trans_id == transaction.trans_id,
+            ).one_or_none()
             return jsonify({
                 "transaction_id": transaction.id,
                 "status": transaction.status,
+                "ingestion": {
+                    "status": processed.status if processed is not None else "stored",
+                    "attempts": processed.webhook_attempt_number if processed is not None else 1,
+                    "source_schema_version": transaction.source_schema_version,
+                    "error": "ingestion_failed" if processed is not None and processed.error_reason else None,
+                },
             }), 200
         finally:
             session.close()
@@ -488,6 +513,15 @@ def create_transaction_blueprint(
             }
             decision = assess_transaction(transaction_data, history)
             assessment = persist_assessment(session, tenant_id, transaction.trans_id, decision)
+            from fraud_events import stage_fraud_analysis_event
+
+            stage_fraud_analysis_event(
+                session,
+                tenant_id=tenant_id,
+                transaction_id=transaction.trans_id,
+                decision=decision,
+                event_key=f"fraud-analysis:{idempotency_key}",
+            )
             response_payload = _risk_score_payload(transaction.id, assessment)
 
             if record is None:

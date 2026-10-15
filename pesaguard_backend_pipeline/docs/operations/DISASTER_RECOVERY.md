@@ -47,10 +47,11 @@ For a repeatable restore drill, run the repository command against a disposable 
 py -3.13 pesaguard_backend_pipeline/operations/restore_drill.py `
   --backup-file $env:BACKUP_FILE `
   --database-url $env:RESTORE_DATABASE_URL `
+  --confirm-isolated-target `
   --output restore-drill.json
 ```
 
-The command restores the artifact, runs the integrity validator, records duration and validation output, and exits non-zero unless both restore and validation succeed. The target URL must point to an isolated database, never the production database.
+The command restores the artifact, runs the integrity validator, records duration and validation output, and exits non-zero unless both restore and validation succeed. It requires explicit isolated-target confirmation and rejects a target matching the configured PostgreSQL application database.
 
 ## Failure drills
 

@@ -19,6 +19,7 @@ import re
 import secrets
 import base64
 import struct
+import sys
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -160,6 +161,30 @@ def _idempotent_route(rule, **options):
         return app.route(rule, endpoint=endpoint, **route_options)(view_func)
 
     return decorator
+
+
+def _tenant_scoped_request(view_func):
+    """Scope public authentication lookups to their requested tenant."""
+    @wraps(view_func)
+    def wrapped(*args, **kwargs):
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return jsonify({
+                "error": "invalid_request",
+                "message": "A JSON object is required.",
+            }), 400
+        tenant_id = payload.get("tenant_id") or request.args.get("tenant_id") or "default"
+        from tenant_context import is_valid_tenant_id, tenant_scope
+
+        if not is_valid_tenant_id(tenant_id):
+            return jsonify({
+                "error": "invalid_tenant_id",
+                "message": "tenant_id has an invalid format.",
+            }), 400
+        with tenant_scope(tenant_id):
+            return view_func(*args, **kwargs)
+
+    return wrapped
 
 
 DATABASE_URL = required_env("DATABASE_URL")
@@ -980,7 +1005,8 @@ def _password_policy_error(password: Any) -> Optional[str]:
     if password.casefold() in _COMMON_PASSWORDS:
         return "Password is too common."
     if os.getenv("PESAGUARD_HIBP_ENABLED", "0").strip().lower() in {"1", "true", "yes"}:
-        digest = hashlib.sha1(password.encode("utf-8")).hexdigest().upper()
+        # HIBP's range API requires SHA-1 and receives only the digest prefix.
+        digest = hashlib.sha1(password.encode("utf-8"), usedforsecurity=False).hexdigest().upper()
         try:
             response = requests.get(
                 f"https://api.pwnedpasswords.com/range/{digest[:5]}",
@@ -1284,18 +1310,53 @@ def _registration_audit(session, account: UserAccount, action: str, outcome: str
     ))
 
 
+def _public_registration_tenant_id() -> str | None:
+    configured_tenant = (
+        app.config.get("PUBLIC_REGISTRATION_TENANT_ID")
+        or os.getenv("PESAGUARD_PUBLIC_REGISTRATION_TENANT_ID")
+        or os.getenv("TENANT_ID")
+    )
+    if configured_tenant:
+        return str(configured_tenant).strip()
+    if _is_production_environment():
+        return None
+    return "default"
+
+
 def _register_local_user(data: Dict[str, Any]) -> Dict[str, Any]:
+    if data.get("website") or data.get("company_website"):
+        return {"status": "accepted"}
+
+    tenant_id = _public_registration_tenant_id()
+    from tenant_context import is_valid_tenant_id, tenant_scope
+
+    if not is_valid_tenant_id(tenant_id):
+        return {
+            "error": "registration_unavailable",
+            "message": "Public registration is not configured.",
+        }
+    requested_tenant = data.get("tenant_id")
+    if requested_tenant is not None and str(requested_tenant).strip() != tenant_id:
+        return {
+            "error": "tenant_selection_not_allowed",
+            "message": "Public registration cannot select a tenant.",
+        }
+
+    with tenant_scope(tenant_id):
+        return _register_local_user_for_tenant(data, tenant_id)
+
+
+def _register_local_user_for_tenant(
+    data: Dict[str, Any], tenant_id: str
+) -> Dict[str, Any]:
     username = str(data.get("username") or "").strip()
     email = _normalize_registration_email(data.get("email"))
     password = data.get("password")
-    tenant_id = str(data.get("tenant_id") or "default").strip() or "default"
     first_name = str(data.get("first_name") or "").strip() or None
     last_name = str(data.get("last_name") or "").strip() or None
     display_name = str(data.get("display_name") or "").strip() or None
     phone = str(data.get("phone") or "").strip() or None
 
-    if data.get("website") or data.get("company_website"):
-        return {"status": "accepted"}
     if not username or not email or not isinstance(password, str):
         return {"error": "invalid_request", "message": "username, email, and password are required."}
     policy_error = _password_policy_error(password)
@@ -2607,6 +2668,7 @@ def _verify_credentials(username: str, password: str) -> Optional[Dict[str, Any]
 
 
 @_idempotent_route("/auth/login", methods=["POST"])
+@_tenant_scoped_request
 @rate_limit(max_requests_per_minute=30, tokens_per_request=1, endpoint_name="auth_login", fail_closed=True)
 def login():
     """Authenticate operational users and issue secure signed session tokens."""
@@ -2823,6 +2885,7 @@ def login():
                             return jsonify({
                                 "status": "mfa_challenge_required",
                                 "challenge_id": challenge.id,
+                                "tenant_id": user_record.tenant_id,
                                 "challenge_type": "webauthn",
                                 "options": options,
                                 "expires_in": mfa_policy["challenge_ttl_seconds"],
@@ -3038,16 +3101,23 @@ def refresh_auth_tokens():
 @rate_limit(max_requests_per_minute=30, tokens_per_request=1, endpoint_name="auth_register")
 def register_user():
     """Create a new local user account with password and email verification rules."""
-    data = request.json or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({
+            "error": "invalid_request",
+            "message": "A JSON object is required.",
+        }), 400
     result = _register_local_user(data)
     if result.get("status") in {"accepted", "verification_resent"}:
         return jsonify({"status": "accepted"}), 202
     if "error" in result:
-        return jsonify(result), 400
+        status_code = 503 if result["error"] == "registration_unavailable" else 400
+        return jsonify(result), status_code
     return jsonify({"status": "success", **result}), 201
 
 
 @_idempotent_route("/auth/verify-email", methods=["POST"])
+@_tenant_scoped_request
 @rate_limit(max_requests_per_minute=30, tokens_per_request=1, endpoint_name="auth_verify_email")
 def verify_email():
     """Verify a local-user email using the issued token."""
@@ -3112,6 +3182,7 @@ def verify_email():
 
 
 @_idempotent_route("/auth/verify-email/resend", methods=["POST"])
+@_tenant_scoped_request
 @rate_limit(max_requests_per_minute=3, tokens_per_request=1, endpoint_name="auth_verify_email_resend")
 def resend_verification_email():
     """Resend verification without revealing whether an account exists."""
@@ -3142,6 +3213,7 @@ def resend_verification_email():
 
 
 @_idempotent_route("/auth/password-reset/request", methods=["POST"])
+@_tenant_scoped_request
 @rate_limit(max_requests_per_minute=5, tokens_per_request=1, endpoint_name="auth_password_reset_request")
 def password_reset_request():
     """Issue a password-reset token for a known local user email."""
@@ -3195,6 +3267,7 @@ def password_reset_request():
 
 
 @_idempotent_route("/auth/password-reset/confirm", methods=["POST"])
+@_tenant_scoped_request
 @rate_limit(max_requests_per_minute=10, tokens_per_request=1, endpoint_name="auth_password_reset_confirm")
 def password_reset_confirm():
     """Use a valid reset token to rotate the user's password."""
@@ -5691,10 +5764,12 @@ def _verify_webauthn_assertion(
 
 
 @_idempotent_route("/auth/mfa/webauthn/login/verify", methods=["POST"])
+@_tenant_scoped_request
 @rate_limit(max_requests_per_minute=10, endpoint_name="mfa_webauthn_login_verify", fail_closed=True)
 def verify_webauthn_login_route():
     payload = request.get_json(silent=True) or {}
     challenge_id = str(payload.get("challenge_id") or "")
+    tenant_id = payload.get("tenant_id") or "default"
     credential = payload.get("credential")
     if not challenge_id or not isinstance(credential, dict):
         return _api_error("invalid_request", "challenge_id and credential are required.", 400)
@@ -5703,6 +5778,7 @@ def verify_webauthn_login_route():
     try:
         challenge = session.query(MFAChallenge).filter_by(
             id=challenge_id,
+            tenant_id=tenant_id,
             challenge_type="webauthn_login",
         ).with_for_update().first()
         if challenge is None:
@@ -6546,7 +6622,12 @@ def verify_mfa_route():
         if not record:
             return _api_error("resource_not_found", "MFA challenge not found.", 404)
         now = datetime.now(timezone.utc)
-        if record.status != "pending" or record.expires_at <= now or record.attempts >= 5:
+        # SQLite returns stored timestamps without tzinfo; compare like-for-like
+        # so an expired challenge is refused instead of raising a 500.
+        expires_at = record.expires_at
+        if expires_at is not None and expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if record.status != "pending" or (expires_at is not None and expires_at <= now) or record.attempts >= 5:
             return _api_success({"verified": False, "status": record.status}, 200)
         record.attempts += 1
         verified = hmac.compare_digest(record.code_hash, hashlib.sha256(str(code).encode("utf-8")).hexdigest())
@@ -6664,7 +6745,9 @@ def create_webhook():
             action="create_webhook",
             details={"webhook_id": result.get("id"), "url": data.get("url"), "event_types": result.get("event_types")},
         )
-        return jsonify(result), 201
+        response = jsonify(result)
+        response.headers["Cache-Control"] = "no-store"
+        return response, 201
     finally:
         session.close()
 
@@ -6713,13 +6796,70 @@ def update_webhook(webhook_id: str):
         result = webhook_mgr.update_webhook(webhook_id, tenant_id=tenant_id, **data)
         if result.get("error") == "webhook_not_found":
             return jsonify(result), 404
+        if result.get("error") == "signing_secret_required":
+            return jsonify(result), 409
+        if "error" in result:
+            return jsonify(result), 400
 
         _record_action_audit(
             session,
             tenant_id=tenant_id or "default",
             actor=getattr(current_user, "user_id", "system"),
             action="update_webhook",
-            details={"webhook_id": webhook_id, **data},
+            details={
+                "webhook_id": webhook_id,
+                **{key: value for key, value in data.items() if key != "signing_secret"},
+            },
+        )
+        return jsonify(result), 200
+    finally:
+        session.close()
+
+
+@app.route("/webhooks/<webhook_id>/rotate-secret", methods=["POST"])
+@require_auth()
+@require_resource_access("manage:webhooks", "webhook_id")
+def rotate_webhook_secret(webhook_id: str):
+    """Rotate the tenant-owned signing secret; disclose it only in this no-store response."""
+    current_user = get_current_user()
+    tenant_id = getattr(current_user, "tenant_id", None)
+    session = SessionLocal()
+    try:
+        result = WebhookManager(session).rotate_signing_secret(webhook_id, tenant_id)
+        if result.get("error") == "webhook_not_found":
+            return jsonify(result), 404
+        _record_action_audit(
+            session,
+            tenant_id=tenant_id,
+            actor=getattr(current_user, "user_id", "system"),
+            action="rotate_webhook_secret",
+            details={"webhook_id": webhook_id},
+        )
+        response = jsonify(result)
+        response.headers["Cache-Control"] = "no-store"
+        return response, 200
+    finally:
+        session.close()
+
+
+@app.route("/webhooks/<webhook_id>/revoke-secret", methods=["POST"])
+@require_auth()
+@require_resource_access("manage:webhooks", "webhook_id")
+def revoke_webhook_secret(webhook_id: str):
+    """Revoke a tenant-owned signing secret and disable outbound delivery."""
+    current_user = get_current_user()
+    tenant_id = getattr(current_user, "tenant_id", None)
+    session = SessionLocal()
+    try:
+        result = WebhookManager(session).revoke_signing_secret(webhook_id, tenant_id)
+        if result.get("error") == "webhook_not_found":
+            return jsonify(result), 404
+        _record_action_audit(
+            session,
+            tenant_id=tenant_id,
+            actor=getattr(current_user, "user_id", "system"),
+            action="revoke_webhook_secret",
+            details={"webhook_id": webhook_id},
         )
         return jsonify(result), 200
     finally:
@@ -6762,18 +6902,21 @@ def create_escalation_rule():
 
     try:
         engine_instance = EscalationEngine(session)
-        result = engine_instance.create_rule(
-            tenant_id=tenant_id,
-            name=data.get("name"),
-            description=data.get("description"),
-            condition_field=data.get("condition_field"),
-            condition_operator=data.get("condition_operator"),
-            condition_value=data.get("condition_value"),
-            action=data.get("action"),
-            target=data.get("target"),
-            webhook_url=data.get("webhook_url"),
-            priority=data.get("priority", 0),
-        )
+        try:
+            result = engine_instance.create_rule(
+                tenant_id=tenant_id,
+                name=data.get("name"),
+                description=data.get("description"),
+                condition_field=data.get("condition_field"),
+                condition_operator=data.get("condition_operator"),
+                condition_value=data.get("condition_value"),
+                action=data.get("action"),
+                target=data.get("target"),
+                webhook_url=data.get("webhook_url"),
+                priority=data.get("priority", 0),
+            )
+        except ValueError as exc:
+            return jsonify({"error": "invalid_request", "message": str(exc)}), 400
         current_user = get_current_user()
         _record_action_audit(
             session,
@@ -6811,16 +6954,38 @@ def list_escalation_rules():
 @require_tenant_access()
 @require_resource_access("write:escalation_rules", "rule_id")
 def update_escalation_rule(rule_id: str):
-    """Update an existing escalation rule configuration."""
+    """Update an existing escalation rule within the caller's tenant scope."""
     data = request.json or {}
     session = SessionLocal()
 
     try:
         engine_instance = EscalationEngine(session)
-        tenant_id = data.get("tenant_id") or get_current_user().tenant_id
+        tenant_id = (
+            data.get("tenant_id")
+            or request.args.get("tenant_id")
+            or get_current_user().tenant_id
+        )
         rule_data = dict(data)
         rule_data.pop("tenant_id", None)
-        result = engine_instance.update_rule(rule_id, tenant_id=tenant_id, **rule_data)
+        try:
+            result = engine_instance.update_rule(rule_id, tenant_id=tenant_id, **rule_data)
+        except ValueError as exc:
+            return jsonify({"error": "invalid_request", "message": str(exc)}), 400
+        if result.get("error") == "rule_not_found":
+            logger.warning(
+                "Escalation rule update rejected: rule_id=%s tenant_id=%s outside tenant scope",
+                rule_id,
+                tenant_id,
+            )
+            return jsonify({"error": "rule_not_found", "message": "Escalation rule not found."}), 404
+        current_user = get_current_user()
+        _record_action_audit(
+            session,
+            tenant_id=tenant_id,
+            actor=getattr(current_user, "user_id", "system"),
+            action="update_escalation_rule",
+            details={"rule_id": rule_id, "fields": sorted(rule_data)},
+        )
         return jsonify(result), 200
     finally:
         session.close()
@@ -7261,6 +7426,14 @@ def bulk_escalate_incidents():
         }), 200
     finally:
         session.close()
+
+
+_current_module = sys.modules[__name__]
+sys.modules.setdefault("app_4_advanced_features", _current_module)
+sys.modules.setdefault(
+    "pesaguard_backend_pipeline.app_4_advanced_features",
+    _current_module,
+)
 
 
 if __name__ == "__main__":

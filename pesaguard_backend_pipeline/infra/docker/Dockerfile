@@ -2,7 +2,8 @@ FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app:/app/pesaguard_backend_pipeline
 
 # Keep WORKDIR at /app so `python -m pesaguard_backend_pipeline.<module>` resolves:
 # the package lives at /app/pesaguard_backend_pipeline and /app is on sys.path.

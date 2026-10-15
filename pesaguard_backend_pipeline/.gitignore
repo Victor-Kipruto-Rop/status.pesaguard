@@ -26,3 +26,17 @@ pesaguard_backend_pipeline/__meta__.py
 
 # macOS/Linux
 .DS_Store
+
+# --- Debug / scratch artifacts (PesaGuard Rule #48: never commit debug files) ---
+# Root-level ad-hoc debug scripts and probe outputs (underscore-prefixed).
+# The [a-z] guard avoids matching real package files such as __init__.py.
+/_[a-z]*
+# Editor / manual backups
+*.bak
+*.orig
+# Test coverage artifacts
+.coverage
+coverage.xml
+htmlcov/
+# Local scratch directories
+/tmp/

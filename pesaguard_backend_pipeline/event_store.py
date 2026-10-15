@@ -17,7 +17,7 @@ import json
 from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -26,13 +26,15 @@ from sqlalchemy.orm import Session, sessionmaker
 from lifecycle import transition_data_lifecycle, transition_transaction
 from event_bus import build_event
 from idempotency import derive_idempotency_key
-from normalization import normalize_amount
+from normalization import NormalizationError, normalize_amount, normalize_currency
 from models import AuditEvent, Base, IdempotencyRecord, ProcessedTransaction, ReconciliationOutbox, Transaction, TransactionEvent, TransactionOutbox
 from transformation_store import record_transformation_stage
 from lineage import record_lineage
 from data_protection import protect_payload, tokenize_identifier
 
 logger = logging.getLogger("pesaguard.event_store")
+
+from tenant_context import tenant_scoped_argument
 
 # Providers recognised by the ingestion layer. A provider that is NOT in this
 # set is rejected as an "invalid provider reference" so garbled or forged
@@ -53,9 +55,9 @@ VALID_PROVIDERS = frozenset(
 )
 
 
-def _money(value: Any) -> Decimal:
+def _money(value: Any, currency: str = "KES") -> Decimal:
     """Normalize provider amounts without binary floating-point conversion."""
-    amount = Decimal(normalize_amount(value))
+    amount = Decimal(normalize_amount(value, currency=currency))
     if amount <= 0:
         raise ValueError("transaction amount must be greater than zero")
     return amount
@@ -67,13 +69,12 @@ def _currency(value: Any) -> str:
     Missing keys are resolved to the provider default (KES) by callers; an
     explicit empty or non-ISO string is a hard validation error.
     """
-    raw = str(value).strip()
-    if not raw:
+    if value is None or not str(value).strip():
         raise ValueError("transaction currency is required and must be a three-letter ISO code")
-    currency = raw.upper()
-    if len(currency) != 3 or not currency.isalpha():
-        raise ValueError("transaction currency must be a three-letter ISO code")
-    return currency
+    try:
+        return normalize_currency(value)
+    except NormalizationError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def _resolve_currency(payload: Dict[str, Any]) -> str:
@@ -117,6 +118,20 @@ def _payload_hash(payload: Dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _source_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    raw_payload = payload.get("raw_payload")
+    return raw_payload if isinstance(raw_payload, dict) else payload
+
+
+def _source_schema_version(payload: Dict[str, Any]) -> str:
+    return str(_source_payload(payload).get("schema_version", "1.0"))
+
+
+def _source_payload_hash(payload: Dict[str, Any]) -> str:
+    canonical = json.dumps(_source_payload(payload), sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def provider_account_id(payload: Dict[str, Any]) -> str:
     """Resolve the stable Daraja account identity used for idempotency scope."""
     return str(
@@ -139,6 +154,7 @@ class ProcessResult(str, Enum):
     DUPLICATE = "duplicate"  # identical request already recorded
     CONFLICT = "conflict"    # request identity reused with different content
     ERROR = "error"          # genuine failure; callers should retry
+    QUARANTINED = "quarantined"  # durably retained for data-quality remediation
 
 
 def _existing_request_result(
@@ -214,6 +230,7 @@ class EventStore:
             self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
             self._initialized = True
 
+    @tenant_scoped_argument()
     def already_processed(
         self,
         trans_id: str,
@@ -255,6 +272,7 @@ class EventStore:
             )
             return True
 
+    @tenant_scoped_argument()
     def mark_processed(
         self,
         payload: Dict[str, Any],
@@ -262,6 +280,9 @@ class EventStore:
         source_ip: Optional[str] = None,
         signature_verified: bool = False,
         idempotency_key_override: Optional[str] = None,
+        quality_processor: Optional[
+            Callable[[Session, Dict[str, Any], str, str], Dict[str, Any]]
+        ] = None,
     ) -> ProcessResult:
         """Atomically record that a webhook callback has been processed.
 
@@ -279,6 +300,7 @@ class EventStore:
         Returns:
             ProcessResult.STORED    â€” new transaction, recorded successfully
             ProcessResult.DUPLICATE â€” already recorded, safe no-op
+            ProcessResult.QUARANTINED â€” invalid financial input durably quarantined
             ProcessResult.ERROR     â€” genuine failure, caller should signal retry
         """
         trans_id = str(payload.get("TransID", "")).strip()
@@ -293,7 +315,7 @@ class EventStore:
             return ProcessResult.ERROR
         try:
             currency = _resolve_currency(payload)
-            amount = _money(payload.get("TransAmount", 0))
+            amount = _money(payload.get("TransAmount", 0), currency)
             raw_provider = str(payload.get("provider") or "").strip()
             provider = _provider(raw_provider) if raw_provider else "mpesa"
         except ValueError as exc:
@@ -351,16 +373,62 @@ class EventStore:
                     request_hash=request_hash,
                 )
                 if existing_result is not None:
+                    if existing_result is ProcessResult.DUPLICATE:
+                        session.query(ProcessedTransaction).filter(
+                            ProcessedTransaction.tenant_id == tenant_id,
+                            ProcessedTransaction.provider_account_id == account_id,
+                            ProcessedTransaction.daraja_trans_id == trans_id,
+                        ).update(
+                            {
+                                ProcessedTransaction.webhook_attempt_number:
+                                    ProcessedTransaction.webhook_attempt_number + 1
+                            },
+                            synchronize_session=False,
+                        )
+                        session.commit()
                     return existing_result
+                if quality_processor is not None and provider == "mpesa":
+                    try:
+                        quality_decision = quality_processor(
+                            session,
+                            payload,
+                            tenant_id,
+                            provider,
+                        )
+                        if (
+                            not isinstance(quality_decision, dict)
+                            or quality_decision.get("decision") not in {"accepted", "quarantined"}
+                        ):
+                            raise ValueError("data-quality processor returned an invalid decision")
+                    except Exception:
+                        session.rollback()
+                        logger.exception(
+                            "Data-quality gate failed for tenant=%s trans_id=%s",
+                            tenant_id,
+                            trans_id,
+                        )
+                        return ProcessResult.ERROR
+                    if quality_decision["decision"] == "quarantined":
+                        session.commit()
+                        quality_details = quality_decision.get("quality") or {}
+                        logger.warning(
+                            "Transaction durably quarantined by data-quality gate",
+                            extra={
+                                "tenant_id": tenant_id,
+                                "trans_id": trans_id,
+                                "quality_status": quality_details.get("status"),
+                            },
+                        )
+                        return ProcessResult.QUARANTINED
                 pt_record = ProcessedTransaction(
                     id=f"pt_{uuid.uuid4().hex[:12]}",
                     daraja_trans_id=trans_id,
                     tenant_id=tenant_id,
                     provider_account_id=account_id,
-                    status="received",
+                    status="stored",
                     source_ip=source_ip,
                     signature_verified=signature_verified,
-                    webhook_attempt_number=int(payload.get("retry_count", 1)),
+                    webhook_attempt_number=1,
                     received_at=datetime.now(timezone.utc),
                 )
                 session.add(pt_record)
@@ -379,6 +447,8 @@ class EventStore:
                     business_short_code=str(payload.get("BusinessShortCode", "")),
                     trans_time=str(payload.get("TransTime", "")),
                     raw_payload=protect_payload(payload),
+                    raw_payload_hash=_source_payload_hash(payload),
+                    source_schema_version=_source_schema_version(payload),
                     lifecycle_stage="STORED",
                     created_at=datetime.now(timezone.utc),
                 )
@@ -470,6 +540,20 @@ class EventStore:
                     request_hash=request_hash,
                 )
             if existing_result is not None:
+                if existing_result is ProcessResult.DUPLICATE:
+                    with self.Session() as session:
+                        session.query(ProcessedTransaction).filter(
+                            ProcessedTransaction.tenant_id == tenant_id,
+                            ProcessedTransaction.provider_account_id == account_id,
+                            ProcessedTransaction.daraja_trans_id == trans_id,
+                        ).update(
+                            {
+                                ProcessedTransaction.webhook_attempt_number:
+                                    ProcessedTransaction.webhook_attempt_number + 1
+                            },
+                            synchronize_session=False,
+                        )
+                        session.commit()
                 logger.info(
                     "Concurrent idempotency replay resolved as %s for tenant=%s provider=%s key=%s",
                     existing_result.value,
@@ -501,6 +585,7 @@ class EventStore:
             )
             return ProcessResult.ERROR
 
+    @tenant_scoped_argument()
     def mark_processed_in_session(
         self,
         session: Session,
@@ -519,7 +604,7 @@ class EventStore:
         idempotency_key = derive_idempotency_key(payload)
         try:
             currency = _resolve_currency(payload)
-            amount = _money(payload.get("TransAmount", 0))
+            amount = _money(payload.get("TransAmount", 0), currency)
             raw_provider = str(payload.get("provider") or "").strip()
             provider = _provider(raw_provider) if raw_provider else "mpesa"
         except ValueError as exc:
@@ -562,6 +647,14 @@ class EventStore:
             request_hash=request_hash,
         )
         if existing_request_result is not None:
+            if existing_request_result is ProcessResult.DUPLICATE:
+                existing = session.query(ProcessedTransaction).filter(
+                    ProcessedTransaction.tenant_id == tenant_id,
+                    ProcessedTransaction.provider_account_id == account_id,
+                    ProcessedTransaction.daraja_trans_id == trans_id,
+                ).one_or_none()
+                if existing is not None:
+                    existing.webhook_attempt_number += 1
             return existing_request_result
 
         existing = session.query(ProcessedTransaction).filter(
@@ -570,6 +663,7 @@ class EventStore:
             ProcessedTransaction.provider_account_id == account_id,
         ).first()
         if existing is not None:
+            existing.webhook_attempt_number += 1
             logger.info("Duplicate trans_id=%s detected in pre-flight session check", trans_id)
             return ProcessResult.DUPLICATE
 
@@ -582,10 +676,10 @@ class EventStore:
                 daraja_trans_id=trans_id,
                 tenant_id=tenant_id,
                 provider_account_id=account_id,
-                status="received",
+                status="stored",
                 source_ip=source_ip,
                 signature_verified=signature_verified,
-                webhook_attempt_number=int(payload.get("retry_count", 1)),
+                webhook_attempt_number=1,
                 received_at=datetime.now(timezone.utc),
             )
             session.add(pt_record)
@@ -604,6 +698,8 @@ class EventStore:
                 business_short_code=str(payload.get("BusinessShortCode", "")),
                 trans_time=str(payload.get("TransTime", "")),
                 raw_payload=protect_payload(payload),
+                raw_payload_hash=_source_payload_hash(payload),
+                source_schema_version=_source_schema_version(payload),
                 lifecycle_stage="STORED",
                 created_at=datetime.now(timezone.utc),
             )
@@ -797,29 +893,44 @@ class EventStore:
             session.commit()
             return True
 
+    @tenant_scoped_argument()
     def write_dead_letter(
         self,
         payload: Optional[Dict[str, Any]],
         reason: str,
         error_detail: Optional[str] = None,
         tenant_id: Optional[str] = None,
-    ) -> None:
+    ) -> bool:
         """Persist a malformed or rejected webhook payload for later inspection and replay."""
-        try:
-            from models import DeadLetter
+        from models import DeadLetter
 
+        scoped_tenant = str(tenant_id or "").strip()
+        if not scoped_tenant:
+            logger.error("write_dead_letter() rejected missing tenant context")
+            return False
+        raw_payload = payload or {}
+        canonical_payload = json.dumps(raw_payload, sort_keys=True, separators=(",", ":"), default=str)
+        payload_hash = hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()
+        account_id = provider_account_id(raw_payload)
+        trans_id = str(raw_payload.get("TransID") or raw_payload.get("trans_id") or "unknown")
+        event_key = hashlib.sha256(
+            f"{scoped_tenant}:{account_id}:{trans_id}:{reason}:{payload_hash}".encode("utf-8")
+        ).hexdigest()
+        try:
             self._ensure_ready()
             with self.Session() as session:
-                scoped_tenant = tenant_id or "default"
-                account_id = provider_account_id(payload or {})
-                trans_id = str((payload or {}).get("TransID") or (payload or {}).get("trans_id") or "unknown")
-                event_key = hashlib.sha256(f"{scoped_tenant}:{account_id}:{trans_id}:{reason}".encode("utf-8")).hexdigest()
+                duplicate = session.query(DeadLetter.id).filter(
+                    DeadLetter.tenant_id == scoped_tenant,
+                    DeadLetter.event_key == event_key,
+                ).first()
+                if duplicate is not None:
+                    return True
                 dl = DeadLetter(
                     id=f"dl_{event_key[:24]}",
                     tenant_id=scoped_tenant,
                     reason=reason,
-                    payload=protect_payload(payload or {}),
-                    error_detail=str(error_detail) if error_detail else None,
+                    payload=protect_payload(raw_payload),
+                    error_detail=str(error_detail)[:2000] if error_detail else None,
                     attempts=0,
                     processed=False,
                     processed_at=None,
@@ -831,19 +942,32 @@ class EventStore:
                 session.add(dl)
                 session.commit()
                 logger.info("Recorded dead-letter entry id=%s reason=%s", dl.id, reason)
+                return True
+        except IntegrityError:
+            with self.Session() as session:
+                duplicate = session.query(DeadLetter.id).filter(
+                    DeadLetter.tenant_id == scoped_tenant,
+                    DeadLetter.event_key == event_key,
+                ).first()
+                if duplicate is not None:
+                    return True
+            logger.exception("write_dead_letter() could not persist reason=%s", reason)
+            return False
         except SQLAlchemyError:
             logger.exception(
                 "write_dead_letter() failed for reason=%s â€” payload could not be persisted.",
                 reason,
             )
+            return False
 
-    def claim_outbox_batch(self, limit: int = 100, lease_seconds: int = 60):
+    @tenant_scoped_argument()
+    def claim_outbox_batch(self, limit: int = 100, lease_seconds: int = 60, tenant_id: str | None = None):
         """Claim a bounded batch of pending outbox rows for one worker lease."""
         self._ensure_ready()
         now = datetime.now(timezone.utc)
         lease_until = now + timedelta(seconds=lease_seconds)
         with self.Session() as session:
-            rows = (
+            query = (
                 session.query(TransactionOutbox)
                 .filter(
                     TransactionOutbox.status.in_(["pending", "failed"]),
@@ -852,9 +976,10 @@ class EventStore:
                 )
                 .order_by(TransactionOutbox.created_at.asc())
                 .with_for_update(skip_locked=True)
-                .limit(max(1, min(limit, 1000)))
-                .all()
             )
+            if tenant_id:
+                query = query.filter(TransactionOutbox.tenant_id == tenant_id)
+            rows = query.limit(max(1, min(limit, 1000))).all()
             for row in rows:
                 row.status = "processing"
                 row.attempts += 1
@@ -871,11 +996,15 @@ class EventStore:
                 for row in rows
             ]
 
-    def mark_outbox_published(self, outbox_id: str) -> None:
+    @tenant_scoped_argument()
+    def mark_outbox_published(self, outbox_id: str, tenant_id: str | None = None) -> None:
         """Mark a successfully published outbox row."""
         self._ensure_ready()
         with self.Session() as session:
-            row = session.get(TransactionOutbox, outbox_id)
+            query = session.query(TransactionOutbox).filter(TransactionOutbox.id == outbox_id)
+            if tenant_id is not None:
+                query = query.filter(TransactionOutbox.tenant_id == tenant_id)
+            row = query.one_or_none()
             if row is None:
                 return
             row.status = "published"
@@ -883,11 +1012,15 @@ class EventStore:
             row.locked_until = None
             session.commit()
 
-    def mark_outbox_failed(self, outbox_id: str, error: str, retry_seconds: int = 30) -> None:
+    @tenant_scoped_argument()
+    def mark_outbox_failed(self, outbox_id: str, error: str, retry_seconds: int = 30, tenant_id: str | None = None) -> None:
         """Release a failed outbox row with bounded retry backoff."""
         self._ensure_ready()
         with self.Session() as session:
-            row = session.get(TransactionOutbox, outbox_id)
+            query = session.query(TransactionOutbox).filter(TransactionOutbox.id == outbox_id)
+            if tenant_id is not None:
+                query = query.filter(TransactionOutbox.tenant_id == tenant_id)
+            row = query.one_or_none()
             if row is None:
                 return
             row.status = "failed"
@@ -896,13 +1029,17 @@ class EventStore:
             row.locked_until = None
             session.commit()
 
-    def mark_outbox_dead_lettered(self, outbox_id: str, error: str) -> None:
+    @tenant_scoped_argument()
+    def mark_outbox_dead_lettered(self, outbox_id: str, error: str, tenant_id: str | None = None) -> None:
         """Atomically stop retrying an exhausted outbox row and record it for replay."""
         from models import DeadLetter
 
         self._ensure_ready()
         with self.Session() as session:
-            row = session.get(TransactionOutbox, outbox_id)
+            query = session.query(TransactionOutbox).filter(TransactionOutbox.id == outbox_id)
+            if tenant_id is not None:
+                query = query.filter(TransactionOutbox.tenant_id == tenant_id)
+            row = query.one_or_none()
             if row is None or row.status == "dead_lettered":
                 return
 
@@ -928,13 +1065,19 @@ class EventStore:
             row.locked_until = None
             session.commit()
 
-    def claim_reconciliation_outbox_batch(self, limit: int = 100, lease_seconds: int = 60):
+    @tenant_scoped_argument()
+    def claim_reconciliation_outbox_batch(
+        self,
+        limit: int = 100,
+        lease_seconds: int = 60,
+        tenant_id: str | None = None,
+    ):
         """Claim due reconciliation publications with an expiring lease."""
         self._ensure_ready()
         now = datetime.now(timezone.utc)
         lease_until = now + timedelta(seconds=lease_seconds)
         with self.Session() as session:
-            rows = (
+            query = (
                 session.query(ReconciliationOutbox)
                 .filter(
                     ReconciliationOutbox.status.in_(["pending", "failed"]),
@@ -943,9 +1086,10 @@ class EventStore:
                 )
                 .order_by(ReconciliationOutbox.created_at.asc())
                 .with_for_update(skip_locked=True)
-                .limit(max(1, min(limit, 1000)))
-                .all()
             )
+            if tenant_id:
+                query = query.filter(ReconciliationOutbox.tenant_id == tenant_id)
+            rows = query.limit(max(1, min(limit, 1000))).all()
             for row in rows:
                 row.status = "processing"
                 row.attempts += 1
@@ -957,11 +1101,17 @@ class EventStore:
                 for row in rows
             ]
 
-    def mark_reconciliation_outbox_published(self, outbox_id: str) -> None:
+    @tenant_scoped_argument()
+    def mark_reconciliation_outbox_published(self, outbox_id: str, tenant_id: str | None = None) -> None:
         """Mark a successfully published reconciliation row."""
         self._ensure_ready()
         with self.Session() as session:
-            row = session.get(ReconciliationOutbox, outbox_id)
+            query = session.query(ReconciliationOutbox).filter(
+                ReconciliationOutbox.id == outbox_id
+            )
+            if tenant_id is not None:
+                query = query.filter(ReconciliationOutbox.tenant_id == tenant_id)
+            row = query.one_or_none()
             if row is None:
                 return
             row.status = "published"
@@ -969,11 +1119,23 @@ class EventStore:
             row.locked_until = None
             session.commit()
 
-    def mark_reconciliation_outbox_failed(self, outbox_id: str, error: str, retry_seconds: int = 30) -> None:
+    @tenant_scoped_argument()
+    def mark_reconciliation_outbox_failed(
+        self,
+        outbox_id: str,
+        error: str,
+        retry_seconds: int = 30,
+        tenant_id: str | None = None,
+    ) -> None:
         """Release a failed reconciliation row for a later retry."""
         self._ensure_ready()
         with self.Session() as session:
-            row = session.get(ReconciliationOutbox, outbox_id)
+            query = session.query(ReconciliationOutbox).filter(
+                ReconciliationOutbox.id == outbox_id
+            )
+            if tenant_id is not None:
+                query = query.filter(ReconciliationOutbox.tenant_id == tenant_id)
+            row = query.one_or_none()
             if row is None:
                 return
             row.status = "failed"
@@ -981,6 +1143,12 @@ class EventStore:
             row.available_at = datetime.now(timezone.utc) + timedelta(seconds=min(max(retry_seconds, 1), 3600))
             row.locked_until = None
             session.commit()
+
+    def list_active_tenants(self) -> list[str]:
+        """Enumerate tenants through the isolated registry-only worker role."""
+        from tenant_registry import list_active_tenant_ids
+
+        return list_active_tenant_ids()
 
 
 # Default singleton instance

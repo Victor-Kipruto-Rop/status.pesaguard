@@ -3,17 +3,21 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, Tuple
 
+from normalization import (
+    DEFAULT_CURRENCY,
+    normalize_amount,
+    normalize_currency,
+)
+
 try:
     from rapidfuzz.distance import Levenshtein
 except Exception:  # pragma: no cover - optional dependency
     Levenshtein = None
 
 
-def _to_float(value: Any) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
+def _to_float(value: Any, currency: str) -> float:
+    """Validate and normalize a monetary score input before converting to float."""
+    return float(normalize_amount(value, currency=currency))
 
 
 def _norm_text(value: Any) -> str:
@@ -60,12 +64,40 @@ def _similarity(left: str, right: str) -> float:
 def score_match(event: Dict[str, Any], record: Dict[str, Any]) -> Tuple[float, Dict[str, Any]]:
     event_ref = _norm_text(event.get("BillRefNumber") or event.get("reference") or event.get("TransID") or event.get("trans_id"))
     record_ref = _norm_text(record.get("internal_ref") or record.get("reference") or record.get("trans_id"))
+    event_currency = normalize_currency(
+        event.get("Currency") or event.get("currency") or DEFAULT_CURRENCY
+    )
+    record_currency = normalize_currency(
+        record.get("Currency") or record.get("currency") or DEFAULT_CURRENCY
+    )
+    event_amount = _to_float(
+        event.get("TransAmount") or event.get("amount"), event_currency
+    )
+    record_amount = _to_float(
+        record.get("amount", record.get("TransAmount")), record_currency
+    )
+    if event_currency != record_currency:
+        return 0.0, {
+            "components": {
+                "ref_exact": 0.0,
+                "ref_similarity": 0.0,
+                "amount_diff_normalized": 0.0,
+                "time_delta_normalized": 0.0,
+                "phone_match": 0.0,
+            },
+            "weights": {},
+            "time_delta_seconds": None,
+            "matched_features": [],
+            "anomaly_features": ["currency_mismatch"],
+            "currency_mismatch": {
+                "event_currency": event_currency,
+                "record_currency": record_currency,
+            },
+        }
 
     ref_exact = 1.0 if event_ref and record_ref and event_ref == record_ref else 0.0
     ref_similarity = _similarity(event_ref, record_ref)
 
-    event_amount = _to_float(event.get("TransAmount") or event.get("amount"))
-    record_amount = _to_float(record.get("amount"))
     max_amount = max(abs(event_amount), abs(record_amount), 1.0)
     amount_diff_normalized = max(0.0, 1.0 - (abs(event_amount - record_amount) / max_amount))
 

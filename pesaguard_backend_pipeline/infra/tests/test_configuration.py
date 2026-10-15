@@ -21,11 +21,14 @@ def deployment(tmp_path):
         "POSTGRES_PASSWORD": "isolated-config-test-only",
         "STAGING_POSTGRES_DB": "config_test_staging",
         "DATABASE_URL_DOCKER": "postgresql://config_test:isolated-test@postgres:5432/config_test",
+        "DEPLOYMENT_REGION": "test-region-1",
+        "BACKUP_REGION": "test-region-1",
+        "LOG_REGION": "test-region-1",
         "JWT_SECRET_KEY": "isolated-configuration-test-only-not-production",
         "PESAGUARD_API_URL": "https://api.example.invalid",
         "KAFKA_BOOTSTRAP_SERVERS_DOCKER": "redpanda:9092",
         "REDIS_URL_DOCKER": "redis://redis:6379/0",
-        "PESAGUARD_BIND_HOST_DOCKER": "0.0.0.0",
+        "PESAGUARD_BIND_HOST_DOCKER": "127.0.0.1",
         "KAFKA_BOOTSTRAP_SERVERS_FULL": "kafka:29092",
         "KAFKA_ADVERTISED_LISTENERS_FULL": "PLAINTEXT://kafka:29092",
         "STAGING_KAFKA_ADVERTISED_LISTENERS": "PLAINTEXT://localhost:9092",
@@ -36,8 +39,14 @@ def deployment(tmp_path):
     token_path = tmp_path / "dashboard_metrics_token"
     token_path.write_text("isolated-config-test-token", encoding="utf-8")
     values["PESAGUARD_PROMETHEUS_TOKEN_FILE"] = str(token_path)
+    alert_secret_path = tmp_path / "alertmanager_webhook_secret"
+    alert_secret_path.write_text("isolated-config-test-secret", encoding="utf-8")
+    values["PESAGUARD_ALERTMANAGER_WEBHOOK_SECRET_FILE"] = str(alert_secret_path)
     path = tmp_path / ".env"
-    path.write_text("".join(f"{key}={value}\n" for key, value in values.items()))
+    path.write_text(
+        "".join(f"{key}={value}\n" for key, value in values.items()),
+        encoding="utf-8",
+    )
     return path
 
 

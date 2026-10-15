@@ -9,20 +9,34 @@ from typing import Any, Dict, Iterable, Mapping
 from uuid import uuid4
 
 from models import MerchantMetric
+from normalization import (
+    DEFAULT_CURRENCY,
+    normalize_amount,
+    normalize_currency,
+    quantize_money,
+)
 
 
 @dataclass
 class MerchantAggregate:
     merchant_id: str
+    currency: str
     transaction_count: int = 0
-    total_volume: Decimal = Decimal("0.00")
+    total_volume: Decimal = Decimal("0")
     failed_transactions: int = 0
     reconciled_transactions: int = 0
     anomaly_count: int = 0
 
     @property
     def average_transaction(self) -> Decimal:
-        return (self.total_volume / self.transaction_count).quantize(Decimal("0.01")) if self.transaction_count else Decimal("0.00")
+        return (
+            quantize_money(
+                self.total_volume / self.transaction_count,
+                currency=self.currency,
+            )
+            if self.transaction_count
+            else quantize_money(Decimal("0"), currency=self.currency)
+        )
 
     @property
     def failure_rate(self) -> float:
@@ -44,14 +58,29 @@ def _value(record: Mapping[str, Any], *keys: str, default: Any = None) -> Any:
     return default
 
 
-def aggregate_transactions(records: Iterable[Mapping[str, Any]]) -> Dict[str, MerchantAggregate]:
-    """Build merchant derived metrics from canonical or compatibility records."""
-    aggregates: Dict[str, MerchantAggregate] = {}
+def _amount(record: Mapping[str, Any], currency: str) -> Decimal:
+    """Validate an amount for aggregation; invalid input must not become zero."""
+    raw = _value(record, "amount", "TransAmount", default=None)
+    if raw is None:
+        raise ValueError("aggregated transaction amount is required")
+    return Decimal(normalize_amount(raw, currency=currency))
+
+
+def aggregate_transactions(records: Iterable[Mapping[str, Any]]) -> Dict[tuple[str, str], MerchantAggregate]:
+    """Build separate merchant aggregates for each currency."""
+    aggregates: Dict[tuple[str, str], MerchantAggregate] = {}
     for record in records:
         merchant_id = str(_value(record, "merchant_id", "merchant", "account_id", "provider_account_id", default="unknown"))
-        aggregate = aggregates.setdefault(merchant_id, MerchantAggregate(merchant_id=merchant_id))
+        currency = normalize_currency(
+            _value(record, "currency", "Currency", default=DEFAULT_CURRENCY)
+        )
+        key = (merchant_id, currency)
+        aggregate = aggregates.setdefault(
+            key,
+            MerchantAggregate(merchant_id=merchant_id, currency=currency),
+        )
         aggregate.transaction_count += 1
-        aggregate.total_volume += Decimal(str(_value(record, "amount", "TransAmount", default="0")))
+        aggregate.total_volume += _amount(record, currency)
         status = str(_value(record, "status", "Status", default="")).upper()
         if status in {"FAILED", "REJECTED", "REVERSED"}:
             aggregate.failed_transactions += 1
@@ -83,7 +112,10 @@ def update_merchant_metrics(session: Any, record: Mapping[str, Any], *, tenant_i
     """Increment persisted buckets once for one canonical transaction."""
     merchant_id = str(_value(record, "merchant_id", "merchant", "account_id", "provider_account_id", default="unknown"))
     transaction_time = _parse_time(_value(record, "transaction_time", "TransTime", default=datetime.now(timezone.utc).isoformat()))
-    amount = Decimal(str(_value(record, "amount", "TransAmount", default="0")))
+    currency = normalize_currency(
+        _value(record, "currency", "Currency", default=DEFAULT_CURRENCY)
+    )
+    amount = _amount(record, currency)
     status = str(_value(record, "status", "Status", default="")).upper()
     reconciled = status in {"RECONCILED", "MATCHED", "COMPLETED"} or str(record.get("reconciliation_status", "")).lower() == "completed"
     failed = status in {"FAILED", "REJECTED", "REVERSED"}
@@ -94,6 +126,7 @@ def update_merchant_metrics(session: Any, record: Mapping[str, Any], *, tenant_i
         metric = session.query(MerchantMetric).filter_by(
             tenant_id=tenant_id,
             merchant_id=merchant_id,
+            currency=currency,
             granularity=granularity,
             bucket_start=bucket,
         ).with_for_update().first()
@@ -102,13 +135,17 @@ def update_merchant_metrics(session: Any, record: Mapping[str, Any], *, tenant_i
                 id=f"metric_{uuid4().hex}",
                 tenant_id=tenant_id,
                 merchant_id=merchant_id,
+                currency=currency,
                 granularity=granularity,
                 bucket_start=bucket,
             )
             session.add(metric)
         metric.transaction_count = (metric.transaction_count or 0) + 1
         metric.total_volume = Decimal(metric.total_volume or 0) + amount
-        metric.average_transaction = (Decimal(metric.total_volume) / metric.transaction_count).quantize(Decimal("0.01"))
+        metric.average_transaction = quantize_money(
+            Decimal(metric.total_volume) / metric.transaction_count,
+            currency=currency,
+        )
         metric.failed_transactions = (metric.failed_transactions or 0) + int(failed)
         metric.reconciled_transactions = (metric.reconciled_transactions or 0) + int(reconciled)
         metric.anomaly_count = (metric.anomaly_count or 0) + int(anomaly)

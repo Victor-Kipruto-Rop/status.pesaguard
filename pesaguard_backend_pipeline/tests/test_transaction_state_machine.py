@@ -16,6 +16,9 @@ changing any production behaviour. Every assertion is a pure invariant check
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -140,7 +143,7 @@ def _status(database_url: str, trans_id: str, tenant_id: str = "tenant-a"):
 
 
 def test_seeded_transaction_starts_received_at_version_one(store):
-    event_store, database_url, _ = store
+    event_store, database_url, engine = store
     _seed(event_store, "sm-1")
     assert _status(database_url, "sm-1") == ("RECEIVED", 1)
 
@@ -177,23 +180,67 @@ def test_full_happy_path_reaches_reconciled(store):
 
 
 def test_illegal_transition_is_rejected_and_state_is_unchanged(store):
-    event_store, database_url, _ = store
+    event_store, database_url, engine = store
     _seed(event_store, "sm-4")
     # RECEIVED -> PROCESSING skips a stage and must be refused without mutating.
     assert event_store.transition_transaction("sm-4", "PROCESSING", "tenant-a", expected_version=1) is False
     assert _status(database_url, "sm-4") == ("RECEIVED", 1)
+    with sessionmaker(bind=engine)() as session:
+        assert (
+            session.query(TransactionEvent)
+            .filter_by(trans_id="sm-4", event_type="transaction.state_changed")
+            .count()
+            == 0
+        )
 
 
 def test_stale_version_is_rejected_optimistic_locking(store):
     # Two workers read version=1. The first advances it; the second, still holding
     # the stale expected_version, must lose the race and change nothing (Rule #8/#9).
-    event_store, database_url, _ = store
+    event_store, database_url, engine = store
     _seed(event_store, "sm-5")
 
     assert event_store.transition_transaction("sm-5", "VALIDATED", "tenant-a", expected_version=1) is True
     # Replaying the same stale version is a lost update and must be refused.
     assert event_store.transition_transaction("sm-5", "VALIDATED", "tenant-a", expected_version=1) is False
     assert _status(database_url, "sm-5") == ("VALIDATED", 2)
+    with sessionmaker(bind=engine)() as session:
+        assert (
+            session.query(TransactionEvent)
+            .filter_by(trans_id="sm-5", event_type="transaction.state_changed")
+            .count()
+            == 1
+        )
+
+
+def test_concurrent_transitions_allow_only_one_writer(store):
+    event_store, database_url, engine = store
+    _seed(event_store, "sm-concurrent")
+    barrier = Barrier(2)
+
+    def transition(target):
+        barrier.wait()
+        return event_store.transition_transaction(
+            "sm-concurrent",
+            target,
+            "tenant-a",
+            expected_version=1,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(transition, ("VALIDATED", "FAILED")))
+
+    assert sorted(results) == [False, True]
+    final_status, final_version = _status(database_url, "sm-concurrent")
+    assert final_status in {"VALIDATED", "FAILED"}
+    assert final_version == 2
+    with sessionmaker(bind=engine)() as session:
+        state_changes = (
+            session.query(TransactionEvent)
+            .filter_by(trans_id="sm-concurrent", event_type="transaction.state_changed")
+            .all()
+        )
+    assert len(state_changes) == 1
 
 
 def test_terminal_state_cannot_be_advanced(store):
@@ -220,4 +267,3 @@ def test_transition_is_tenant_scoped(store):
 def test_unknown_transaction_transition_is_rejected(store):
     event_store, database_url, _ = store
     assert event_store.transition_transaction("does-not-exist", "VALIDATED", "tenant-a", expected_version=1) is False
-

@@ -39,13 +39,20 @@ class AlertingService:
             return {"status": "failed", "reason": "invalid_discrepancy_format"}
 
         alert_id = str(discrepancy.get("id") or discrepancy.get("trans_id") or uuid.uuid4())
-        
-        # Deduplication check
-        if alert_id in self._alert_ids:
-            logger.info("Duplicate alert suppressed via in-memory deduplication cache: alert_id=%s", alert_id)
+        tenant_id = str(discrepancy.get("tenant_id") or "default")
+
+        # Deduplication is tenant-scoped so one tenant's alert can never
+        # suppress another tenant's alert that happens to share an id (Rule #11).
+        dedup_key = f"{tenant_id}:{alert_id}"
+        if dedup_key in self._alert_ids:
+            logger.info(
+                "Duplicate alert suppressed via in-memory deduplication cache: tenant_id=%s alert_id=%s",
+                tenant_id,
+                alert_id,
+            )
             return {"status": "deduped", "alert_id": alert_id, "deliveries": [], "delivery_mode": "deduped"}
 
-        self._alert_ids.add(alert_id)
+        self._alert_ids.add(dedup_key)
         
         severity = str(discrepancy.get("severity") or "warning").lower()
         channels = self._resolve_channels(severity)
@@ -147,15 +154,20 @@ class AlertingService:
         try:
             trans_id = str(discrepancy.get("trans_id", "unknown"))
             tenant_id = str(discrepancy.get("tenant_id", "default"))
-            severity = str(discrepancy.get("severity") or "warning")
+            severity = str(discrepancy.get("severity") or "warning").lower()
+            if severity not in {"info", "warning", "critical"}:
+                severity = "warning"
             anomaly_type = str(discrepancy.get("status") or discrepancy.get("anomaly_type") or "alert")
 
             log_entry = Discrepancy(
-                id=f"alert-{alert_id}",
+                # Tenant-scoped primary key (DAO convention) so identical alert
+                # ids from different tenants can never collide on one row.
+                id=f"{tenant_id}:alert-{alert_id}",
                 trans_id=trans_id,
                 tenant_id=tenant_id,
                 anomaly_type=anomaly_type,
-                status="alerted",
+                # ck_discrepancy_status allows only reviewed workflow states.
+                status="needs_review",
                 severity=severity,
                 details=json.dumps({
                     "alert_id": alert_id,

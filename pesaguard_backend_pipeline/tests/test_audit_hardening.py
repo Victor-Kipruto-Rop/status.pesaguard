@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib
 
 import pytest
-from flask import Flask, g, request
+from flask import Flask, g, jsonify, request
 
 
 def test_runtime_environment_rejects_conflicting_aliases(monkeypatch):
@@ -76,6 +76,52 @@ def test_production_rate_limit_fails_closed_without_redis(monkeypatch):
 
     assert response.status_code == 503
     assert response.get_json()["error"] == "rate_limiter_unavailable"
+
+
+def test_rate_limit_enforces_quota_headers_and_refills_for_http_requests(monkeypatch):
+    import rate_limiter
+
+    now = [1000.0]
+    monkeypatch.setenv("PESAGUARD_ENVIRONMENT", "test")
+    monkeypatch.setattr(rate_limiter, "ENABLE_REDIS_RATE_LIMITING", False)
+    monkeypatch.setattr(rate_limiter, "_memory_limiter", rate_limiter.TokenBucketRateLimiter(1))
+    monkeypatch.setattr(rate_limiter.time, "time", lambda: now[0])
+    app = Flask("rate-limit-contract-test")
+
+    @app.get("/limited")
+    @rate_limiter.rate_limit(max_requests_per_minute=1, endpoint_name="contract-test")
+    def limited():
+        return jsonify({"status": "accepted"}), 200
+
+    client = app.test_client()
+    accepted = client.get("/limited")
+    limited_response = client.get("/limited")
+
+    assert accepted.status_code == 200
+    assert accepted.headers["X-RateLimit-Limit"] == "1"
+    assert accepted.headers["X-RateLimit-Remaining"] == "0"
+    assert limited_response.status_code == 429
+    assert limited_response.get_json()["error"] == "rate_limit_exceeded"
+    assert limited_response.headers["Retry-After"] == "60"
+    assert limited_response.headers["X-RateLimit-Remaining"] == "0"
+
+    now[0] += 60
+    recovered = client.get("/limited")
+    assert recovered.status_code == 200
+    assert recovered.headers["X-RateLimit-Remaining"] == "0"
+
+
+def test_authentication_module_has_one_identity_across_import_paths():
+    import importlib
+    import sys
+
+    top_level = importlib.import_module("app_4_advanced_features")
+    package_module = importlib.import_module(
+        "pesaguard_backend_pipeline.app_4_advanced_features"
+    )
+
+    assert package_module is top_level
+    assert sys.modules["app_4_advanced_features"] is package_module
 
 
 @pytest.fixture
@@ -193,10 +239,14 @@ def test_canonical_asgi_entrypoint_serves_auth_and_dashboard_contract(monkeypatc
         contract_response = client.get("/openapi.json")
         docs_response = client.get("/docs")
 
-    assert login_response.status_code in {400, 401}
-    assert versioned_login_response.status_code in {400, 401}
-    assert refresh_response.status_code in {400, 401}
-    assert versioned_refresh_response.status_code in {400, 401}
+    assert login_response.status_code == 503
+    assert versioned_login_response.status_code == 503
+    assert login_response.json()["error"] == "rate_limiter_unavailable"
+    assert versioned_login_response.json()["error"] == "rate_limiter_unavailable"
+    assert refresh_response.status_code == 503
+    assert versioned_refresh_response.status_code == 503
+    assert refresh_response.json()["error"] == "rate_limiter_unavailable"
+    assert versioned_refresh_response.json()["error"] == "rate_limiter_unavailable"
     assert session_response.status_code == 401
     assert contract_response.status_code == 200
     assert contract_response.json()["openapi"] == "3.0.3"

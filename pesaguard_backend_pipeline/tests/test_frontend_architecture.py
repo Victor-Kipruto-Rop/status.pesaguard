@@ -44,11 +44,10 @@ def test_every_js_module_parses():
         assert result.returncode == 0, f"{file}: {result.stderr}"
 
 
-def test_relative_named_imports_resolve():
-    checker = Path("/tmp/pg_linkcheck.mjs")
-    if not checker.exists():
-        checker.write_text(
-                    """
+def test_relative_named_imports_resolve(tmp_path):
+    checker = tmp_path / "pg_linkcheck.mjs"
+    checker.write_text(
+        """
 import fs from 'node:fs';
 import path from 'node:path';
 const ROOT = process.argv[2];
@@ -90,7 +89,7 @@ for (const file of files) {
 }
 console.log(bad === 0 ? 'LINKCHECK_OK' : `LINKCHECK_FAILURES=${bad}`);
 """
-        )
+    )
     result = subprocess.run(["node", str(checker), str(FRONTEND)], capture_output=True, text=True)
     assert "LINKCHECK_OK" in result.stdout, result.stdout + result.stderr
 

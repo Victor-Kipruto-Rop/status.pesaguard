@@ -67,6 +67,7 @@ from sqlalchemy.sql.elements import TextClause
 from tenant_org_routes import bp as tenant_org_bp
 from tenant_settings import TenantSettingsStore
 from transaction_routes import create_transaction_blueprint
+from ledger_routes import create_ledger_blueprint
 from database_service import create_database_engine
 
 configure_logging()
@@ -511,6 +512,13 @@ def _open_session(read_only: Optional[bool] = None):
 app.register_blueprint(
     create_transaction_blueprint(
         transaction_event_store,
+        lambda: _open_session(read_only=True),
+        lambda: _open_session(read_only=False),
+    )
+)
+
+app.register_blueprint(
+    create_ledger_blueprint(
         lambda: _open_session(read_only=True),
         lambda: _open_session(read_only=False),
     )
@@ -1107,7 +1115,23 @@ def inject_correlation_id(response: Response) -> Response:
 
 @app.teardown_request
 def clear_dashboard_observability_context(_error=None):
+    for tenant_scope_context in reversed(getattr(g, "_pesaguard_tenant_scopes", [])):
+        tenant_scope_context.__exit__(None, None, None)
+    g.pop("_pesaguard_tenant_scopes", None)
     clear_observability_context()
+
+
+def _retain_request_tenant_scope(tenant_id: str) -> None:
+    """Keep authenticated internal-service scope active through request teardown."""
+    from tenant_context import tenant_scope
+
+    scope_context = tenant_scope(tenant_id)
+    scope_context.__enter__()
+    scopes = getattr(g, "_pesaguard_tenant_scopes", None)
+    if scopes is None:
+        scopes = []
+        g._pesaguard_tenant_scopes = scopes
+    scopes.append(scope_context)
 
 
 def _ensure_test_tables() -> None:
@@ -1443,6 +1467,7 @@ def sync_developer_api_key():
     except ServiceAuthError as error:
         return jsonify({"error": error.code, "message": error.message}), error.status_code
 
+    _retain_request_tenant_scope(tenant_id)
     requested_status = status
     now = datetime.now(timezone.utc)
     if status == "ACTIVE" and expires_at is not None and expires_at <= now:
@@ -1696,6 +1721,7 @@ def _apply_developer_api_key_lifecycle(key_id: str, operation: str):
         if service_jwt_claims is not None
         else SERVICE_JWT_SUBJECT
     )
+    _retain_request_tenant_scope(tenant_id)
     now = datetime.now(timezone.utc)
     session = _open_session(read_only=False)
     try:
@@ -2152,6 +2178,7 @@ def create_import():
             "records_received": job.records_received,
             "records_valid": job.records_valid,
             "records_failed": job.records_failed,
+            "attempts": job.attempts,
         }), 202
     except BatchImportError as exc:
         session.rollback()
@@ -2181,8 +2208,10 @@ def get_import(import_id: str):
             "records_received": job.records_received,
             "records_valid": job.records_valid,
             "records_failed": job.records_failed,
+            "attempts": job.attempts,
             "started_at": job.started_at.isoformat() if job.started_at else None,
             "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+            "lease_expires_at": job.lease_expires_at.isoformat() if job.lease_expires_at else None,
             "status": job.status,
             "errors": job.error_summary or [],
         }), 200
@@ -2207,9 +2236,18 @@ def merchant_metrics():
         ).order_by(MerchantMetric.bucket_start.desc()).limit(500)
         if merchant_id:
             query = query.filter(MerchantMetric.merchant_id == merchant_id)
+        currency = request.args.get("currency")
+        if currency:
+            from normalization import NormalizationError, normalize_currency
+
+            try:
+                query = query.filter(MerchantMetric.currency == normalize_currency(currency))
+            except NormalizationError:
+                return jsonify({"error": "invalid_currency"}), 400
         rows = query.all()
         return jsonify({"tenant_id": tenant_id, "granularity": granularity, "items": [{
             "merchant_id": row.merchant_id,
+            "currency": row.currency,
             "bucket_start": row.bucket_start.isoformat(),
             "transaction_count": row.transaction_count,
             "total_volume": str(row.total_volume),
@@ -2268,11 +2306,22 @@ def catalog_dataset(dataset_name: str):
         return jsonify({"error": "not_found", "message": "Dataset is not registered."}), 404
 
 
+def _resolve_operations_tenant_id() -> Optional[str]:
+    user = get_current_user()
+    if user is not None:
+        return user.tenant_id
+    if not _api_auth_required():
+        return request.headers.get("X-Tenant-ID", "").strip() or None
+    return None
+
+
 @app.route("/api/v1/operations/outbox", methods=["GET"])
 @require_auth(required_permission="read:analytics")
 def operations_outbox():
     """Return tenant-scoped outbox lag, retry, and dead-letter counts."""
-    tenant_id = get_current_user().tenant_id
+    tenant_id = _resolve_operations_tenant_id()
+    if tenant_id is None:
+        return jsonify({"error": "tenant_context_required"}), 401
     session = _open_session(read_only=True)
     try:
         rows = (
@@ -2303,13 +2352,424 @@ def operations_outbox():
         session.close()
 
 
+@app.route("/api/v1/operations/scheduled-jobs", methods=["GET"])
+@require_auth(required_permission="read:analytics")
+def list_scheduled_jobs():
+    """List tenant-owned scheduled jobs without exposing task payloads."""
+    from models import ScheduledJob, ScheduledJobBackfill, ScheduledJobRun
+    from scheduler import Scheduler
+
+    tenant_id = _resolve_operations_tenant_id()
+    if tenant_id is None:
+        return jsonify({"error": "tenant_context_required"}), 401
+    limit, error = _query_int("limit", 50, 1, 100)
+    if error:
+        return error
+
+    session = _open_session(read_only=True)
+    try:
+        jobs = (
+            session.query(ScheduledJob)
+            .filter(ScheduledJob.tenant_id == tenant_id)
+            .order_by(ScheduledJob.job_key.asc())
+            .limit(limit)
+            .all()
+        )
+        scheduler = Scheduler(session)
+        items = []
+        for job in jobs:
+            latest = (
+                session.query(ScheduledJobRun)
+                .filter(
+                    ScheduledJobRun.tenant_id == tenant_id,
+                    ScheduledJobRun.job_id == job.id,
+                )
+                .order_by(ScheduledJobRun.started_at.desc())
+                .first()
+            )
+            backfill_counts = dict(
+                session.query(
+                    ScheduledJobBackfill.status,
+                    func.count(ScheduledJobBackfill.id),
+                )
+                .filter(
+                    ScheduledJobBackfill.tenant_id == tenant_id,
+                    ScheduledJobBackfill.job_id == job.id,
+                )
+                .group_by(ScheduledJobBackfill.status)
+                .all()
+            )
+            items.append({
+                "job_key": job.job_key,
+                "task_name": job.task_name,
+                "enabled": bool(job.enabled),
+                "interval_seconds": job.interval_seconds,
+                "timeout_seconds": job.timeout_seconds,
+                "max_attempts": job.max_attempts,
+                "retry_backoff_seconds": job.retry_backoff_seconds,
+                "next_run_at": job.next_run_at.isoformat() if job.next_run_at else None,
+                "retry_at": job.retry_at.isoformat() if job.retry_at else None,
+                "last_run_at": job.last_run_at.isoformat() if job.last_run_at else None,
+                "run_count": job.run_count,
+                "failure_count": job.failure_count,
+                "latest_run_status": latest.status if latest else None,
+                "dependency_job_keys": scheduler.dependencies(tenant_id, job.job_key),
+                "backfills": backfill_counts,
+            })
+        return jsonify({"tenant_id": tenant_id, "items": items, "limit": limit}), 200
+    finally:
+        session.close()
+
+
+@app.route("/api/v1/operations/scheduled-jobs/<job_key>/history", methods=["GET"])
+@require_auth(required_permission="read:analytics")
+def scheduled_job_history(job_key: str):
+    """Return bounded, tenant-scoped run and recovery history."""
+    from scheduler import Scheduler, SchedulerError
+
+    tenant_id = _resolve_operations_tenant_id()
+    if tenant_id is None:
+        return jsonify({"error": "tenant_context_required"}), 401
+    limit, error = _query_int("limit", 100, 1, 500)
+    if error:
+        return error
+    session = _open_session(read_only=True)
+    try:
+        scheduler = Scheduler(session)
+        try:
+            runs = scheduler.run_history(tenant_id, job_key, limit=limit)
+        except SchedulerError:
+            return jsonify({"error": "invalid_history_limit"}), 400
+        return jsonify({
+            "tenant_id": tenant_id,
+            "job_key": job_key,
+            "items": [
+                {
+                    "run_id": run.id,
+                    "scheduled_for": run.scheduled_for.isoformat(),
+                    "started_at": run.started_at.isoformat(),
+                    "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+                    "attempt": run.attempt_number,
+                    "trigger_type": run.trigger_type,
+                    "backfill_id": run.backfill_id,
+                    "status": run.status,
+                    "error_type": run.error_type,
+                    "resolution_by": run.resolution_by,
+                    "resolution_reason": run.resolution_reason,
+                    "worker_id": run.worker_id,
+                }
+                for run in runs
+            ],
+        }), 200
+    finally:
+        session.close()
+
+
+@app.route("/api/v1/operations/scheduled-jobs", methods=["POST"])
+@require_auth(required_permission="manage:settings")
+def create_scheduled_reconciliation_job():
+    """Register a tenant schedule for an explicitly allow-listed task."""
+    from scheduler import Scheduler, SchedulerError
+    from scheduled_tasks import TASK_HANDLERS
+
+    tenant_id = _resolve_operations_tenant_id()
+    if tenant_id is None:
+        return jsonify({"error": "tenant_context_required"}), 401
+    payload, error = _json_object()
+    if error:
+        return error
+    job_key = payload.get("job_key")
+    interval = payload.get("interval_seconds")
+    timeout = payload.get("timeout_seconds")
+    attempts = payload.get("max_attempts", 3)
+    backoff = payload.get("retry_backoff_seconds", 30)
+    batch_size = payload.get("batch_size", 100)
+    task_name = payload.get("task_name", "reconciliation.pending_transactions")
+    dependencies = payload.get("depends_on", [])
+    if (
+        not isinstance(job_key, str)
+        or not job_key.strip()
+        or len(job_key) > 255
+        or type(interval) is not int
+        or type(timeout) is not int
+        or type(attempts) is not int
+        or type(backoff) is not int
+        or type(batch_size) is not int
+        or not isinstance(task_name, str)
+        or task_name not in TASK_HANDLERS
+        or not isinstance(dependencies, list)
+        or any(not isinstance(item, str) for item in dependencies)
+    ):
+        return jsonify({"error": "invalid_request"}), 400
+    if not 1 <= batch_size <= 500:
+        return jsonify({"error": "invalid_batch_size"}), 400
+    first_run_at = None
+    if payload.get("first_run_at") is not None:
+        first_run_at = _normalize_datetime(payload["first_run_at"])
+        if first_run_at is None:
+            return jsonify({"error": "invalid_first_run_at"}), 400
+
+    user = get_current_user()
+    actor_id = str(getattr(user, "user_id", "local-operator"))
+    session = _open_session()
+    try:
+        scheduler = Scheduler(session)
+        job = scheduler.register(
+            tenant_id,
+            job_key.strip(),
+            task_name,
+            interval,
+            payload={"batch_size": batch_size},
+            first_run_at=first_run_at,
+            max_attempts=attempts,
+            retry_backoff_seconds=backoff,
+            timeout_seconds=timeout,
+        )
+        for dependency in dependencies:
+            scheduler.add_dependency(tenant_id, job.job_key, dependency)
+        persist_audit_event(session, ActionAuditRecord(
+            tenant_id=tenant_id,
+            actor=actor_id,
+            action="scheduled_job_registered",
+            category="operations",
+            outcome="success",
+            severity="warning",
+            resource_type="scheduled_job",
+            resource_id=job.id,
+            idempotency_key=f"scheduler-register:{tenant_id}:{job.job_key}",
+            details={
+                "interval_seconds": interval,
+                "timeout_seconds": timeout,
+                "depends_on": dependencies,
+                "batch_size": batch_size,
+                "task_name": task_name,
+            },
+        ))
+        session.commit()
+        return jsonify({
+            "job_key": job.job_key,
+            "task_name": job.task_name,
+            "enabled": bool(job.enabled),
+            "next_run_at": job.next_run_at.isoformat() if job.next_run_at else None,
+        }), 201
+    except SchedulerError as exc:
+        session.rollback()
+        return jsonify({"error": "invalid_schedule", "message": str(exc)}), 400
+    except Exception:
+        session.rollback()
+        logger.exception("Failed registering scheduled reconciliation tenant=%s", tenant_id)
+        return jsonify({"error": "schedule_registration_failed"}), 503
+    finally:
+        session.close()
+
+
+@app.route("/api/v1/operations/scheduled-jobs/<job_key>/backfills", methods=["POST"])
+@require_auth(required_permission="manage:settings")
+def create_scheduled_job_backfill(job_key: str):
+    """Queue an auditable historical reconciliation window."""
+    from scheduler import Scheduler, SchedulerError
+
+    tenant_id = _resolve_operations_tenant_id()
+    if tenant_id is None:
+        return jsonify({"error": "tenant_context_required"}), 401
+    payload, error = _json_object()
+    if error:
+        return error
+    start_at = _normalize_datetime(payload.get("start_at"))
+    end_at = _normalize_datetime(payload.get("end_at"))
+    idempotency_key = payload.get("idempotency_key")
+    reason = payload.get("reason")
+    if (
+        start_at is None
+        or end_at is None
+        or not isinstance(idempotency_key, str)
+        or not isinstance(reason, str)
+    ):
+        return jsonify({"error": "invalid_backfill_request"}), 400
+
+    user = get_current_user()
+    actor_id = str(getattr(user, "user_id", "local-operator"))
+    session = _open_session()
+    try:
+        scheduler = Scheduler(session)
+        backfill = scheduler.enqueue_backfill(
+            tenant_id,
+            job_key,
+            start_at,
+            end_at,
+            idempotency_key=idempotency_key,
+            requested_by=actor_id,
+            reason=reason,
+        )
+        persist_audit_event(session, ActionAuditRecord(
+            tenant_id=tenant_id,
+            actor=actor_id,
+            action="scheduled_job_backfill_requested",
+            category="operations",
+            outcome="success",
+            severity="warning",
+            resource_type="scheduled_job_backfill",
+            resource_id=backfill.id,
+            idempotency_key=f"scheduler-backfill:{tenant_id}:{job_key}:{idempotency_key}",
+            details={
+                "job_key": job_key,
+                "start_at": start_at.isoformat(),
+                "end_at": end_at.isoformat(),
+                "reason": reason,
+            },
+        ))
+        session.commit()
+        return jsonify({
+            "backfill_id": backfill.id,
+            "job_key": backfill.job_key,
+            "status": backfill.status,
+            "start_at": backfill.start_at.isoformat(),
+            "end_at": backfill.end_at.isoformat(),
+            "idempotency_key": backfill.idempotency_key,
+        }), 202
+    except SchedulerError as exc:
+        session.rollback()
+        return jsonify({"error": "invalid_backfill_request", "message": str(exc)}), 400
+    except Exception:
+        session.rollback()
+        logger.exception(
+            "Failed enqueueing scheduled backfill tenant=%s job=%s",
+            tenant_id,
+            job_key,
+        )
+        return jsonify({"error": "backfill_enqueue_failed"}), 503
+    finally:
+        session.close()
+
+
+@app.route("/api/v1/operations/scheduled-runs/<run_id>/resolve", methods=["POST"])
+@require_auth(required_permission="manage:settings")
+def resolve_scheduled_run(run_id: str):
+    """Audited operator resolution for an interrupted occurrence or backfill."""
+    from scheduler import Scheduler, SchedulerError
+
+    tenant_id = _resolve_operations_tenant_id()
+    if tenant_id is None:
+        return jsonify({"error": "tenant_context_required"}), 401
+    payload, error = _json_object()
+    if error:
+        return error
+    resolution = payload.get("resolution")
+    reason = payload.get("reason")
+    if resolution not in {"retry", "skip"} or not isinstance(reason, str):
+        return jsonify({"error": "invalid_resolution"}), 400
+    user = get_current_user()
+    actor_id = str(getattr(user, "user_id", "local-operator"))
+    session = _open_session()
+    try:
+        persist_audit_event(session, ActionAuditRecord(
+            tenant_id=tenant_id,
+            actor=actor_id,
+            action="scheduled_run_operator_resolution",
+            category="operations",
+            outcome="success",
+            severity="critical",
+            resource_type="scheduled_job_run",
+            resource_id=run_id,
+            idempotency_key=f"scheduler-run-resolution:{tenant_id}:{run_id}",
+            details={
+                "resolution": resolution,
+                "reason": reason,
+                "confirm_idempotent_replay": (
+                    payload.get("confirm_idempotent_replay") is True
+                ),
+            },
+        ))
+        result = Scheduler(session).resolve_interrupted_run(
+            tenant_id,
+            run_id,
+            resolution=resolution,
+            operator_id=actor_id,
+            reason=reason,
+            confirm_idempotent_replay=(
+                payload.get("confirm_idempotent_replay") is True
+            ),
+        )
+        return jsonify(result), 200
+    except SchedulerError as exc:
+        session.rollback()
+        return jsonify({"error": "resolution_rejected", "message": str(exc)}), 409
+    except Exception:
+        session.rollback()
+        logger.exception(
+            "Failed resolving scheduled run tenant=%s run=%s",
+            tenant_id,
+            run_id,
+        )
+        return jsonify({"error": "resolution_failed"}), 503
+    finally:
+        session.close()
+
+
+@app.route("/api/v1/operations/dead-letters", methods=["GET"])
+@require_auth(required_permission="read:analytics")
+def list_dead_letters():
+    """Return bounded, tenant-scoped ingestion and delivery failure metadata."""
+    tenant_id = _resolve_operations_tenant_id()
+    if tenant_id is None:
+        return jsonify({"error": "tenant_context_required"}), 401
+    try:
+        page = int(request.args.get("page", "1"))
+        per_page = int(request.args.get("per_page", "20"))
+    except ValueError:
+        return jsonify({"error": "invalid_pagination"}), 400
+    if page < 1 or per_page < 1 or per_page > 100:
+        return jsonify({"error": "invalid_pagination"}), 400
+
+    session = _open_session(read_only=True)
+    try:
+        query = session.query(DeadLetter).filter(DeadLetter.tenant_id == tenant_id)
+        total = query.count()
+        entries = (
+            query.order_by(DeadLetter.created_at.desc(), DeadLetter.id.desc())
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+            .all()
+        )
+        return jsonify({
+            "items": [
+                {
+                    "id": entry.id,
+                    "reason": entry.reason,
+                    "status": entry.replay_status,
+                    "replay_attempts": entry.attempts or 0,
+                    "processed": bool(entry.processed),
+                    "has_error_details": bool(entry.error_detail),
+                    "created_at": entry.created_at.isoformat() if entry.created_at else None,
+                    "replayed_at": entry.replayed_at.isoformat() if entry.replayed_at else None,
+                }
+                for entry in entries
+            ],
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+        }), 200
+    finally:
+        session.close()
+
+
 @app.route("/api/v1/operations/dead-letters/<dead_letter_id>/replay", methods=["POST"])
 @require_auth(required_permission="resolve:discrepancies")
 def replay_dead_letter(dead_letter_id: str):
     """Queue one tenant dead-letter entry for bounded, auditable replay."""
-    tenant_id = get_current_user().tenant_id
-    actor_id = str(getattr(get_current_user(), "user_id", "operator"))
-    replay_reason = str((request.get_json(silent=True) or {}).get("reason", "operator replay"))[:4096]
+    user = get_current_user()
+    tenant_id = _resolve_operations_tenant_id()
+    if tenant_id is None:
+        return jsonify({"error": "tenant_context_required"}), 401
+    actor_id = str(getattr(user, "user_id", "operator"))
+    payload, error = _json_object()
+    if error:
+        return error
+    replay_reason = payload.get("reason")
+    if not isinstance(replay_reason, str) or not replay_reason.strip() or len(replay_reason) > 2000:
+        return jsonify({"error": "replay_reason_required"}), 400
+    from background_tasks import DEAD_LETTER_REPLAY_LEASE_SECONDS
+
     session = _open_session()
     try:
         entry = session.query(DeadLetter).filter(
@@ -2318,7 +2778,25 @@ def replay_dead_letter(dead_letter_id: str):
         ).with_for_update().first()
         if entry is None:
             return jsonify({"error": "not_found", "message": "Dead-letter entry not found."}), 404
-        if (entry.attempts or 0) >= 3 or entry.replay_status in {"queued", "replaying"}:
+        if entry.replay_status == "replaying":
+            replay_started_at = entry.replayed_at
+            if replay_started_at is not None and replay_started_at.tzinfo is None:
+                replay_started_at = replay_started_at.replace(tzinfo=timezone.utc)
+            stale = (
+                replay_started_at is None
+                or (datetime.now(timezone.utc) - replay_started_at).total_seconds()
+                >= DEAD_LETTER_REPLAY_LEASE_SECONDS
+            )
+            if not stale:
+                return jsonify({
+                    "error": "replay_in_progress",
+                    "message": "The replay worker still owns this attempt.",
+                }), 409
+            entry.replay_status = "failed"
+            entry.error_detail = (
+                "replay lease expired; operator review required before retry"
+            )
+        if (entry.attempts or 0) >= 3 or entry.replay_status == "queued":
             return jsonify({"error": "replay_limit", "message": "Dead-letter replay is already queued or has reached its limit."}), 409
         entry.processed = False
         entry.processed_at = None
@@ -2326,7 +2804,7 @@ def replay_dead_letter(dead_letter_id: str):
         entry.replay_status = "queued"
         entry.replayed_by = actor_id
         entry.replayed_at = datetime.now(timezone.utc)
-        entry.replay_reason = replay_reason
+        entry.replay_reason = replay_reason.strip()
         persist_audit_event(session, ActionAuditRecord(
             tenant_id=tenant_id,
             actor=actor_id,
@@ -2337,7 +2815,7 @@ def replay_dead_letter(dead_letter_id: str):
             resource_type="dead_letter",
             resource_id=entry.id,
             idempotency_key=f"dead-letter-replay:{entry.id}:{entry.attempts}",
-            details={"reason": replay_reason, "attempt": entry.attempts},
+            details={"reason": replay_reason.strip(), "attempt": entry.attempts},
         ))
         session.commit()
         try:
@@ -3005,31 +3483,37 @@ def auto_escalate_incidents():
         session.close()
 
 
-@app.route("/incidents/filters/presets", methods=["GET", "POST"])
+@app.route("/incidents/filters/presets", methods=["GET"])
 @require_auth("read:discrepancies")
 def incident_filter_presets():
-    """Return and persist a minimal set of dashboard filter presets."""
-    default_presets = {
+    """Return built-in filter presets for the current request."""
+    return jsonify({"presets": _default_incident_filter_presets()}), 200
+
+
+def _default_incident_filter_presets() -> Dict[str, Dict[str, str]]:
+    return {
         "critical_open": {"severity": "critical", "resolved": "open"},
         "needs_review": {"status": "needs_review"},
         "all": {},
     }
-    if request.method == "POST":
-        current_user = get_current_user()
-        if _api_auth_required() and (current_user is None or not AuthRBAC.check_permission(current_user, "write:discrepancies")):
-            return jsonify({"error": "insufficient_permissions", "message": "Write permission required."}), 403
-        payload, error = _json_object()
-        if error:
-            return error
-        error = _validate_fields(payload, {"name": (str, False), "filters": (dict, False)})
-        if error:
-            return error
-        name = str(payload.get("name") or "custom_preset").strip()
-        if not name:
-            return jsonify({"error": "missing_name", "message": "Preset name is required."}), 400
-        default_presets[name] = payload.get("filters") or {}
-        return jsonify({"status": "saved", "presets": default_presets}), 201
-    return jsonify({"presets": default_presets}), 200
+
+
+@app.route("/incidents/filters/presets", methods=["POST"])
+@require_auth("write:discrepancies")
+def create_incident_filter_preset():
+    """Return built-in and caller-supplied presets without claiming persistence."""
+    payload, error = _json_object()
+    if error:
+        return error
+    error = _validate_fields(payload, {"name": (str, False), "filters": (dict, False)})
+    if error:
+        return error
+    name = str(payload.get("name") or "custom_preset").strip()
+    if not name:
+        return jsonify({"error": "missing_name", "message": "Preset name is required."}), 400
+    presets = _default_incident_filter_presets()
+    presets[name] = payload.get("filters") or {}
+    return jsonify({"status": "generated", "presets": presets}), 200
 
 
 @app.route("/analytics/reconciliation-report", methods=["GET"])

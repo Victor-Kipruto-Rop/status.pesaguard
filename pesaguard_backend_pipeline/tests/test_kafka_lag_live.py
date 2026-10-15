@@ -23,6 +23,10 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.mark.integration
+@pytest.mark.skipif(
+    not os.getenv("PESAGUARD_LIVE_KAFKA_BOOTSTRAP"),
+    reason="PESAGUARD_LIVE_KAFKA_BOOTSTRAP is required for live broker verification",
+)
 def test_broker_derived_lag_and_queue_depth_match_published_messages():
     from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 
@@ -97,6 +101,10 @@ def test_consumer_lag_registry_is_process_local_snapshot():
 
 
 @pytest.mark.integration
+@pytest.mark.skipif(
+    not os.getenv("PESAGUARD_LIVE_KAFKA_BOOTSTRAP"),
+    reason="PESAGUARD_LIVE_KAFKA_BOOTSTRAP is required for live broker verification",
+)
 def test_broker_consumer_lag_reads_env_configured_topics(monkeypatch):
     from event_bus import broker_consumer_lag
 

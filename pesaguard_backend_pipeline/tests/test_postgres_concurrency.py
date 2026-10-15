@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 psycopg2 = pytest.importorskip("psycopg2")
+from tenant_context import tenant_scope
 
 
 @pytest.mark.skipif(
@@ -31,6 +32,10 @@ def test_concurrent_same_transaction_has_one_winner():
             with connection:
                 with connection.cursor() as cursor:
                     barrier.wait(timeout=10)
+                    cursor.execute(
+                        "SELECT set_config('app.tenant_id', %s, true)",
+                        ("tenant-race",),
+                    )
                     cursor.execute(
                         "INSERT INTO transactions "
                         "(id, trans_id, tenant_id, provider_account_id, provider, "
@@ -60,6 +65,10 @@ def test_concurrent_same_transaction_has_one_winner():
     try:
         with cleanup:
             with cleanup.cursor() as cursor:
+                cursor.execute(
+                    "SELECT set_config('app.tenant_id', %s, true)",
+                    ("tenant-race",),
+                )
                 cursor.execute("DELETE FROM transactions WHERE trans_id = %s", (trans_id,))
     finally:
         cleanup.close()
@@ -103,15 +112,16 @@ def test_concurrent_first_device_sessions_upsert_once_and_count_both():
         session = sessions()
         try:
             barrier.wait(timeout=10)
-            _upsert_device_identity(
-                session,
-                user,
-                device_id,
-                "Mozilla/5.0 Chrome/130.0 Windows",
-                "192.0.2.25",
-                datetime.now(timezone.utc),
-                {"risk_level": "low", "risk_score": 0.2, "signals": {}},
-            )
+            with tenant_scope(tenant_id):
+                _upsert_device_identity(
+                    session,
+                    user,
+                    device_id,
+                    "Mozilla/5.0 Chrome/130.0 Windows",
+                    "192.0.2.25",
+                    datetime.now(timezone.utc),
+                    {"risk_level": "low", "risk_score": 0.2, "signals": {}},
+                )
             session.commit()
         except Exception as exc:
             session.rollback()
@@ -128,7 +138,7 @@ def test_concurrent_first_device_sessions_upsert_once_and_count_both():
             worker.join(timeout=20)
         assert all(not worker.is_alive() for worker in workers), "device upsert race timed out"
         assert not errors
-        with sessions() as session:
+        with tenant_scope(tenant_id), sessions() as session:
             rows = session.query(DeviceIdentity).filter_by(
                 tenant_id=tenant_id,
                 user_id=user_id,
@@ -137,7 +147,7 @@ def test_concurrent_first_device_sessions_upsert_once_and_count_both():
             assert len(rows) == 1
             assert rows[0].session_count == 2
     finally:
-        with sessions() as session:
+        with tenant_scope(tenant_id), sessions() as session:
             session.query(DeviceIdentity).filter_by(
                 tenant_id=tenant_id,
                 user_id=user_id,

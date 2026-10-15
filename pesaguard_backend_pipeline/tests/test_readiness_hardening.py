@@ -18,6 +18,7 @@ def webhook_client(monkeypatch):
         monkeypatch.setenv("DATABASE_URL", f"sqlite:///{os.path.join(tmpdir, 'pesaguard_test.db')}")
         monkeypatch.setenv("DARAJA_ALLOWED_IPS", "127.0.0.1")
         monkeypatch.setenv("DARAJA_SHARED_SECRET", "test-secret")
+        monkeypatch.setenv("DARAJA_WEBHOOK_SIGNING_SECRET", "test-signing-secret")
         monkeypatch.setenv("TENANT_ID", "tenant-a")
         monkeypatch.setenv("PESAGUARD_WEBHOOK_MAX_BODY_BYTES", "256")
         import app as webhook_app
@@ -153,6 +154,10 @@ def test_dashboard_scopes_results_to_the_authenticated_tenant(dashboard_client):
 
 
 def test_webhook_accepts_valid_source_and_replays_are_ignored(webhook_client):
+    import hashlib
+    import hmac
+    import json
+
     payload = {
         "TransactionType": "Pay Bill",
         "TransID": "abc-123",
@@ -162,17 +167,25 @@ def test_webhook_accepts_valid_source_and_replays_are_ignored(webhook_client):
         "MSISDN": "254700000000",
     }
 
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    signature = hmac.new(b"test-signing-secret", body, hashlib.sha256).hexdigest()
+    headers = {
+        "X-Daraja-Shared-Secret": "test-secret",
+        "X-Daraja-Signature": signature,
+    }
     first_response = webhook_client.post(
         "/webhook/mpesa/confirmation",
-        json=payload,
-        headers={"X-Daraja-Shared-Secret": "test-secret"},
+        data=body,
+        content_type="application/json",
+        headers=headers,
     )
     assert first_response.status_code == 200
 
     duplicate_response = webhook_client.post(
         "/webhook/mpesa/confirmation",
-        json=payload,
-        headers={"X-Daraja-Shared-Secret": "test-secret"},
+        data=body,
+        content_type="application/json",
+        headers=headers,
     )
     assert duplicate_response.status_code == 200
     assert "duplicate ignored" in duplicate_response.get_json()["ResultDesc"].lower()
@@ -192,7 +205,7 @@ def test_webhook_verifies_daraja_signature(
 
     from shared.daraja.validator import compute_hmac
 
-    monkeypatch.setenv("DARAJA_CONSUMER_SECRET", "consumer-secret")
+    monkeypatch.setenv("DARAJA_WEBHOOK_SIGNING_SECRET", "consumer-secret")
     payload = {
         "TransactionType": "Pay Bill",
         "TransID": f"signature-{signature}",
@@ -321,7 +334,7 @@ def test_public_status_is_sanitized_and_allows_public_and_status_sites(dashboard
         assert response.headers["Cache-Control"] == "no-store"
         assert "private broker detail" not in response.get_data(as_text=True)
         assert "private provider detail" not in response.get_data(as_text=True)
-        payload = response.get_json()
+    payload = response.get_json()
 
     assert payload["verified"] is True
     assert payload["overall"]["status"] == "outage"
@@ -337,6 +350,62 @@ def test_public_status_is_sanitized_and_allows_public_and_status_sites(dashboard
         "documentation-site": "operational",
         "status-site": "operational",
     }
+
+
+def test_webhook_readiness_requires_signature_source_auth_and_tenant(monkeypatch):
+    import health as health_module
+
+    monkeypatch.setattr(health_module, "check_database_connection", lambda: {
+        "status": "ok",
+        "database": {"status": "ok"},
+    })
+    monkeypatch.setattr(health_module, "check_kafka_connectivity", lambda: {
+        "status": "ok",
+        "kafka": {"status": "ok"},
+    })
+    monkeypatch.setattr(health_module, "check_redis_connectivity", lambda: {
+        "status": "ok",
+        "redis": {"status": "ok"},
+    })
+    monkeypatch.setattr(health_module, "check_daraja_connectivity", lambda: {
+        "status": "ok",
+        "daraja": {"status": "ok"},
+    })
+    monkeypatch.setattr(health_module, "KAFKA_REQUIRED_FOR_OK", False)
+    monkeypatch.setattr(health_module, "REDIS_REQUIRED_FOR_OK", False)
+
+    for name in (
+        "DARAJA_WEBHOOK_SIGNING_SECRET",
+        "DARAJA_SHARED_SECRET",
+        "DARAJA_ALLOWED_IPS",
+        "TENANT_ID",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    unconfigured = health_module.check_webhook_ingestion_configuration()
+
+    assert unconfigured["webhook_ingestion"] == {
+        "status": "failed",
+        "missing_configuration": [
+            "webhook_signing_secret",
+            "webhook_source_authentication",
+            "tenant_context",
+        ],
+    }
+    assert health_module.build_health_payload()["status"] == "degraded"
+
+    monkeypatch.setenv("DARAJA_WEBHOOK_SIGNING_SECRET", "test-signing-secret")
+    monkeypatch.setenv("DARAJA_ALLOWED_IPS", "127.0.0.1")
+    monkeypatch.setenv("TENANT_ID", "tenant-a")
+
+    configured = health_module.check_webhook_ingestion_configuration()
+
+    assert configured["webhook_ingestion"] == {
+        "status": "ok",
+        "missing_configuration": [],
+    }
+    assert "test-signing-secret" not in str(configured)
+    assert health_module.build_health_payload()["status"] == "ok"
 
 
 def test_public_status_cors_preflight_accepts_public_and_status_sites(dashboard_client, monkeypatch):

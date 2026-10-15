@@ -4,7 +4,7 @@ from ingestion import IngestionService
 
 
 class FakeEventStore:
-    def mark_processed(self, payload, *, tenant_id, idempotency_key_override):
+    def mark_processed(self, payload, *, tenant_id, idempotency_key_override, **kwargs):
         return ProcessResult.STORED
 
 

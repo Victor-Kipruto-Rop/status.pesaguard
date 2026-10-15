@@ -50,8 +50,17 @@ Responsible for:
 - queue-based event flow
 - delayed alerts and notification dispatch
 - retry and dead-letter recovery paths
+- durable tenant-scoped scheduled reconciliation, dependency gating,
+  timeouts, backfills, and operator-approved recovery
 
-This boundary is intentionally asynchronous so user-facing processing does not block on long-running tasks.
+The scheduler is a dedicated worker using PostgreSQL job/run state, Redis
+distributed locks, transaction-local tenant context, and a least-privilege
+tenant registry credential. Its authenticated operator API is bounded to the
+allow-listed reconciliation task; it is not an arbitrary task execution
+interface. See [Scheduler Operations](../operations/SCHEDULER.md).
+
+This boundary is intentionally asynchronous so user-facing processing does
+not block on long-running tasks.
 
 ### 6. Policy and tenant governance boundary
 

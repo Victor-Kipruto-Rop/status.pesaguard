@@ -19,6 +19,12 @@ def test_authoritative_openapi_contract_covers_required_domains():
         "/reconciliation/{transaction_id}",
         "/fraud/analyse",
         "/fraud/{transaction_id}",
+        "/operations/scheduled-jobs",
+        "/operations/scheduled-jobs/{job_key}/history",
+        "/operations/scheduled-jobs/{job_key}/backfills",
+        "/operations/scheduled-runs/{run_id}/resolve",
+        "/operations/dead-letters",
+        "/operations/dead-letters/{dead_letter_id}/replay",
         "/auth/login",
         "/auth/refresh",
     ):
@@ -63,6 +69,13 @@ def test_authoritative_contract_operations_match_registered_routes():
                 assert operation["x-required-permission"] == getattr(
                     view, "required_permission", None
                 ), f"Permission contract mismatch: {method.upper()} {route_path}"
+                if operation.get("x-user-authenticated-tenant") is True:
+                    assert operation["security"] == [{"bearerAuth": []}]
+                    assert "#/components/parameters/TenantHeader" not in {
+                        parameter.get("$ref")
+                        for parameter in operation.get("parameters", [])
+                    }
+                    continue
                 assert operation["security"] == [
                     {"bearerAuth": []},
                     {"apiKeyAuth": []},

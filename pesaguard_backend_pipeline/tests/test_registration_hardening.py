@@ -10,11 +10,13 @@ configure_test_database()
 from action_audit import ActionAuditEntry
 from app_4_advanced_features import SessionLocal, app
 from models import EmailNotification, PasswordlessChallenge, UserAccount, UserIdentity
+from tenant_context import current_tenant_id
 
 
 @pytest.fixture
-def client():
-    app.config["TESTING"] = True
+def client(monkeypatch):
+    monkeypatch.setitem(app.config, "TESTING", True)
+    monkeypatch.setitem(app.config, "PUBLIC_REGISTRATION_TENANT_ID", "registration-tenant")
     with app.test_client() as test_client:
         yield test_client
 
@@ -67,6 +69,87 @@ def test_registration_normalization_duplicate_generic_response_and_audit(client)
         assert session.query(ActionAuditEntry).filter_by(action="registration.duplicate", resource_id=identity.user_id).count() == 1
 
     _clean(email)
+
+
+def test_registration_rejects_caller_selected_tenant(client):
+    email = f"tenant-spoof-{uuid.uuid4().hex[:8]}@example.com"
+    configured_tenant = "registration-tenant"
+    requested_tenant = "another-tenant"
+
+    response = client.post(
+        "/auth/register",
+        json={
+            "username": "tenant-spoof",
+            "email": email,
+            "password": "StrongPass123!",
+            "tenant_id": requested_tenant,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "tenant_selection_not_allowed"
+    with SessionLocal() as session:
+        assert session.query(UserAccount).filter_by(email=email, tenant_id=configured_tenant).count() == 0
+        assert session.query(UserAccount).filter_by(email=email, tenant_id=requested_tenant).count() == 0
+
+
+def test_production_registration_requires_server_configured_tenant(client, monkeypatch):
+    monkeypatch.delitem(app.config, "PUBLIC_REGISTRATION_TENANT_ID")
+    monkeypatch.delenv("PESAGUARD_PUBLIC_REGISTRATION_TENANT_ID", raising=False)
+    monkeypatch.delenv("TENANT_ID", raising=False)
+    monkeypatch.setattr(advanced_features, "_is_production_environment", lambda: True)
+
+    response = client.post(
+        "/auth/register",
+        json={
+            "username": "unconfigured-registration",
+            "email": f"unconfigured-{uuid.uuid4().hex[:8]}@example.com",
+            "password": "StrongPass123!",
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.get_json()["error"] == "registration_unavailable"
+
+
+def test_invalid_server_registration_tenant_fails_closed(client, monkeypatch):
+    monkeypatch.setitem(app.config, "PUBLIC_REGISTRATION_TENANT_ID", "invalid tenant")
+
+    response = client.post(
+        "/auth/register",
+        json={
+            "username": "invalid-tenant-registration",
+            "email": f"invalid-tenant-{uuid.uuid4().hex[:8]}@example.com",
+            "password": "StrongPass123!",
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.get_json()["error"] == "registration_unavailable"
+
+
+@pytest.mark.parametrize("payload", [[], "not-json"])
+def test_registration_rejects_non_object_json_body(client, payload):
+    if payload == "not-json":
+        response = client.post(
+            "/auth/register",
+            data="{",
+            content_type="application/json",
+        )
+    else:
+        response = client.post("/auth/register", json=payload)
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "invalid_request"
+
+
+def test_public_auth_lookup_scopes_database_work_to_requested_tenant():
+    scoped_lookup = advanced_features._tenant_scoped_request(current_tenant_id)
+
+    with app.test_request_context("/auth/login", json={"tenant_id": "auth-lookup-tenant"}):
+        assert scoped_lookup() == "auth-lookup-tenant"
+
+    assert current_tenant_id() is None
 
 
 def test_honeypot_and_resend_single_use_attempt_limit(client):

@@ -24,6 +24,9 @@ def test_scheduled_reports_count_and_discover_only_tenant_scoped_transactions(tm
     import operations.scheduled_reports as scheduled_reports
 
     scheduled_reports = importlib.reload(scheduled_reports)
+    import tenant_registry
+
+    monkeypatch.setattr(tenant_registry, "list_active_tenant_ids", lambda: ["tenant-a", "tenant-b"])
     engine = create_engine(database_url)
     Base.metadata.create_all(engine)
     test_session_factory = sessionmaker(bind=engine, expire_on_commit=False)

@@ -24,6 +24,10 @@ This runbook covers the affected PesaGuard workflow, its dependencies, and custo
 - Check structured logs by correlation ID; redact credentials and personal data.
 - Inspect tenant-scoped dead letters, retry counts, outbox age, and idempotency records.
 - Identify whether the failure is isolated to one tenant, provider account, region, or shared dependency.
+- For a blocked Kafka partition, identify its failed topic/partition/offset and
+  confirm whether PostgreSQL is unavailable or reconciliation repeatedly fails.
+  A processing result alone is not an acknowledgement: the reconciliation
+  transaction or dead-letter record must be durable before the offset advances.
 
 ## Mitigation
 
@@ -32,9 +36,19 @@ Prefer reversible controls: pause a failing consumer, disable a provider route, 
 ## Recovery
 
 1. Confirm the dependency is stable and the failure condition is understood.
-2. Replay only tenant-scoped, validated records with an explicit operator and reason.
-3. Verify counts, ordering, reconciliation outcomes, and duplicate protection.
-4. Monitor retries, lag, error rates, and customer-facing latency for at least one recovery window.
+2. Restore the durable store if processing and dead-letter persistence both
+   failed. The consumer pauses and seeks the affected partition back to the
+   unresolved offset, then retries after a short delay. Verify a durable
+   reconciliation result or quarantine before considering that transaction
+   handled.
+3. Inspect quarantined messages by tenant and original Kafka coordinates.
+   Replay only tenant-scoped, validated records with an explicit operator and
+   reason; do not delete or overwrite the original disposition.
+4. Verify transaction idempotency, audit and outbox rows, counts, and ordering.
+   Redelivery after a crash between database commit and Kafka offset commit is
+   expected and must not duplicate financial effects.
+5. Monitor retries, lag, dead-letter growth, error rates, and customer-facing
+   latency for at least one recovery window.
 
 ## Escalation
 

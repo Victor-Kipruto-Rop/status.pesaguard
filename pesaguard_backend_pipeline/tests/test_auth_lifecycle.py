@@ -6,6 +6,7 @@ import app_4_advanced_features as advanced_features
 from app_4_advanced_features import app, SessionLocal, _totp_code
 from auth_rbac import AuthRBAC, RefreshTokenRecord
 from models import PasswordCredential, PasswordHistory, PasswordResetState, UserAccount, UserIdentity, UserSession
+from test_config import post_public_registration
 
 
 @pytest.fixture
@@ -22,8 +23,21 @@ def _clean_user_email(email: str, tenant_id: str = "test-tenant"):
         session.commit()
 
 
+# runtime_environment() raises when two aliases disagree (a deliberate fail-loud
+# guard for production config). Ambient shells/CI export FLASK_ENV or ENVIRONMENT,
+# so a test that pins exactly one alias must clear the siblings first or the
+# conflict check fires before the behavior under test runs.
+_ENVIRONMENT_ALIASES = ("PESAGUARD_ENVIRONMENT", "PESAGUARD_ENV", "ENVIRONMENT", "FLASK_ENV")
+
+
+def _set_environment(monkeypatch, value: str) -> None:
+    for name in _ENVIRONMENT_ALIASES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("PESAGUARD_ENVIRONMENT", value)
+
+
 def test_webauthn_production_requires_explicit_https_origin(monkeypatch):
-    monkeypatch.setenv("PESAGUARD_ENVIRONMENT", "production")
+    _set_environment(monkeypatch, "production")
     monkeypatch.delenv("PESAGUARD_WEBAUTHN_ORIGIN", raising=False)
 
     with app.test_request_context(base_url="https://untrusted.example"):
@@ -32,7 +46,7 @@ def test_webauthn_production_requires_explicit_https_origin(monkeypatch):
 
 
 def test_webauthn_uses_configured_origin_and_rp_id(monkeypatch):
-    monkeypatch.setenv("PESAGUARD_ENVIRONMENT", "production")
+    _set_environment(monkeypatch, "production")
     monkeypatch.setenv("PESAGUARD_WEBAUTHN_ORIGIN", "https://developers.example.com")
     monkeypatch.setenv("PESAGUARD_WEBAUTHN_RP_ID", "example.com")
     monkeypatch.setenv("PESAGUARD_WEBAUTHN_RP_NAME", "PesaGuard Portal")
@@ -46,7 +60,7 @@ def test_webauthn_uses_configured_origin_and_rp_id(monkeypatch):
 
 
 def test_webauthn_rejects_http_origin_in_production(monkeypatch):
-    monkeypatch.setenv("PESAGUARD_ENVIRONMENT", "production")
+    _set_environment(monkeypatch, "production")
     monkeypatch.setenv("PESAGUARD_WEBAUTHN_ORIGIN", "http://developers.example.com")
     monkeypatch.setenv("PESAGUARD_WEBAUTHN_RP_ID", "example.com")
 
@@ -59,9 +73,10 @@ def test_register_verify_and_login(client):
     email = "newuser@example.com"
     tenant_id = "test-tenant"
     _clean_user_email(email, tenant_id)
-    response = client.post(
-        "/auth/register",
-        json={
+    response = post_public_registration(
+        client,
+        app,
+        {
             "username": "newuser",
             "email": email,
             "password": "StrongPass123!",
@@ -115,9 +130,10 @@ def test_register_verify_and_login(client):
 def test_refresh_rotation_and_reuse_revoke_the_entire_family(client):
     email = f"refresh-user-{uuid.uuid4().hex}@example.com"
     tenant_id = "refresh-tenant"
-    registration = client.post(
-        "/auth/register",
-        json={"username": "refresh-user", "email": email, "password": "StrongPass123!", "tenant_id": tenant_id},
+    registration = post_public_registration(
+        client,
+        app,
+        {"username": "refresh-user", "email": email, "password": "StrongPass123!", "tenant_id": tenant_id},
     )
     assert registration.status_code == 201
     assert client.post(
@@ -167,9 +183,10 @@ def test_refresh_rotation_and_reuse_revoke_the_entire_family(client):
 def test_refreshed_access_token_is_revoked_with_its_session(client, refresh_endpoint, grant_type):
     email = f"refresh-session-{uuid.uuid4().hex}@example.com"
     tenant_id = "refresh-session-tenant"
-    registration = client.post(
-        "/auth/register",
-        json={
+    registration = post_public_registration(
+        client,
+        app,
+        {
             "username": email.split("@", 1)[0],
             "email": email,
             "password": "StrongPass123!",
@@ -235,9 +252,10 @@ def test_password_reset_and_lockout(client, monkeypatch):
     email = "resetuser@example.com"
     tenant_id = "test-tenant"
     _clean_user_email(email, tenant_id)
-    registration = client.post(
-        "/auth/register",
-        json={"username": "resetuser", "email": email, "password": "OriginalPass123!", "tenant_id": tenant_id},
+    registration = post_public_registration(
+        client,
+        app,
+        {"username": "resetuser", "email": email, "password": "OriginalPass123!", "tenant_id": tenant_id},
     ).get_json()
     assert client.post(
         "/auth/verify-email",
@@ -288,9 +306,10 @@ def test_expired_password_and_reset_revoke_existing_session(client):
     email = "expireduser@example.com"
     tenant_id = "test-tenant"
     _clean_user_email(email, tenant_id)
-    registration = client.post(
-        "/auth/register",
-        json={"username": "expireduser", "email": email, "password": "OriginalPass123!", "tenant_id": tenant_id},
+    registration = post_public_registration(
+        client,
+        app,
+        {"username": "expireduser", "email": email, "password": "OriginalPass123!", "tenant_id": tenant_id},
     ).get_json()
     assert client.post(
         "/auth/verify-email",
@@ -321,14 +340,15 @@ def test_expired_password_and_reset_revoke_existing_session(client):
 
 
 def test_totp_recovery_email_and_reset_workflow(client, monkeypatch):
-    monkeypatch.setenv("PESAGUARD_ENVIRONMENT", "development")
+    _set_environment(monkeypatch, "development")
     email = f"mfauser-{uuid.uuid4().hex}@example.com"
     tenant_id = "test-tenant"
     _clean_user_email(email, tenant_id)
 
-    registration_response = client.post(
-        "/auth/register",
-        json={"username": "mfauser", "email": email, "password": "OriginalPass123!", "tenant_id": tenant_id},
+    registration_response = post_public_registration(
+        client,
+        app,
+        {"username": "mfauser", "email": email, "password": "OriginalPass123!", "tenant_id": tenant_id},
     )
     registration = registration_response.get_json()
     if "verification_token" not in registration:

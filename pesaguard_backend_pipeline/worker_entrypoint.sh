@@ -20,6 +20,10 @@ if [ "${COMMUNICATION_WORKER_MODE:-0}" = "1" ]; then
   exec python -m pesaguard_backend_pipeline.communications.worker
 fi
 
+if [ "${SCHEDULER_WORKER_MODE:-0}" = "1" ]; then
+  exec python -m scheduler_worker
+fi
+
 # Execute RQ worker with graceful shutdown timeout (e.g., 60 seconds)
 exec rq worker \
   --path /app \

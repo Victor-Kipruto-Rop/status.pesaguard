@@ -17,6 +17,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from observability import capture_exception, init_sentry
+from tenant_context import tenant_scope
 
 logger = logging.getLogger("pesaguard.background_tasks")
 
@@ -26,6 +27,12 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 RQ_QUEUE_NAME = os.getenv("RQ_QUEUE_NAME", "transaction_events")
 DATABASE_URL = required_env("DATABASE_URL")
 OUTBOX_MAX_ATTEMPTS = max(1, int(os.getenv("OUTBOX_MAX_ATTEMPTS", "5")))
+UNATTRIBUTED_TENANT_ID = os.getenv("PESAGUARD_UNATTRIBUTED_TENANT_ID", "pesaguard-unattributed")
+DEAD_LETTER_REPLAY_LEASE_SECONDS = 900
+
+
+class DeadLetterReplayRecoveryRequired(RuntimeError):
+    """A stale replay needs an operator decision before another attempt."""
 
 # Global thread-safe engine for task-level database persistence
 if DATABASE_URL.startswith("sqlite"):
@@ -67,25 +74,29 @@ def handle_job_failure(job, connection, type, value, traceback) -> None:
     # Persist job failure into DeadLetter store if job payload is present
     try:
         from models import DeadLetter
-        session = TaskSessionLocal()
-        try:
-            payload = args[1] if len(args) > 1 and isinstance(args[1], dict) else {"raw_args": str(args)}
-            dead_letter = DeadLetter(
-                id=f"dlq_job_{job_id}",
-                tenant_id=payload.get("tenant_id", "default") if isinstance(payload, dict) else "default",
-                reason="background_job_failed",
-                error_detail=f"Job {func_name} failed: {str(value)}",
-                payload=payload,
-                created_at=datetime.now(timezone.utc),
-            )
-            session.add(dead_letter)
-            session.commit()
-            logger.info("Successfully recorded job failure %s to DeadLetter table.", job_id)
-        except Exception as exc:
-            logger.exception("Failed writing job failure %s to DeadLetter table: %s", job_id, exc)
-            session.rollback()
-        finally:
-            session.close()
+        payload = args[1] if len(args) > 1 and isinstance(args[1], dict) else {"raw_args": str(args)}
+        tenant_id = payload.get("tenant_id") if isinstance(payload, dict) else None
+        if not isinstance(tenant_id, str) or not tenant_id.strip():
+            tenant_id = UNATTRIBUTED_TENANT_ID
+        with tenant_scope(tenant_id):
+            session = TaskSessionLocal()
+            try:
+                dead_letter = DeadLetter(
+                    id=f"dlq_job_{job_id}",
+                    tenant_id=tenant_id,
+                    reason="background_job_failed",
+                    error_detail=f"Job {func_name} failed: {str(value)}",
+                    payload=payload,
+                    created_at=datetime.now(timezone.utc),
+                )
+                session.add(dead_letter)
+                session.commit()
+                logger.info("Successfully recorded job failure %s to DeadLetter table.", job_id)
+            except Exception as exc:
+                logger.exception("Failed writing job failure %s to DeadLetter table: %s", job_id, exc)
+                session.rollback()
+            finally:
+                session.close()
     except Exception as exc:
         logger.error("Could not import DeadLetter model for failure handling: %s", exc)
 
@@ -228,35 +239,80 @@ def _publish_transaction_event(topic: str, payload: dict) -> None:
 
 
 def replay_dead_letter_job(dead_letter_id: str, tenant_id: str) -> None:
-    """Load and decrypt a dead-letter only inside the worker process."""
+    """Claim and replay one tenant dead-letter without concurrent redelivery."""
     from data_protection import unprotect_payload
     from models import DeadLetter
     from producer import publish_transaction_event
 
     session_factory = sessionmaker(bind=_task_db_engine, expire_on_commit=False)
-    with session_factory() as session:
-        entry = session.query(DeadLetter).filter(
-            DeadLetter.id == dead_letter_id,
-            DeadLetter.tenant_id == tenant_id,
-        ).first()
-        if entry is None or entry.replay_status not in {"queued", "replaying"}:
-            return
-        entry.replay_status = "replaying"
-        session.commit()
-        try:
-            publish_transaction_event(
-                os.getenv("KAFKA_TOPIC_TRANSACTIONS", "pesaguard.transactions.raw"),
-                unprotect_payload(entry.payload or {}),
-            )
-            entry.replay_status = "published"
-            entry.processed = True
-            entry.processed_at = datetime.now(timezone.utc)
+    with tenant_scope(tenant_id):
+        with session_factory() as session:
+            entry = session.query(DeadLetter).filter(
+                DeadLetter.id == dead_letter_id,
+                DeadLetter.tenant_id == tenant_id,
+            ).with_for_update().first()
+            if entry is None:
+                raise LookupError("tenant-scoped dead-letter entry was not found")
+            if entry.replay_status in {"published", "ingested", "duplicate"}:
+                return
+            if entry.replay_status == "replaying":
+                last_attempt = entry.replayed_at
+                if last_attempt is None:
+                    stale = True
+                else:
+                    if last_attempt.tzinfo is None:
+                        last_attempt = last_attempt.replace(tzinfo=timezone.utc)
+                    stale = (
+                        datetime.now(timezone.utc) - last_attempt
+                    ).total_seconds() >= DEAD_LETTER_REPLAY_LEASE_SECONDS
+                if stale:
+                    entry.replay_status = "failed"
+                    entry.error_detail = (
+                        "replay lease expired; operator review required before retry"
+                    )
+                    session.commit()
+                    raise DeadLetterReplayRecoveryRequired(
+                        "stale replay requires operator review"
+                    )
+                return
+            if entry.replay_status != "queued":
+                raise RuntimeError("dead-letter entry is not queued for replay")
+
+            entry.replay_status = "replaying"
+            entry.replayed_at = datetime.now(timezone.utc)
             session.commit()
-        except Exception as exc:
-            entry.replay_status = "failed"
-            entry.error_detail = str(exc)[:2000]
-            session.commit()
-            raise
+            try:
+                payload = unprotect_payload(entry.payload or {})
+                if entry.reason == "validation_failed":
+                    from event_store import EventStore, ProcessResult
+                    from ingestion import IngestionError, IngestionService
+
+                    result = IngestionService(EventStore(database_url=DATABASE_URL)).ingest(
+                        "mpesa",
+                        payload,
+                        tenant_id=tenant_id,
+                    )
+                    if result.result in {ProcessResult.ERROR, ProcessResult.CONFLICT}:
+                        raise IngestionError(
+                            f"transaction replay was not accepted: {result.result.value}"
+                        )
+                    entry.replay_status = (
+                        "duplicate" if result.result is ProcessResult.DUPLICATE else "ingested"
+                    )
+                else:
+                    publish_transaction_event(
+                        os.getenv("KAFKA_TOPIC_TRANSACTIONS", "pesaguard.transactions.raw"),
+                        payload,
+                    )
+                    entry.replay_status = "published"
+                entry.processed = True
+                entry.processed_at = datetime.now(timezone.utc)
+                session.commit()
+            except Exception as exc:
+                entry.replay_status = "failed"
+                entry.error_detail = str(exc)[:2000]
+                session.commit()
+                raise
 
 
 def drain_transaction_outbox(limit: int = 100) -> Dict[str, Any]:
@@ -266,7 +322,17 @@ def drain_transaction_outbox(limit: int = 100) -> Dict[str, Any]:
     from data_protection import unprotect_payload
 
     store = EventStore(database_url=DATABASE_URL)
-    claimed = store.claim_outbox_batch(limit=limit)
+    store._ensure_ready()
+    claimed = []
+    remaining = max(1, limit)
+    tenant_ids = store.list_active_tenants() if store.engine.dialect.name == "postgresql" else [None]
+    for tenant_id in tenant_ids:
+        kwargs = {"tenant_id": tenant_id} if tenant_id is not None else {}
+        tenant_rows = store.claim_outbox_batch(limit=remaining, **kwargs)
+        claimed.extend(tenant_rows)
+        remaining -= len(tenant_rows)
+        if remaining <= 0:
+            break
     published = 0
     failed = 0
 
@@ -299,7 +365,7 @@ def drain_transaction_outbox(limit: int = 100) -> Dict[str, Any]:
             outcomes.extend([False] * (len(topic_rows) - len(outcomes)))
         for (row, _), delivered in zip(topic_rows, outcomes):
             if delivered:
-                store.mark_outbox_published(row["id"])
+                store.mark_outbox_published(row["id"], tenant_id=row["tenant_id"])
                 published += 1
             else:
                 failed += 1
@@ -310,13 +376,18 @@ def drain_transaction_outbox(limit: int = 100) -> Dict[str, Any]:
 
 def _record_outbox_failure(store: Any, row: dict, error: Any) -> None:
     if row["attempts"] >= OUTBOX_MAX_ATTEMPTS:
-        store.mark_outbox_dead_lettered(row["id"], str(error))
+        store.mark_outbox_dead_lettered(row["id"], str(error), tenant_id=row["tenant_id"])
         from metrics import record_pipeline_event
         record_pipeline_event("dead_lettered", tenant_id=row.get("tenant_id", "default"))
         logger.error("Transaction outbox row moved to dead letter after %s attempts: row=%s", row["attempts"], row["id"])
     else:
         retry_seconds = min(30 * (2 ** max(row["attempts"] - 1, 0)), 3600)
-        store.mark_outbox_failed(row["id"], str(error), retry_seconds=retry_seconds)
+        store.mark_outbox_failed(
+            row["id"],
+            str(error),
+            retry_seconds=retry_seconds,
+            tenant_id=row["tenant_id"],
+        )
         from metrics import record_event_retry, record_pipeline_event
         record_event_retry()
         record_pipeline_event("retried", tenant_id=row.get("tenant_id", "default"))

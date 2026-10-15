@@ -35,6 +35,8 @@ for module_name in [
     "tenant_organization_service",
     "tenant_org_dashboard",
     "tenant_org_routes",
+    "tenant_context",
+    "tenant_registry",
     "tenant_settings",
     "validators",
 ]:

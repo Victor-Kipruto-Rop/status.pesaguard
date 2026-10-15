@@ -17,7 +17,8 @@
    - `KAFKA_BOOTSTRAP_SERVERS`
    - `TENANT_ID`
    - `CONNECTOR_TYPE` (`postgres`, `rest`, or `google_sheets`)
-   - `SLACK_WEBHOOK_URL` (optional)
+   - `SLACK_WEBHOOK_URL` (optional; use an HTTPS incoming webhook under
+     `hooks.slack.com/services/`)
 
 ## Running locally
 

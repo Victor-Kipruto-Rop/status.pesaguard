@@ -67,7 +67,11 @@ Bearer JWT
 Permissions:
 transactions:write
 
-Creates a transaction record. Reserved for internal or admin-only ingestion events.
+Creates a transaction record. Reserved for internal or admin-only ingestion
+events. Accepted records return HTTP 200 with `status: "accepted"`; a record
+durably quarantined by data-quality validation returns HTTP 202 with
+`status: "quarantined"` and its idempotency key. The response does not include
+validation details.
 
 ## PATCH /api/v1/transactions/{id}
 
