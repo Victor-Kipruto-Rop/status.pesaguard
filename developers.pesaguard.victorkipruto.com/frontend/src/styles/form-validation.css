@@ -1,0 +1,19 @@
+.field-validation-error {
+  display: block;
+  width: 100%;
+  margin: 4px 0 0;
+  color: var(--signal-red, #b42318);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+  text-align: left;
+}
+
+form :is(input, select, textarea)[aria-invalid="true"] {
+  border-color: var(--signal-red, #b42318) !important;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--signal-red, #b42318) 12%, transparent);
+}
+
+form :is(input, select, textarea)[aria-invalid="true"]:focus-visible {
+  outline-color: color-mix(in srgb, var(--signal-red, #b42318) 42%, transparent);
+}

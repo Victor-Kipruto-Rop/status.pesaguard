@@ -1,0 +1,170 @@
+# Network isolation.
+#
+# Default-deny first, then explicit allows. The order matters: a namespace with
+# only allow rules still permits traffic to anything not named, which is the
+# opposite of what an operator reading the manifest expects.
+#
+# This is the control that makes the Phase 19 separation more than an application
+# convention: even a misconfigured pod cannot reach PostgreSQL or Redis directly.
+# Public HTTPS and SMTP egress is limited to configured external service ports.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pesaguard-default-deny
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pesaguard-allow-dns
+spec:
+  # Cluster DNS must be reachable or nothing resolves.
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: pesaguard
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pesaguard-allow-datastores
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: pesaguard
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgresql
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: redis
+      ports:
+        - protocol: TCP
+          port: 6379
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pesaguard-developer-external-integrations
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: pesaguard-developer-platform
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 224.0.0.0/4
+        ports:
+          - protocol: TCP
+            port: 443
+          - protocol: TCP
+            port: 465
+          - protocol: TCP
+            port: 587
+    - to:
+        - ipBlock:
+            cidr: ::/0
+            except:
+              - ::/128
+              - ::1/128
+              - fc00::/7
+              - fe80::/10
+              - ff00::/8
+        ports:
+          - protocol: TCP
+            port: 443
+          - protocol: TCP
+            port: 465
+          - protocol: TCP
+            port: 587
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pesaguard-allow-internal-admin
+spec:
+  # Phase 19: the operator API must not be reachable from ordinary developer
+  # traffic, and must not be reachable from outside the cluster at all. Ingress
+  # here is restricted to the admin namespace; the public developer Ingress
+  # targets the application port only.
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: pesaguard-developer-platform
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: pesaguard-admin
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pesaguard-allow-public-developer-api
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: pesaguard-developer-platform
+  policyTypes: [Ingress]
+  ingress:
+    # Ingress controller only. A pod elsewhere in the cluster cannot reach the
+    # API directly, so a compromised workload cannot enumerate customers.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pesaguard-allow-prometheus
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: pesaguard
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9090

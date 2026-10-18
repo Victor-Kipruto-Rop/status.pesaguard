@@ -1,0 +1,65 @@
+:root {
+  font-family: var(--font-sans);
+  font-optical-sizing: auto;
+}
+
+.onboarding-brand img,
+.developer-legal-brand img,
+.brand-lockup img {
+  display: block;
+  object-fit: contain;
+}
+
+.onboarding-brand,
+.developer-legal-brand,
+.brand-lockup {
+  font-family: var(--font-display);
+}
+
+.public-home {
+  font-family: var(--font-sans);
+}
+
+.public-home :is(h1, h2, h3, .public-home-mark) {
+  font-family: var(--font-display);
+}
+
+.public-home .public-home-brand {
+  gap: 3px;
+  font-family: var(--font-sans);
+  font-size: 16px;
+}
+
+.public-home-header .public-home-brand .brand-logo {
+  display: block;
+  width: 30px;
+  height: 33px;
+  flex: 0 0 auto;
+  object-fit: contain;
+  content: url("/pesaguard-brand-mark.svg");
+}
+
+.public-home-header .public-home-brand .brand-logo-reversed {
+  display: none;
+}
+
+.public-home .public-home-brand-wordmark {
+  display: inline-flex;
+  order: 1;
+  color: #111;
+  font-size: 19px;
+  font-weight: 800;
+  letter-spacing: -.045em;
+}
+
+.public-home .public-home-brand-wordmark > span:last-child {
+  color: var(--forest);
+}
+
+.public-home .public-home-brand .brand-divider {
+  display: none;
+}
+
+.public-home .public-home-brand strong {
+  display: none;
+}

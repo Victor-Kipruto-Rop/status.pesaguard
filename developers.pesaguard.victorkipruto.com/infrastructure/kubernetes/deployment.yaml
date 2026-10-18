@@ -1,0 +1,162 @@
+# PesaGuard Developer Platform — deployment.
+#
+# Probes are split deliberately. Liveness answers "is this process wedged" and
+# must NOT depend on a dependency: a database outage must not restart every pod
+# and turn a degradation into an outage. Readiness answers "should this pod take
+# traffic" and does check dependencies, because a pod that cannot serve should
+# leave the load balancer.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pesaguard-developer-platform
+  labels:
+    app.kubernetes.io/name: pesaguard-developer-platform
+    app.kubernetes.io/part-of: pesaguard
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Never drop below the PDB minimum during a rollout.
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pesaguard-developer-platform
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pesaguard-developer-platform
+        app.kubernetes.io/part-of: pesaguard
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/actuator/prometheus"
+    spec:
+      # Long enough for in-flight requests to finish. Combined with
+      # terminationGracePeriodSeconds this is what makes a rolling deploy lossless.
+      terminationGracePeriodSeconds: 45
+      # Binds the zero-privilege account. Without this the pod silently inherits the
+      # namespace default service account, which usually has more access.
+      serviceAccountName: pesaguard-developer-platform
+      imagePullSecrets:
+        - name: pesaguard-ghcr
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: backend
+          image: pesaguard-developer-platform:release
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: management
+              containerPort: 9090
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: production
+            - name: JAVA_TOOL_OPTIONS
+              value: >-
+                -XX:MaxRAMPercentage=75
+                -XX:+ExitOnOutOfMemoryError
+                -XX:+UseContainerSupport
+          envFrom:
+            - secretRef:
+                name: pesaguard-secrets
+          # Requests drive scheduling and HPA maths; limits bound a noisy
+          # neighbour. They are deliberately unequal: memory is not compressible,
+          # so a limit equal to the request risks an OOMKill on a GC spike.
+          resources:
+            requests:
+              cpu: 500m
+              memory: 768Mi
+            limits:
+              cpu: 2000m
+              memory: 1536Mi
+          startupProbe:
+            # Generous: Flyway runs here, and a slow first migration must not be
+            # mistaken for a hang and killed.
+            httpGet:
+              path: /actuator/health/readiness
+              port: management
+            failureThreshold: 30
+            periodSeconds: 5
+          livenessProbe:
+            # Deliberately does not check PostgreSQL or Redis.
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: management
+            periodSeconds: 5
+            failureThreshold: 2
+            timeoutSeconds: 3
+          lifecycle:
+            preStop:
+              # Give endpoint propagation time to remove this pod before the
+              # process stops accepting, so in-flight requests are not cut.
+              exec:
+                command: ["sh", "-c", "sleep 10"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pesaguard-developer-platform
+spec:
+  # With 3 replicas this guarantees 2 survive a node drain. Set deliberately:
+  # a PDB of minAvailable: 1 would permit a two-pod simultaneous loss.
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pesaguard-developer-platform
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: pesaguard-developer-platform
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: pesaguard-developer-platform
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleUp:
+      # React quickly to a spike; this is a payment API and queueing is costly.
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+    scaleDown:
+      # Scale down slowly, so a brief lull does not cause thrash that
+      # repeatedly removes capacity exactly when traffic returns.
+      stabilizationWindowSeconds: 600
+      policies:
+        - type: Percent
+          value: 25
+          periodSeconds: 60

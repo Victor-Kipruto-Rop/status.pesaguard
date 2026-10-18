@@ -1,0 +1,95 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '4.1.1'
+    id 'io.spring.dependency-management' version '1.1.7'
+}
+
+group = 'com.pesaguard'
+version = '0.1.0-SNAPSHOT'
+description = 'PesaGuard developer platform backend'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Distributed rate-limit counters. Without this the limiter is per-instance, so N
+    // instances admit N times the configured limit (Phase 13/20).
+    implementation 'org.springframework.boot:spring-boot-starter-data-redis'
+    // Apache Commons Math for statistical functions (z-score, MAD, IQR, CUSUM, STL, ARIMA).
+    implementation 'org.apache.commons:commons-math3:3.6.1'
+
+    // Redpanda/Kafka transport for the transactional outbox. Redpanda speaks the
+    // Kafka protocol, so no separate client is needed (outbox, layer 13-15).
+    implementation 'org.springframework.kafka:spring-kafka'
+    // Prometheus scrape endpoint. Without this the monitoring surface is health
+    // and metrics JSON that nothing can alert on (Phase 22).
+    runtimeOnly 'org.springframework.boot:spring-boot-starter-actuator'
+    runtimeOnly 'io.micrometer:micrometer-registry-prometheus'
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    implementation 'org.springframework.boot:spring-boot-starter-mail'
+    // Distributed tracing (checklist 31). Without this a request that spans the
+    // portal, a webhook delivery, and an event publish cannot be followed across
+    // those boundaries, so a slow failure is only ever diagnosable from one side.
+    runtimeOnly 'io.micrometer:micrometer-tracing-bridge-otel'
+    implementation 'org.springframework.boot:spring-boot-starter-flyway'
+    // Webhook envelopes and event filters require structured, safe JSON handling.
+    implementation 'org.springframework.boot:spring-boot-starter-jackson'
+    implementation 'org.springframework.boot:spring-boot-starter-security'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'org.springframework.boot:spring-boot-starter-webmvc'
+    // WebAuthn ceremony verification (attestation, origin/RP binding, challenges,
+    // signatures, and authenticator counters) must be performed by a maintained
+    // protocol implementation rather than hand-rolled cryptographic code.
+    implementation 'com.yubico:webauthn-server-core:2.10.0'
+    // Yubico's server-core marks Jackson 2 as runtime-only, while its JSON
+    // ceremony APIs expose Jackson 2 checked exceptions in their signatures.
+    // Spring Boot 4 uses Jackson 3 under different packages.
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.21.5'
+    // Webhook delivery needs a custom DNS resolver so sockets connect only to the
+    // public addresses checked by the SSRF guard while retaining TLS host checks.
+    implementation 'org.apache.httpcomponents.client5:httpclient5'
+    implementation 'org.flywaydb:flyway-database-postgresql'
+    // Argon2id password hashing. Argon2 is not in the JDK, and BouncyCastle is the
+    // reference implementation Spring Security's Argon2 encoders delegate to. Argon2id
+    // is memory-hard and GPU/ASIC resistant; BCrypt is not, and is CPU-bound only.
+    implementation 'org.bouncycastle:bcprov-jdk18on:1.86'
+    // RS256 access tokens. Nimbus is the JOSE reference implementation and, unlike
+    // jjwt, lets the signing algorithm be pinned explicitly so an attacker cannot
+    // downgrade RS256 to `none` or to HMAC using the public key.
+    implementation 'com.nimbusds:nimbus-jose-jwt:10.10'
+    annotationProcessor 'org.springframework.boot:spring-boot-configuration-processor'
+    runtimeOnly 'org.postgresql:postgresql'
+
+    testImplementation 'org.springframework.boot:spring-boot-starter-actuator-test'
+    testImplementation 'org.springframework.boot:spring-boot-starter-data-jpa-test'
+    testImplementation 'org.springframework.boot:spring-boot-starter-flyway-test'
+    testImplementation 'org.springframework.boot:spring-boot-starter-security-test'
+    testImplementation 'org.springframework.boot:spring-boot-starter-validation-test'
+    testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
+    testImplementation 'org.springframework.boot:spring-boot-testcontainers'
+    testImplementation 'org.testcontainers:testcontainers-junit-jupiter'
+    testImplementation 'org.testcontainers:testcontainers-postgresql'
+    testImplementation 'org.testcontainers:testcontainers-kafka'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 21
+    options.compilerArgs += '-parameters'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+    systemProperty 'java.awt.headless', 'true'
+}
+
+tasks.named('bootJar') {
+    archiveFileName = 'pesaguard-developer-platform.jar'
+}

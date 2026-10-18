@@ -1,0 +1,19 @@
+# Build output
+build/
+backend/build/
+.gradle/
+
+# IDE and local tooling
+.idea/
+.vscode/
+*.iml
+*.log
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# OS/temp files
+.DS_Store
+Thumbs.db

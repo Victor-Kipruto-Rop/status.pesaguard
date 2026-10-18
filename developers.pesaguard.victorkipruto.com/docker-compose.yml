@@ -1,0 +1,80 @@
+services:
+  postgres:
+    image: postgres:17.11-bookworm
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-pesaguard_developer_platform}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+  redis:
+    image: redis:7.4-alpine
+    # Rate-limit counters only. appendonly is deliberately off: every value here is
+    # a recomputable rate-limit counter, and persisting them would cost I/O on the
+    # hot path to protect state that is correct to lose on restart (a restart
+    # should not hand a flooder a fresh budget mid-window).
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+  mailpit:
+    # Local development SMTP sink. Bind both interfaces to loopback so the
+    # unauthenticated test inbox is never exposed on the host network.
+    image: ghcr.io/axllent/mailpit:v1.31.3
+    ports:
+      - "127.0.0.1:1025:1025"
+      - "${PESAGUARD_MAILPIT_INBOX_BIND_HOST:-127.0.0.1}:8025:8025"
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+    environment:
+      DATABASE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-pesaguard_developer_platform}
+      DATABASE_USERNAME: ${POSTGRES_USER:-postgres}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
+      PESAGUARD_ALLOWED_ORIGINS: ${PESAGUARD_ALLOWED_ORIGINS:?PESAGUARD_ALLOWED_ORIGINS is required}
+      PESAGUARD_WEBAUTHN_RP_ID: ${PESAGUARD_WEBAUTHN_RP_ID:-localhost}
+      PESAGUARD_WEBAUTHN_RP_NAME: ${PESAGUARD_WEBAUTHN_RP_NAME:-PesaGuard Developer Portal}
+      PESAGUARD_WEBAUTHN_ORIGINS: ${PESAGUARD_WEBAUTHN_ORIGINS:-http://localhost:5173}
+      PESAGUARD_WEBAUTHN_CHALLENGE_TTL: ${PESAGUARD_WEBAUTHN_CHALLENGE_TTL:-PT3M}
+      PESAGUARD_CREDENTIAL_HMAC_KEY: ${PESAGUARD_CREDENTIAL_HMAC_KEY:?PESAGUARD_CREDENTIAL_HMAC_KEY is required}
+      PESAGUARD_AUDIT_HMAC_KEY: ${PESAGUARD_AUDIT_HMAC_KEY:?PESAGUARD_AUDIT_HMAC_KEY is required}
+      PESAGUARD_OPERATOR_HMAC_KEY: ${PESAGUARD_OPERATOR_HMAC_KEY:?PESAGUARD_OPERATOR_HMAC_KEY is required}
+      PESAGUARD_JWT_PRIVATE_KEY: ${PESAGUARD_JWT_PRIVATE_KEY:?PESAGUARD_JWT_PRIVATE_KEY is required}
+      PESAGUARD_JWT_PUBLIC_KEY: ${PESAGUARD_JWT_PUBLIC_KEY:?PESAGUARD_JWT_PUBLIC_KEY is required}
+      PESAGUARD_PIPELINE_KEY_SYNC_URL: ${PESAGUARD_PIPELINE_KEY_SYNC_URL:-http://host.docker.internal:5001/internal/v1/developer-api-keys/sync}
+      PESAGUARD_PIPELINE_KEY_SYNC_SECRET: ${PESAGUARD_PIPELINE_KEY_SYNC_SECRET:-}
+      PESAGUARD_PIPELINE_KEY_SYNC_REQUIRED: ${PESAGUARD_PIPELINE_KEY_SYNC_REQUIRED:-true}
+      PESAGUARD_REGISTRATION_ENABLED: ${PESAGUARD_REGISTRATION_ENABLED:-false}
+      # Local-only alias for sandbox API keys used by the browser-based Explorer.
+      PESAGUARD_API_KEY_ALLOW_LOCAL_HOST: ${PESAGUARD_API_KEY_ALLOW_LOCAL_HOST:-true}
+      MAIL_HOST: mailpit
+      MAIL_PORT: 1025
+      MAIL_SMTP_AUTH: "false"
+      MAIL_SMTP_STARTTLS: "false"
+      MAIL_SMTP_STARTTLS_REQUIRED: "false"
+      PESAGUARD_EMAIL_PROVIDER: ${PESAGUARD_EMAIL_PROVIDER:-resend}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      PESAGUARD_MAIL_FROM: ${PESAGUARD_MAIL_FROM:-no-reply@pesaguard.co.ke}
+      PESAGUARD_EMAIL_VERIFICATION_URL: ${PESAGUARD_EMAIL_VERIFICATION_URL:-https://developers.pesaguard.co.ke/}
+      PESAGUARD_REDIS_HOST: redis
+      PESAGUARD_REDIS_PORT: 6379
+    ports:
+      - "127.0.0.1:8081:8080"
+    restart: unless-stopped
+volumes:
+  postgres-data:

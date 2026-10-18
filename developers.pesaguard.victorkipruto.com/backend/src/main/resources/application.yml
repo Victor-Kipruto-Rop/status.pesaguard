@@ -1,0 +1,287 @@
+spring:
+  config:
+    import: optional:file:../.env[.properties]
+  mail:
+    host: ${MAIL_HOST:localhost}
+    port: ${MAIL_PORT:1025}
+    username: ${MAIL_USERNAME:}
+    password: ${MAIL_PASSWORD:}
+    properties:
+      mail.smtp.auth: ${MAIL_SMTP_AUTH:false}
+      mail.smtp.starttls.enable: ${MAIL_SMTP_STARTTLS:true}
+      mail.smtp.starttls.required: ${MAIL_SMTP_STARTTLS_REQUIRED:true}
+      mail.smtp.connectiontimeout: ${MAIL_SMTP_CONNECTION_TIMEOUT_MS:5000}
+      mail.smtp.timeout: ${MAIL_SMTP_READ_TIMEOUT_MS:10000}
+      mail.smtp.writetimeout: ${MAIL_SMTP_WRITE_TIMEOUT_MS:10000}
+  application:
+    name: pesaguard-developer-platform
+  datasource:
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/pesaguard_developer_platform}
+    username: ${DATABASE_USERNAME:postgres}
+    password: ${DATABASE_PASSWORD:}
+    hikari:
+      maximum-pool-size: ${DATABASE_POOL_SIZE:10}
+      minimum-idle: ${DATABASE_MIN_IDLE:2}
+      connection-timeout: 3000
+      validation-timeout: 1000
+      # Logs the stack trace of any connection held longer than this. A connection
+      # leaked by a long transaction is otherwise invisible until it surfaces as
+      # pool exhaustion under load.
+      leak-detection-threshold: ${DATABASE_LEAK_DETECTION_MS:60000}
+      max-lifetime: ${DATABASE_POOL_MAX_LIFETIME_MS:1800000}
+      keepalive-time: ${DATABASE_POOL_KEEPALIVE_MS:120000}
+
+      # Sizing budget (Phase 20): every @Transactional method can hold one of
+      # these. PostgreSQL defaults to max_connections = 100, so at 10 per
+      # instance this platform runs ~10 instances before the database refuses
+      # connections outright. Divide DATABASE_POOL_SIZE against the server limit
+      # before raising it.
+  data:
+    redis:
+      # Connection settings for the distributed rate-limit counters. Spring reads
+      # these; they are not under pesaguard.ratelimit because that block selects
+      # the store, not the connection.
+      host: ${PESAGUARD_REDIS_HOST:localhost}
+      port: ${PESAGUARD_REDIS_PORT:6379}
+      timeout: ${PESAGUARD_REDIS_TIMEOUT:500ms}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+        order_inserts: true
+        order_updates: true
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  jackson:
+    default-property-inclusion: non_null
+    time-zone: UTC
+
+pesaguard:
+  email:
+    provider: ${PESAGUARD_EMAIL_PROVIDER:resend}
+    from: ${PESAGUARD_MAIL_FROM:no-reply@pesaguard.co.ke}
+    verification-url: ${PESAGUARD_EMAIL_VERIFICATION_URL:https://developers.pesaguard.co.ke/}
+  support:
+    notification-email: ${SUPPORT_TICKET_EMAIL:support@pesaguard.co.ke}
+  runtime:
+    maintenance-mode: ${PESAGUARD_MAINTENANCE_MODE:false}
+    maintenance-message: ${PESAGUARD_MAINTENANCE_MESSAGE:The developer platform is temporarily unavailable while updates are being applied.}
+    maintenance-starts-at: ${PESAGUARD_MAINTENANCE_STARTS_AT:}
+    estimated-recovery-at: ${PESAGUARD_MAINTENANCE_RECOVERY_AT:}
+    features:
+      webhooks: ${PESAGUARD_FEATURE_WEBHOOKS:true}
+      events: ${PESAGUARD_FEATURE_EVENTS:true}
+      usage: ${PESAGUARD_FEATURE_USAGE:true}
+      oauth: ${PESAGUARD_FEATURE_OAUTH:true}
+      sandbox: ${PESAGUARD_FEATURE_SANDBOX:true}
+      productionAccess: ${PESAGUARD_FEATURE_PRODUCTION_ACCESS:true}
+      support: ${PESAGUARD_FEATURE_SUPPORT:true}
+      notifications: ${PESAGUARD_FEATURE_NOTIFICATIONS:true}
+      billing: ${PESAGUARD_FEATURE_BILLING:true}
+      audit: ${PESAGUARD_FEATURE_AUDIT:true}
+      organizationExport: ${PESAGUARD_FEATURE_ORGANIZATION_EXPORT:true}
+
+  api-key:
+    # Restrict the localhost sandbox alias to local development; production overrides this.
+    allow-local-sandbox-host: ${PESAGUARD_API_KEY_ALLOW_LOCAL_HOST:true}
+  identity:
+    from-email: ${PESAGUARD_MAIL_FROM:no-reply@pesaguard.co.ke}
+    verification-url: ${PESAGUARD_EMAIL_VERIFICATION_URL:https://developers.pesaguard.co.ke/}
+  oauth:
+    authorization-code-ttl: ${PESAGUARD_OAUTH_CODE_TTL:PT5M}
+    access-token-ttl: ${PESAGUARD_OAUTH_ACCESS_TOKEN_TTL:PT15M}
+    refresh-token-ttl: ${PESAGUARD_OAUTH_REFRESH_TOKEN_TTL:P30D}
+    consent-request-ttl: ${PESAGUARD_OAUTH_CONSENT_TTL:PT10M}
+    throttle-window: ${PESAGUARD_OAUTH_THROTTLE_WINDOW:PT15M}
+    token-endpoint-attempt-limit: ${PESAGUARD_OAUTH_ATTEMPT_LIMIT:60}
+  platform:
+    # Internal operator administration. A SEPARATE key from the credential and audit
+    # keys: sharing one would make a developer API key an operator token by
+    # formatting alone, which is the entire separation between the two surfaces.
+    operator-hmac-key: ${PESAGUARD_OPERATOR_HMAC_KEY:}
+  # RS256 access tokens. A sibling of `security`, not a field within it, because the
+  # signing key is governed differently: every node that *verifies* needs the public
+  # half, while the HMAC keys only matter to the node writing hashes. Keeping them
+  # apart stops a reader assuming they are provisioned and rotated together.
+  json-web-token:
+    issuer: ${PESAGUARD_JWT_ISSUER:pesaguard-developer-platform}
+    audience: ${PESAGUARD_JWT_AUDIENCE:pesaguard-developer-platform}
+    # Published in the JWT header. Rotation proceeds by signing with the old private
+    # key while both public halves are trusted, so no token is invalidated mid-flight.
+    key-id: ${PESAGUARD_JWT_KEY_ID:v1}
+    # Both halves are required. A verifier that derives the public key from the
+    # private one is holding signing material on every node, which is exactly the
+    # separation RS256 exists to provide.
+    private-key: ${PESAGUARD_JWT_PRIVATE_KEY:}
+    public-key: ${PESAGUARD_JWT_PUBLIC_KEY:}
+    # Short, because a stateless token cannot be withdrawn: this is the only bound on
+    # a stolen token's usefulness. Ending a session is enforced through the
+    # refresh-token family, not by waiting this out.
+    access-token-ttl: ${PESAGUARD_JWT_ACCESS_TOKEN_TTL:PT5M}
+  security:
+    # Production API keys remain unavailable until the Go-Live workflow records
+    # a successful launch for their exact project and environment.
+    allowed-origins: ${PESAGUARD_ALLOWED_ORIGINS:http://localhost:3000,http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173}
+    session-ttl: ${PESAGUARD_SESSION_TTL:PT8H}
+    # Optional: defaults to P30D in RefreshTokenService when absent, so an
+    # existing deployment without the key still starts.
+    refresh-token-ttl: ${PESAGUARD_REFRESH_TOKEN_TTL:P30D}
+    password-reset-ttl: ${PESAGUARD_PASSWORD_RESET_TTL:PT1H}
+    credential-hmac-key: ${PESAGUARD_CREDENTIAL_HMAC_KEY}
+    audit-hmac-key: ${PESAGUARD_AUDIT_HMAC_KEY}
+    registration-enabled: ${PESAGUARD_REGISTRATION_ENABLED:false}
+    # Argon2id. The memory figure is the security parameter: it is what makes
+    # parallel guessing expensive. Raise it if the hardware allows, never lower it
+    # without re-measuring. 19456 KiB / t=2 / p=1 is the OWASP first-pass baseline.
+    argon2-memory-kilobytes: ${PESAGUARD_ARGON2_MEMORY_KB:19456}
+    argon2-iterations: ${PESAGUARD_ARGON2_ITERATIONS:2}
+    argon2-parallelism: ${PESAGUARD_ARGON2_PARALLELISM:1}
+    # Decode-only. Verifies hashes written before the Argon2 migration; those
+    # accounts are rehashed to Argon2id on their next successful sign-in. Never
+    # used to create a new hash.
+    bcrypt-strength: ${PESAGUARD_BCRYPT_STRENGTH:12}
+    # Only enable where TLS is actually terminated. Sending HSTS over plain HTTP
+    # is meaningless, and in a non-production environment it pins the browser to
+    # the host for a year.
+    hsts-enabled: ${PESAGUARD_HSTS_ENABLED:false}
+    hsts-max-age-seconds: ${PESAGUARD_HSTS_MAX_AGE:31536000}
+    account-login-failure-limit: ${PESAGUARD_ACCOUNT_LOGIN_FAILURE_LIMIT:5}
+    ip-login-failure-limit: ${PESAGUARD_IP_LOGIN_FAILURE_LIMIT:30}
+    login-failure-window: ${PESAGUARD_LOGIN_FAILURE_WINDOW:PT15M}
+    invitation-ttl: ${PESAGUARD_INVITATION_TTL:PT168H}
+    # Invitation acceptance throttling, mirroring the login throttles above.
+    #
+    # These two keys were previously indented to the `pesaguard:` root, which
+    # bound them to `pesaguard.invitation-accept-*` where nothing reads them and
+    # left `pesaguard.security.invitationAcceptWindow` unset. The default profile
+    # therefore could not start at all; only the test profile worked, because it
+    # repeats both keys under `security` and so masked the misplacement.
+    invitation-accept-attempt-limit: ${PESAGUARD_INVITATION_ACCEPT_ATTEMPT_LIMIT:30}
+    invitation-accept-window: ${PESAGUARD_INVITATION_ACCEPT_WINDOW:PT15M}
+  pipeline:
+    key-sync-url: ${PESAGUARD_PIPELINE_KEY_SYNC_URL:}
+    key-sync-secret: ${PESAGUARD_PIPELINE_KEY_SYNC_SECRET:}
+    key-sync-required: ${PESAGUARD_PIPELINE_KEY_SYNC_REQUIRED:false}
+    service-jwt:
+      mode: ${PESAGUARD_PIPELINE_SERVICE_JWT_MODE:HMAC_ONLY}
+      active-kid: ${PESAGUARD_PIPELINE_SERVICE_JWT_ACTIVE_KID:}
+      private-key-pem: ${PESAGUARD_PIPELINE_SERVICE_JWT_PRIVATE_KEY_PEM:}
+      ttl-seconds: ${PESAGUARD_PIPELINE_SERVICE_JWT_TTL_SECONDS:120}
+      overlap-public-keys: {}
+  passkeys:
+    # These values are explicit WebAuthn trust configuration; they are never
+    # inferred from an inbound Host or Origin header.
+    rp-id: ${PESAGUARD_WEBAUTHN_RP_ID:localhost}
+    rp-name: ${PESAGUARD_WEBAUTHN_RP_NAME:PesaGuard Developer Portal}
+    origins: ${PESAGUARD_WEBAUTHN_ORIGINS:http://localhost:5173}
+    challenge-ttl: ${PESAGUARD_WEBAUTHN_CHALLENGE_TTL:PT3M}
+  telemetry:
+    # Country metadata is accepted only from a proxy whose remote address matches
+    # this list. Empty by default: direct clients cannot spoof geographic activity.
+    trusted-proxy-cidrs: ${PESAGUARD_TELEMETRY_TRUSTED_PROXY_CIDRS:}
+    country-header: ${PESAGUARD_TELEMETRY_COUNTRY_HEADER:CF-IPCountry}
+  ratelimit:
+    # redis is required for more than one instance: the in-memory store is
+    # per-instance, so N instances would admit N times the configured limit.
+    store: ${PESAGUARD_RATELIMIT_STORE:redis}
+
+  usage:
+    # Bounded on purpose. An unbounded queue grows until the heap is exhausted and
+    # takes the payment API down with it.
+    buffer-capacity: ${PESAGUARD_USAGE_BUFFER_CAPACITY:10000}
+    # Off in tests so a suite is not racing a background thread.
+    rollup-enabled: ${PESAGUARD_USAGE_ROLLUP_ENABLED:true}
+    minute-cron: ${PESAGUARD_USAGE_MINUTE_CRON:0 * * * * *}
+    hour-cron: ${PESAGUARD_USAGE_HOUR_CRON:0 5 * * * *}
+    day-cron: ${PESAGUARD_USAGE_DAY_CRON:0 10 0 * * *}
+    month-cron: ${PESAGUARD_USAGE_MONTH_CRON:0 20 0 1 * *}
+
+  messaging:
+    # Off by default. With no broker the outbox still records every event; the
+    # relay simply finds no publisher and leaves the rows PENDING, which is the
+    # safe direction. Enabling this without a reachable broker would only turn
+    # that backlog into dead letters.
+    enabled: ${PESAGUARD_MESSAGING_ENABLED:false}
+    bootstrap-servers: ${PESAGUARD_MESSAGING_BOOTSTRAP_SERVERS:localhost:19092}
+    # all: an event the platform believes it published must survive a broker
+    # restart. Losing one is unrecoverable; a duplicate is handled downstream.
+    acks: ${PESAGUARD_MESSAGING_ACKS:all}
+    retries: ${PESAGUARD_MESSAGING_RETRIES:3}
+    request-timeout-ms: ${PESAGUARD_MESSAGING_REQUEST_TIMEOUT_MS:10000}
+    # Must be >= linger.ms (0) + request.timeout.ms, or the Kafka client refuses
+    # to start with a ConfigException. 30000 vs 10000 satisfies that with room
+    # for the three retries; if request-timeout-ms is ever raised above this the
+    # client will fail at startup rather than degrade, which is the intended
+    # outcome but worth knowing before changing either value.
+    delivery-timeout-ms: ${PESAGUARD_MESSAGING_DELIVERY_TIMEOUT_MS:30000}
+    # Bounds how long send() may block on an unreachable broker. Without it a
+    # broker outage stalls the relay's worker threads on every instance.
+    max-block-ms: ${PESAGUARD_MESSAGING_MAX_BLOCK_MS:10000}
+    outbox:
+      # How often the relay drains the outbox. Short enough that a broker outage
+      # is recovered from quickly; the backoff on each event bounds the retry rate
+      # independently of this interval.
+      drain-interval-ms: ${PESAGUARD_OUTBOX_DRAIN_INTERVAL_MS:5000}
+      # Off in tests so a suite is not racing a background publisher.
+      relay-enabled: ${PESAGUARD_OUTBOX_RELAY_ENABLED:true}
+  billing:
+    stripe:
+      base-url: ${PESAGUARD_BILLING_STRIPE_BASE_URL:https://api.stripe.com}
+      secret-key: ${PESAGUARD_BILLING_STRIPE_SECRET_KEY:}
+      webhook-secret: ${PESAGUARD_BILLING_STRIPE_WEBHOOK_SECRET:}
+      success-url: ${PESAGUARD_BILLING_STRIPE_SUCCESS_URL:}
+      cancel-url: ${PESAGUARD_BILLING_STRIPE_CANCEL_URL:}
+    pay-hero:
+      base-url: ${PESAGUARD_BILLING_PAYHERO_BASE_URL:https://backend.payhero.co.ke}
+      api-token: ${PESAGUARD_BILLING_PAYHERO_API_TOKEN:}
+      channel-id: ${PESAGUARD_BILLING_PAYHERO_CHANNEL_ID:}
+      callback-url: ${PESAGUARD_BILLING_PAYHERO_CALLBACK_URL:}
+    daraja:
+      base-url: ${PESAGUARD_BILLING_DARAJA_BASE_URL:https://sandbox.safaricom.co.ke}
+      consumer-key: ${PESAGUARD_BILLING_DARAJA_CONSUMER_KEY:}
+      consumer-secret: ${PESAGUARD_BILLING_DARAJA_CONSUMER_SECRET:}
+      business-short-code: ${PESAGUARD_BILLING_DARAJA_SHORT_CODE:}
+      passkey: ${PESAGUARD_BILLING_DARAJA_PASSKEY:}
+      callback-url: ${PESAGUARD_BILLING_DARAJA_CALLBACK_URL:}
+    airtel-money:
+      base-url: ${PESAGUARD_BILLING_AIRTEL_BASE_URL:https://openapiuat.airtel.africa}
+      client-id: ${PESAGUARD_BILLING_AIRTEL_CLIENT_ID:}
+      client-secret: ${PESAGUARD_BILLING_AIRTEL_CLIENT_SECRET:}
+      country: ${PESAGUARD_BILLING_AIRTEL_COUNTRY:KE}
+      currency: ${PESAGUARD_BILLING_AIRTEL_CURRENCY:KES}
+      callback-url: ${PESAGUARD_BILLING_AIRTEL_CALLBACK_URL:}
+    manual-instructions: ${PESAGUARD_BILLING_MANUAL_INSTRUCTIONS:}
+
+server:
+  address: ${SERVER_ADDRESS:0.0.0.0}
+  shutdown: graceful
+  error:
+    include-message: never
+    include-stacktrace: never
+
+spring.lifecycle.timeout-per-shutdown-phase: 20s
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # prometheus is what the deployment's scrape annotation targets; without it the
+        # monitoring surface is JSON that nothing can alert on.
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+  health:
+    mail:
+      enabled: false
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true

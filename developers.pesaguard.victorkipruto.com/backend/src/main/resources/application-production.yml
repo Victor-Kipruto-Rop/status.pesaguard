@@ -1,0 +1,99 @@
+# Production profile.
+#
+# Separated from application.yml so that a value which is safe in a developer
+# machine can never be inherited into production by accident. Anything in this
+# file is deliberate; anything absent falls through to the shared defaults.
+spring:
+  jpa:
+    open-in-view: false
+    properties:
+      hibernate:
+        # Fail fast on a mapping that does not match the schema. A mismatch here
+        # must stop the deploy, not surface at 3am as a ClassCastException.
+        hbm2ddl:
+          auto: validate
+  main:
+    banner-mode: "off"
+
+pesaguard:
+  api-key:
+    allow-local-sandbox-host: ${PESAGUARD_API_KEY_ALLOW_LOCAL_HOST:false}
+
+server:
+  error:
+    # No stack traces or messages to clients, in any environment.
+    include-stacktrace: never
+    include-message: never
+    include-exception: false
+  shutdown: graceful
+  # TLS is terminated at the ingress. These are the headers that prove it.
+  forward-headers-strategy: framework
+  max-http-request-header-size: 16KB
+
+logging:
+  structured:
+    format:
+      # ECS (Elastic Common Schema). Chosen over a bespoke shape so the existing
+      # Elastic ingest tooling can read it unchanged.
+      console: ecs
+  level:
+    root: INFO
+    com.pesaguard: INFO
+    # Flyway is noisy and its outcome is covered by the health check and the audit
+    # log; leaving it at INFO buries the lines that matter.
+    org.flywaydb: WARN
+    # Hibernate SQL logging at INFO would log every statement with bound
+    # parameters, which can include customer data, and would cost more than it
+    # returns in production.
+    org.hibernate.SQL: WARN
+    org.springframework.security: INFO
+  logback:
+    rollingpolicy:
+      max-file-size: 100MB
+      # Retained in line with the audit retention decision; revisit together.
+      max-history: 30
+      total-size-cap: 5GB
+
+management:
+  server:
+    port: 9090
+    address: 0.0.0.0
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,db,redis
+      show-details: never
+      # This port is restricted to cluster probes and Prometheus. Component names
+      # let deployment checks confirm Redis and PostgreSQL without exposing details.
+      show-components: always
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+  tracing:
+    # 100% in production. Head sampling would silently discard exactly the
+    # slow, cross-service requests that are the reason to trace.
+    sampling:
+      probability: 1.0
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+
+pesaguard:
+  security:
+    # Only enable where TLS is genuinely terminated. Sending HSTS over plain HTTP
+    # pins the browser to the host for a year and is not reversible by us.
+    hsts-enabled: true
+  ratelimit:
+    # Redis-backed: the in-memory store is per-instance, so N replicas would
+    # each enforce the limit independently and admit N times the traffic.
+    store: redis
