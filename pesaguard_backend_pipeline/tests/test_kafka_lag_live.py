@@ -5,7 +5,7 @@ process-local snapshot, while ``broker_consumer_lag`` is the broker-derived
 authoritative source that is only populated when env-configured Kafka is present.
 Live tests verify the same behavior against a real broker.
 
-Run with PESAGUARD_LIVE_E2E=1 against a reachable Kafka broker.
+Run with PESAGUARD_RUN_KAFKA_INTEGRATION=1 against a reachable Kafka broker.
 """
 
 from __future__ import annotations
@@ -17,8 +17,8 @@ import uuid
 import pytest
 
 pytestmark = pytest.mark.skipif(
-    os.getenv("PESAGUARD_LIVE_E2E") != "1",
-    reason="set PESAGUARD_LIVE_E2E=1 to run against the integration stack",
+    os.getenv("PESAGUARD_RUN_KAFKA_INTEGRATION") != "1",
+    reason="set PESAGUARD_RUN_KAFKA_INTEGRATION=1 to run against a Kafka integration broker",
 )
 
 

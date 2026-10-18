@@ -30,6 +30,15 @@ _RESERVED_RECORD_ATTRS = {
     "relativeCreated", "stack_info", "thread", "threadName", "taskName",
 }
 
+# Field names whose values are secrets or PII and must be redacted in logs.
+_SENSITIVE_FIELD_NAMES = frozenset({
+    "api_key", "apikey", "api_secret", "secret", "secret_key", "access_token",
+    "refresh_token", "password", "passwd", "pwd", "credential", "private_key",
+    "client_secret", "consumer_secret", "signing_secret", "webhook_secret",
+    "encryption_key", "decryption_key", "session_id", "session_token",
+    "auth_token", "bearer_token",
+})
+
 
 class JsonFormatter(logging.Formatter):
     """Emit logs as single-line JSON objects with standard telemetry envelopes."""
@@ -65,7 +74,11 @@ class JsonFormatter(logging.Formatter):
                 try:
                     # Verify key value is JSON serializable
                     json.dumps(value)
-                    payload[key] = value
+                    # Redact sensitive field names to avoid leaking secrets/PII
+                    if key.lower() in _SENSITIVE_FIELD_NAMES:
+                        payload[key] = "[REDACTED]"
+                    else:
+                        payload[key] = value
                 except (TypeError, ValueError):
                     payload[key] = str(value)
 

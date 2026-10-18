@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pesaguard.example/schemas/absa-1.0.json",
+  "title": "PesaGuard Absa Bank transaction",
+  "type": "object",
+  "required": ["transaction_id", "amount", "account_id"],
+  "properties": {
+    "transaction_id": {"type": "string", "minLength": 1, "maxLength": 255},
+    "amount": {"type": ["string", "number"], "pattern": "^[+-]?[0-9][0-9,]*(\\.[0-9]+)?$"},
+    "account_id": {"type": "string", "minLength": 1, "maxLength": 255},
+    "account_number": {"type": "string", "maxLength": 50},
+    "sort_code": {"type": "string", "maxLength": 20},
+    "branch_code": {"type": "string", "maxLength": 20},
+    "beneficiary_name": {"type": "string", "maxLength": 255},
+    "swift_code": {"type": "string", "maxLength": 11},
+    "clearing_code": {"type": "string", "maxLength": 20},
+    "cheque_number": {"type": "string", "maxLength": 50},
+    "narration": {"type": "string", "maxLength": 500},
+    "balance_after": {"type": ["string", "number", "null"]},
+    "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "timestamp": {"type": "string", "minLength": 1},
+    "reference": {"type": "string", "maxLength": 255},
+    "status": {"type": "string", "enum": ["RECEIVED", "PENDING", "COMPLETED", "FAILED", "REVERSED"]}
+  },
+  "additionalProperties": true
+}

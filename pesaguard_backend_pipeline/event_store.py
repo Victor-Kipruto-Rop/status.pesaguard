@@ -51,6 +51,11 @@ VALID_PROVIDERS = frozenset(
         "csv",
         "external-api",
         "webhook",
+        "equity",
+        "kcb",
+        "absa",
+        "visa",
+        "mastercard",
     }
 )
 

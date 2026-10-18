@@ -9,6 +9,7 @@ from .email import (
     EmailRouter,
     MailgunEmailProvider,
     MockEmailProvider,
+    ResendEmailProvider,
     SendGridEmailProvider,
     SesEmailProvider,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "EmailRouter",
     "MailgunEmailProvider",
     "MockEmailProvider",
+    "ResendEmailProvider",
     "SendGridEmailProvider",
     "SesEmailProvider",
 ]

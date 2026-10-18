@@ -412,6 +412,17 @@ def enqueue_notification_event(event: dict) -> Dict[str, Any]:
     """Queue a notification command without coupling business workers to providers."""
     if not isinstance(event, dict) or not event.get("event") or not event.get("tenant_id"):
         return {"status": "failed", "error": "invalid_notification_event"}
+    from communications.events import SUPPORTED_NOTIFICATION_EVENTS
+
+    if event.get("event") not in SUPPORTED_NOTIFICATION_EVENTS:
+        return {"status": "failed", "error": "unsupported_notification_event"}
+    event = dict(event)
+    event_id = event.get("event_id")
+    if event_id is None:
+        event_id = uuid.uuid4().hex
+    if not isinstance(event_id, str) or not event_id.strip() or len(event_id) > 255:
+        return {"status": "failed", "error": "invalid_notification_event_id"}
+    event["event_id"] = event_id.strip()
     try:
         import redis
         import rq
@@ -430,15 +441,70 @@ def enqueue_notification_event(event: dict) -> Dict[str, Any]:
         return {"status": "failed", "error": "notification_queue_unavailable"}
 
 
+def _notification_alert_context(event: dict) -> dict:
+    """Normalize a typed notification event into an alert-center record."""
+    from communications.events import SUPPORTED_NOTIFICATION_EVENTS
+
+    event_name = event.get("event")
+    if event_name not in SUPPORTED_NOTIFICATION_EVENTS:
+        raise ValueError("unsupported notification event")
+    context = dict(event.get("context") or {})
+    context.setdefault("event", event_name)
+    context["alert_type"] = context.get("alert_type") or event_name.replace(".", "_")
+    context["source"] = context.get("source") or event_name.split(".", 1)[0]
+    context["title"] = context.get("title") or event_name.replace(".", " ").replace("_", " ").title()
+    if not context.get("message"):
+        context["message"] = context.get("details") or context["title"]
+    if not any(context.get(key) for key in (
+        "deduplication_key", "fingerprint", "id", "trans_id", "transaction_id",
+    )):
+        context["deduplication_key"] = event.get("event_id")
+
+    default_severity = {
+        "fraud.confirmed": "critical",
+        "fraud.blocked": "critical",
+        "security.mfa_required": "critical",
+        "provider.failed": "critical",
+        "fraud.suspected": "warning",
+        "transaction.failed": "warning",
+        "transaction.reversed": "warning",
+        "transaction.duplicate": "warning",
+        "transaction.mismatch": "warning",
+        "reconciliation.exception_created": "warning",
+        "provider.degraded": "warning",
+    }.get(event_name, "info")
+    context["severity"] = context.get("severity") or default_severity
+    context["tenant_id"] = str(event["tenant_id"])
+    context["event_id"] = str(event["event_id"])
+    context.setdefault("request_id", event.get("correlation_id"))
+    return context
+
+
 def _process_notification_event(event: dict) -> None:
-    """Worker-owned compatibility adapter for the existing alerting service."""
+    """Persist an event-triggered alert and queue configured channels from a worker session."""
     from alerting_service import AlertingService
+    from event_store import EventStore
     from tenant_settings import TenantSettingsStore
 
     tenant_id = str(event["tenant_id"])
-    context = dict(event.get("context") or {})
-    context["tenant_id"] = tenant_id
-    AlertingService(tenant_settings=TenantSettingsStore().get(tenant_id)).handle_discrepancy(context)
+    context = _notification_alert_context(event)
+    store = EventStore()
+    store._ensure_ready()
+    session = store.Session()
+    try:
+        result = AlertingService(
+            session=session,
+            tenant_settings=TenantSettingsStore().get(tenant_id),
+        ).handle_discrepancy(context)
+        if result.get("status") == "failed":
+            raise RuntimeError("one or more alert channels failed; retrying the durable event")
+        if any(item.get("status") == "processing" for item in result.get("deliveries", [])):
+            raise RuntimeError("alert channel delivery is still processing; retrying the durable event")
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 def _list_tenant_ids(store: Any) -> List[str]:

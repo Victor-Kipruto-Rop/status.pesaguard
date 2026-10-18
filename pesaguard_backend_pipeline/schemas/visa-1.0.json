@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pesaguard.example/schemas/visa-1.0.json",
+  "title": "PesaGuard Visa card transaction",
+  "type": "object",
+  "required": ["transaction_id", "amount", "merchant_id", "terminal_id"],
+  "properties": {
+    "transaction_id": {"type": "string", "minLength": 1, "maxLength": 255},
+    "provider_transaction_id": {"type": "string", "minLength": 1, "maxLength": 255},
+    "amount": {"type": ["string", "number"], "pattern": "^[+]?[0-9]+(\\.[0-9]+)?$"},
+    "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "merchant_id": {"type": "string", "minLength": 1, "maxLength": 255},
+    "terminal_id": {"type": "string", "minLength": 1, "maxLength": 255},
+    "card_last4": {"type": "string", "maxLength": 4},
+    "card_bin": {"type": "string", "maxLength": 11},
+    "timestamp": {"type": "string", "minLength": 1},
+    "transaction_type": {"type": "string", "minLength": 1},
+    "status": {"type": "string", "enum": ["RECEIVED", "PENDING", "COMPLETED", "FAILED", "REVERSED"]},
+    "authorization_code": {"type": "string", "maxLength": 255},
+    "settlement_id": {"type": "string", "maxLength": 255}
+  },
+  "additionalProperties": true
+}

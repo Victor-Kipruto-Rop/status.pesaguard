@@ -98,6 +98,49 @@ def test_openapi_service_loads_and_rejects_invalid_or_unresolved_contracts(tmp_p
     with pytest.raises(OpenAPIContractError, match="Unresolved OpenAPI reference"):
         service.load(invalid_path)
 
+    invalid_key_path = tmp_path / "invalid-openapi-key.json"
+    invalid_key_path.write_text(
+        json.dumps(
+            {
+                "openapi": "3.0.3",
+                "info": {"title": "Invalid", "version": "1.0.0"},
+                "paths": {"/x": {"get": {"responses": {"200": {}}}}},
+                "components": {"schemas": {"Broken": {"": "#/components/schemas/Missing"}}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(OpenAPIContractError, match="non-empty string keys"):
+        service.load(invalid_key_path)
+
+    invalid_parameter_path = tmp_path / "invalid-openapi-path-parameter.json"
+    invalid_parameter_path.write_text(
+        json.dumps(
+            {
+                "openapi": "3.0.3",
+                "info": {"title": "Invalid", "version": "1.0.0"},
+                "paths": {
+                    "/x/{item_id}": {
+                        "get": {
+                            "parameters": [
+                                {
+                                    "name": "wrong_id",
+                                    "in": "path",
+                                    "required": True,
+                                    "schema": {"type": "string"},
+                                }
+                            ],
+                            "responses": {"200": {}},
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(OpenAPIContractError, match="must match its placeholders"):
+        service.load(invalid_parameter_path)
+
 
 def test_error_service_adds_problem_fields_without_dropping_legacy_contract():
     result = ApiErrorService.standardize(

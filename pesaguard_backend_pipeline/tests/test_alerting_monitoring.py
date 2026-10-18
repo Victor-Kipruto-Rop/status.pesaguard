@@ -11,6 +11,7 @@ import reconciliation_job
 from models import Base
 from alerting_consumer import AlertingConsumer
 from alerting_service import AlertingService
+from background_tasks import _notification_alert_context
 from metrics import build_metrics_payload
 
 
@@ -57,6 +58,24 @@ def test_alerting_service_routes_info_to_digest():
     assert result["status"] == "queued"
     assert result["delivery_mode"] == "digest"
     assert result["deliveries"] == []
+
+
+def test_typed_security_and_fraud_events_become_categorized_critical_alerts():
+    alert = _notification_alert_context({
+        "event": "fraud.confirmed",
+        "event_id": "fraud-event-1",
+        "tenant_id": "tenant-a",
+        "correlation_id": "TX-FRAUD-1",
+        "context": {"details": "Confirmed fraud finding."},
+    })
+
+    assert alert["tenant_id"] == "tenant-a"
+    assert alert["event_id"] == "fraud-event-1"
+    assert alert["event"] == "fraud.confirmed"
+    assert alert["alert_type"] == "fraud_confirmed"
+    assert alert["severity"] == "critical"
+    assert alert["source"] == "fraud"
+    assert alert["deduplication_key"] == "fraud-event-1"
 
 
 def test_metrics_payload_exposes_prometheus_text():

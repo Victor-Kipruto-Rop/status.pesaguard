@@ -74,3 +74,73 @@ At minimum, validate syntax and imports, focused unit behavior, cross-tenant iso
 - Replace this design baseline with implementation-specific diagrams, schemas, examples, and measured SLOs as the capability matures.
 - Link the final implementation, migration revision, tests, dashboards, and runbook from this document.
 - Review this document whenever the public contract, ownership boundary, or recovery behavior changes.
+
+## Metric reference
+
+The following Prometheus metrics are exported by `metrics.py` and scrapable at `/metrics`:
+
+### Request/latency metrics
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `pesaguard_requests_per_second` | Gauge | — | Application requests observed per second (scrape window) |
+| `pesaguard_error_rate` | Gauge | — | Application error rate (failed / total requests) |
+| `pesaguard_request_p50_ms` | Gauge | — | Application request p50 latency |
+| `pesaguard_request_p95_ms` | Gauge | — | Application request p95 latency |
+| `pesaguard_request_p99_ms` | Gauge | — | Application request p99 latency |
+| `pesaguard_request_timeouts_total` | Gauge | — | Application request timeouts |
+
+### Database metrics
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `pesaguard_db_connections` | Gauge | — | Active database connections |
+| `pesaguard_db_pool_usage` | Gauge | — | Database pool usage ratio |
+| `pesaguard_db_query_p95_ms` | Gauge | — | Database query p95 latency |
+| `pesaguard_db_locks` | Gauge | — | Unresolved database locks |
+| `pesaguard_db_deadlocks_total` | Gauge | — | Database deadlocks |
+
+### Kafka / event bus metrics
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `pesaguard_kafka_consumer_lag` | Gauge | — | Kafka consumer lag (sum across partitions) |
+| `pesaguard_kafka_consumer_lag_max` | Gauge | — | Maximum Kafka consumer partition lag |
+| `pesaguard_event_retries_total` | Counter | — | Event retry count |
+
+### Reconciliation metrics
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `pesaguard_reconciliation_latency_p95_seconds` | Gauge | — | 95th percentile reconciliation processing time |
+| `pesaguard_reconciliation_processing` | Gauge | — | Reconciliation records currently processing |
+| `pesaguard_reconciliation_outbox_pending` | Gauge | — | Reconciliation outbox rows awaiting publication |
+| `pesaguard_discrepancies_open` | Gauge | tenant_id | Current unresolved discrepancies |
+| `pesaguard_reconciliation_matches_total` | Gauge | status | Reconciliation decisions by canonical status |
+
+### M-Pesa ingestion metrics
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `pesaguard_mpesa_ingestion_latency_p95_seconds` | Gauge | — | 95th percentile M-Pesa callback ingestion latency |
+
+### Notification delivery metrics
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `pesaguard_notification_queue_depth` | Gauge | — | Notification outbox entries pending/retrying/leased |
+| `pesaguard_notification_deliveries_total` | Gauge | — | Total notification deliveries that reached delivered state |
+| `pesaguard_notification_deliveries_failed` | Gauge | — | Total notification deliveries that failed/dead-lettered/bounced/complained |
+| `pesaguard_notification_deliveries_pending` | Gauge | — | Total notification deliveries pending acceptance/submission |
+
+### Business metrics
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `pesaguard_business_transactions_received` | Counter | — | Transactions received |
+| `pesaguard_business_transactions_reconciled` | Counter | — | Transactions reconciled |
+| `pesaguard_business_fraud_alerts` | Counter | — | Fraud alerts |
+| `pesaguard_business_fraud_engine_failures` | Counter | — | Fraud engine failures |
+| `pesaguard_business_reconciliation_failures` | Counter | — | Reconciliation failures |
+| `pesaguard_business_exceptions` | Counter | — | Exceptions |
+| `pesaguard_business_duplicates` | Counter | — | Duplicates |
+| `pesaguard_business_security_events` | Counter | — | Security events |
+
+### Backup metrics
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `pesaguard_backup_age_seconds` | Gauge | — | Age of newest local database backup |
+| `pesaguard_backup_last_status` | Gauge | — | Last backup status |

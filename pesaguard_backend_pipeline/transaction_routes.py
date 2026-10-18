@@ -500,6 +500,7 @@ def create_transaction_blueprint(
                     "MSISDN": item.msisdn,
                     "BusinessShortCode": item.business_short_code,
                     "TransTime": item.trans_time,
+                    "status": item.status,
                 }
                 for item in history_rows
             ]
@@ -521,6 +522,14 @@ def create_transaction_blueprint(
                 transaction_id=transaction.trans_id,
                 decision=decision,
                 event_key=f"fraud-analysis:{idempotency_key}",
+            )
+            from risk_indicators import emit_risk_events
+
+            emit_risk_events(
+                session,
+                tenant_id=tenant_id,
+                decision=decision,
+                transaction_id=transaction.trans_id,
             )
             response_payload = _risk_score_payload(transaction.id, assessment)
 

@@ -1,4 +1,4 @@
-"""Bounded Kafka replay into a separate topic without advancing the source group."""
+"""Replay the bounded Kafka offset interval [start_offset, end_offset)."""
 
 from __future__ import annotations
 
@@ -19,25 +19,52 @@ def replay(
     tenant_id: str | None = None,
     provider_account_id: str | None = None,
 ) -> dict[str, Any]:
-    bootstrap = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
-    consumer = KafkaConsumer(
-        bootstrap_servers=[bootstrap],
-        enable_auto_commit=False,
-        auto_offset_reset="none",
-        consumer_timeout_ms=1000,
-        value_deserializer=lambda value: json.loads(value.decode("utf-8")),
-    )
-    producer = KafkaProducer(
-        bootstrap_servers=[bootstrap],
-        acks="all",
-        value_serializer=lambda value: json.dumps(value, ensure_ascii=False).encode("utf-8"),
-    )
+    if not isinstance(source_topic, str) or not source_topic.strip():
+        raise ValueError("source_topic is required")
+    if not isinstance(replay_topic, str) or not replay_topic.strip():
+        raise ValueError("replay_topic is required")
+    if source_topic == replay_topic:
+        raise ValueError("replay_topic must be different from source_topic")
+    if isinstance(partition, bool) or not isinstance(partition, int) or partition < 0:
+        raise ValueError("partition must be a non-negative integer")
+    if isinstance(start_offset, bool) or not isinstance(start_offset, int) or start_offset < 0:
+        raise ValueError("start_offset must be a non-negative integer")
+    if isinstance(end_offset, bool) or not isinstance(end_offset, int) or end_offset <= start_offset:
+        raise ValueError("end_offset must be greater than start_offset")
+    if tenant_id is not None and (not isinstance(tenant_id, str) or not tenant_id.strip()):
+        raise ValueError("tenant_id must be a non-empty string when provided")
+    if provider_account_id is not None and (
+        not isinstance(provider_account_id, str) or not provider_account_id.strip()
+    ):
+        raise ValueError("provider_account_id must be a non-empty string when provided")
+
+    bootstrap_servers = [
+        server.strip()
+        for server in os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092").split(",")
+        if server.strip()
+    ]
+    if not bootstrap_servers:
+        raise ValueError("KAFKA_BOOTSTRAP_SERVERS must contain at least one broker")
     topic_partition = TopicPartition(source_topic, partition)
-    consumer.assign([topic_partition])
-    consumer.seek(topic_partition, start_offset)
+    consumer = None
+    producer = None
     replayed = 0
     scanned = 0
     try:
+        consumer = KafkaConsumer(
+            bootstrap_servers=bootstrap_servers,
+            enable_auto_commit=False,
+            auto_offset_reset="none",
+            consumer_timeout_ms=1000,
+            value_deserializer=lambda value: json.loads(value.decode("utf-8")),
+        )
+        producer = KafkaProducer(
+            bootstrap_servers=bootstrap_servers,
+            acks="all",
+            value_serializer=lambda value: json.dumps(value, ensure_ascii=False).encode("utf-8"),
+        )
+        consumer.assign([topic_partition])
+        consumer.seek(topic_partition, start_offset)
         while True:
             records = consumer.poll(timeout_ms=1000, max_records=500)
             if not records:
@@ -70,8 +97,12 @@ def replay(
             "provider_account_id": provider_account_id,
         }
     finally:
-        consumer.close()
-        producer.close()
+        try:
+            if consumer is not None:
+                consumer.close()
+        finally:
+            if producer is not None:
+                producer.close()
 
 
 def main() -> None:

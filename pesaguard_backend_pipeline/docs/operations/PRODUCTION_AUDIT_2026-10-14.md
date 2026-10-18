@@ -122,7 +122,7 @@ Severity: 🔴 Critical (ship-stopping) · 🟠 High · 🟡 Medium
 | **B6** | **RPO/RTO remain unmeasured at production scale and mutually contradictory** across documents. "Near-zero RPO / <15 min RTO" is a target, never measured against a live production database with WAL/archiving. *A **local** RTO was measured this session (backup 2.953s / restore 2.067s / integrity 1.528s on a tiny throwaway DB — operator-invoked, incl. per-call interpreter startup), which is an upper-bound sanity check, **not** a production-scale RPO/RTO. RPO is still unmeasurable locally (no WAL/offsite/PITR configured).* | 🟠 | Doc cross-check (DR/cert docs) + this session's timed drill (`%TEMP%/b6_rto_result.json`) |
 | **B7** | **Secrets management is not operational.** A generic rotation procedure is documented (`docs/security/SECRETS_MANAGEMENT.md`), but no secret-store integration exists and rotation owner/cadence are unresolved placeholders. | 🟠 | Cert doc; docs/security + docs/infrastructure |
 | **B8** | **A real backup→restore→integrity DR drill has now been executed this session (2026-10-14).** No `restore-validation.json`, no `last_status.json`, no live drill output. (CI automates a *self-contained* restore drill, but that is not production-DR proof.) | 🟠 | **Executed:** `backup_postgres.py --backup/--restore/--test` on throwaway local Postgres:16 → gzip+sha256 backup, restore into isolated target DB, sentinel parity **3=3**, integrity exit 0, `result:PASS`. **Not production**; encryption/offsite not exercised; RPO/RTO not measured. |
-| **B12** | **CI runs Postgres integration but never the live-E2E/chaos path.** `ci.yml` sets `PESAGUARD_RUN_POSTGRES_INTEGRATION: "1"` (≈line 109), so Postgres integration suites **do** run. However **no workflow sets `PESAGUARD_LIVE_E2E=1`**, so the full live traceability/chaos path is not exercised in CI. *(This corrects the earlier "CI never sets either flag" claim.)* | 🟠 | `ci.yml` grep; this session |
+| **B12** | **Full gateway-to-notification integration E2E remains unverified.** The root release workflow now configures PostgreSQL role/RLS integration, shared Redis rate-limit checks, and isolated broker-backed Kafka lag tests using Redpanda. It deliberately leaves `PESAGUARD_LIVE_E2E` unset: that broad flag also enables live Alertmanager and gateway tests, which need approved non-production endpoints. The updated root workflow has not yet run in GitHub Actions. | 🟠 | Root `.github/workflows/backend-release.yml` source and focused local tests; post-change Actions result pending |
 
 ---
 
@@ -157,8 +157,10 @@ from the OAuth consumer secret; `.env.example` uses only placeholders.
 5. ~~Resolve B3~~ — **withdrawn** (frontend exists; no missing-module blocker). Remaining CI
    nit: remove `continue-on-error` masking on the frontend job and point the guard at the
    correct path, so a genuinely-missing frontend can never fail silently again.
-6. Enable `PESAGUARD_RUN_POSTGRES_INTEGRATION=1` (and, once stable, `PESAGUARD_LIVE_E2E=1`)
-   in CI so integration/chaos suites actually run — B12.
+6. Run the root release workflow with PostgreSQL, Redis, and its disposable
+   Redpanda broker; preserve a passing Actions result for the enabled service
+   integration tests. Keep gateway/Alertmanager live tests gated until approved
+   sandbox endpoints are provided — B12.
 
 ### Phase 2 — Prove financial correctness & recoverability (requires human sign-off)
 7. Execute reconciliation certification with a named approver → `precision=recall=1.0`,
@@ -208,7 +210,7 @@ from the OAuth consumer secret; `.env.example` uses only placeholders.
 the **B5** load run and the **B8** backup→restore→integrity drill both **PASS** (rows above).
 
 **Still NOT exercised (cannot be truthfully evidenced on a throwaway local DB / this host):**
-- Full suite green against a **production-shaped** PostgreSQL 16 + Redis 7 + Redpanda stack (Redis path proven only via `fakeredis`+`lupa`; Kafka/chaos/live-E2E need a real broker + monitoring sandbox).
+- Full suite green against a **production-shaped** PostgreSQL 16 + Redis 7 + Redpanda stack. The root workflow now configures isolated PostgreSQL/Redis/Redpanda integration checks, but it has not run after that change; gateway traceability and Alertmanager live E2E still need approved sandbox endpoints.
 - All **7** documented DR drills + measured **RPO/RTO** against production-scale data, WAL/archiving, encryption-at-rest, and offsite backup (B6/B8).
 - Stress / spike / soak **profiles** of the load harnesses (only the base 1M-row write/read run was executed) (B5).
 - Reconciliation financial certification — requires a **named human approver** (B4); secret-store provisioning (B7); production smoke tests (no production access).
@@ -243,8 +245,10 @@ Per Rule #38/#62 these remain **BLOCKED / REQUIRES HUMAN VERIFICATION**, not pas
   supports `--profile {load,stress,spike,soak}`; plus `run_auth_load_test.py`, `run_load_test.py`,
   `run_postgres_load_test.py`). The earlier "no harness exists" line is **retracted**; the real gap is
   *no executed, committed load evidence against a production-shaped stack*.
-- **B12 rewritten.** CI **does** set `PESAGUARD_RUN_POSTGRES_INTEGRATION=1` (Postgres integration runs);
-  only `PESAGUARD_LIVE_E2E=1` is never set. The earlier "CI never sets either flag" line is corrected.
+- **B12 rewritten.** The nested backend CI workflow sets `PESAGUARD_RUN_POSTGRES_INTEGRATION=1`;
+  the root release workflow now also enables PostgreSQL, Redis, and isolated Kafka lag checks.
+  Generic `PESAGUARD_LIVE_E2E` stays unset because it enables calls to gateway and Alertmanager
+  endpoints that require approved sandbox configuration.
 - **§8.2 resilience nuance retracted.** A prior note claimed `run_postgres_load_test.py` hardcodes
   `failure_injection` flags to `False` at "line 316". **That is not accurate** — the file is ~113 lines and
   has no such block. Chaos/failure-injection coverage in the tree is otherwise in-process (fake clients,
@@ -264,9 +268,9 @@ Per Rule #38/#62 these remain **BLOCKED / REQUIRES HUMAN VERIFICATION**, not pas
   cannot be self-issued (Rule #61) — not something to fabricate for a payments system.
 - **B6 — still BLOCKED:** RPO/RTO unmeasured & contradictory across docs; the local B8 drill did not measure them.
 - **B7 — BLOCKED:** requires provisioning a **real secret store** with credentials → not something to fabricate.
-- **B12 — residual, intentionally left gated:** enabling `PESAGUARD_LIVE_E2E=1` safely needs a Kafka broker +
-  Prometheus/Alertmanager sandbox that CI does not provide; flipping it now would break CI (verified — two live
-  tests hard-fail without those services). Left gated per the team's documented decision.
+- **B12 — residual, intentionally left gated:** the root release workflow now provides Redpanda for broker-backed
+  Kafka lag integration tests. The broader `PESAGUARD_LIVE_E2E=1` path remains unset because its gateway and
+  Alertmanager tests need approved sandbox endpoints and credentials; no post-change workflow result exists yet.
 - None of these are code defects; they are operational proofs that must be **evidenced, not asserted**.
 
 ### B5 Load Evidence (executed, throwaway local postgres:16 — not production-scale)

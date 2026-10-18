@@ -1,0 +1,78 @@
+# Debezium Change Data Capture Configuration for PesaGuard
+# Copy this file to debezium_config.yaml and fill in your credentials.
+# Never commit debezium_config.yaml with real credentials to source control.
+#
+# Deploy with: docker run -it --name debezium #   -v $(pwd)/debezium_config.yaml:/config/debezium_config.yaml #   debezium/connect:latest #   -c /config/debezium_config.yaml
+
+# PostgreSQL source connector configuration
+connector:
+  name: pesaguard-postgres-cdc
+  class: io.debezium.connector.postgresql.PostgresConnector
+  tasks_max: 1
+
+  # Database connection
+  database.hostname: ${PESAGUARD_DB_HOST:-localhost}
+  database.port: ${PESAGUARD_DB_PORT:-5432}
+  database.user: ${PESAGUARD_DB_USER:-pesaguard}
+  database.password: ${PESAGUARD_DB_PASSWORD:-change-me}
+  database.dbname: ${PESAGUARD_DB_NAME:-pesaguard}
+
+  # Schema and table filtering
+  database.server.name: pesaguard
+  database.schema.include-list: public
+  table.include-list: transactions,reconciliation_matches,merchant_metrics,discrepancies,audit_events
+
+  # Snapshot mode: initial = snapshot existing data, then stream changes
+  snapshot.mode: initial
+
+  # Output topics
+  topic.prefix: pesaguard.cdc
+
+  # WAL settings
+  slot.name: debezium_pesaguard_slot
+  publication.name: debezium_pesaguard_publication
+  publication.autocreate.mode: all
+
+  # Transformations for tenant isolation
+  transforms: isolate,route
+  transforms.isolate.type: org.apache.kafka.connect.transforms.Filter$Value
+  transforms.isolate.condition: ${record:value:tenant_id}
+  transforms.route.type: org.apache.kafka.connect.transforms.RegexRouter
+  transforms.route.regex: pesaguard\.cdc\.(\w+)
+  transforms.route.replacement: pesaguard.cdc.$1
+
+  # Error handling
+  errors.log.include.messages: true
+  errors.tolerance: all
+  errors.deadletterqueue.topic.name: pesaguard.cdc.dlq
+  errors.deadletterqueue.topic.replication.factor: 1
+  errors.deadletterqueue.context.headers.enable: true
+
+# Kafka Connect REST API endpoint
+connect:
+  rest:
+    host: ${KAFKA_CONNECT_HOST:-localhost}
+    port: ${KAFKA_CONNECT_PORT:-8083}
+
+# Debezium monitoring
+monitoring:
+  metrics:
+    port: ${DEBEZIUM_METRICS_PORT:-7777}
+    type: prometheus
+
+# Outage recovery settings
+recovery:
+  max_retries: 10
+  retry_backoff_ms: 5000
+  snapshot_on_restart: false
+  # When recovering from outage, resume from last committed offset
+  resume_from_offset: true
+
+# Schema change handling
+schema:
+  # Automatically handle schema changes (add columns, etc.)
+  handle_schema_changes: true
+  # Alert on schema changes (does not fail the connector)
+  alert_on_schema_change: true
+  # Allow schema evolution for tracked tables
+  allow_schema_evolution: true

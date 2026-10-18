@@ -20,6 +20,11 @@ _SCHEMA_FILES = {
     "airtel-money": "airtel-money-1.0.json",
     "bank": "bank-1.0.json",
     "pos": "pos-merchant-1.0.json",
+    "equity": "equity-1.0.json",
+    "kcb": "kcb-1.0.json",
+    "absa": "absa-1.0.json",
+    "visa": "visa-1.0.json",
+    "mastercard": "mastercard-1.0.json",
 }
 _SCHEMA_CACHE: dict[str, Mapping[str, Any]] = {}
 

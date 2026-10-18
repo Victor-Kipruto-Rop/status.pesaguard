@@ -15,7 +15,7 @@ from sqlalchemy.orm import sessionmaker
 
 import metrics
 from alerting_service import AlertingService
-from models import Base, Discrepancy
+from models import AlertDelivery, Base, Discrepancy
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
@@ -109,6 +109,7 @@ def test_alerting_service_records_delivery_metrics_per_channel(monkeypatch):
 
     monkeypatch.setattr("alerting_service.send_slack_alert", fake_send("slack"))
     monkeypatch.setattr("alerting_service.send_sms_alert", fake_send("sms"))
+    monkeypatch.setattr("alerting_service.is_alert_channel_configured", lambda channel: True)
 
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
@@ -163,6 +164,7 @@ def test_alert_deduplication_and_delivery_log_are_tenant_scoped(monkeypatch):
         return True
 
     monkeypatch.setattr("alerting_service.send_slack_alert", fake_slack)
+    monkeypatch.setattr("alerting_service.is_alert_channel_configured", lambda channel: True)
 
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
@@ -203,6 +205,7 @@ def test_delivery_audit_log_persists_with_schema_valid_status(monkeypatch):
         "alerting_service.send_slack_alert",
         lambda discrepancy, locale="en", **kwargs: True,
     )
+    monkeypatch.setattr("alerting_service.is_alert_channel_configured", lambda channel: True)
 
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
@@ -224,3 +227,47 @@ def test_delivery_audit_log_persists_with_schema_valid_status(monkeypatch):
     assert row.status in {"needs_review", "reviewed", "resolved", "escalated"}
     assert row.severity in {"info", "warning", "critical"}
     assert row.resolved is False
+
+
+def test_same_event_replay_retries_failed_delivery_without_resending_success(monkeypatch):
+    calls = []
+    outcomes = iter([False, True])
+
+    def flaky_slack(discrepancy, locale="en", **kwargs):
+        calls.append(discrepancy["event_id"])
+        kwargs["on_attempt"](1)
+        return next(outcomes)
+
+    monkeypatch.setattr("alerting_service.send_slack_alert", flaky_slack)
+    monkeypatch.setattr("alerting_service.is_alert_channel_configured", lambda channel: True)
+    monkeypatch.setenv("PESAGUARD_ALERT_MAX_ATTEMPTS", "4")
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, expire_on_commit=False)()
+    service = AlertingService(session=session, tenant_settings={"alert_channels": ["slack"]})
+    payload = {
+        "id": "retry-alert",
+        "event_id": "stable-source-event",
+        "tenant_id": "tenant-a",
+        "trans_id": "TX-RETRY",
+        "severity": "critical",
+        "status": "missing_payment",
+    }
+
+    first = service.handle_discrepancy(dict(payload))
+    retry = service.handle_discrepancy(dict(payload))
+    row = session.query(AlertDelivery).filter_by(tenant_id="tenant-a", channel="slack").one()
+
+    assert first["status"] == "failed"
+    assert first["deliveries"][0]["status"] == "retrying"
+    assert retry["status"] == "queued"
+    assert retry["deliveries"][0]["status"] == "sent"
+    assert row.status == "sent"
+    assert row.attempt_count == 2
+    assert calls == ["stable-source-event", "stable-source-event"]
+
+    # A later, distinct event for the same alert is kept in history but does not resend.
+    duplicate = service.handle_discrepancy({**payload, "event_id": "another-source-event"})
+    assert duplicate["status"] == "deduped"
+    assert calls == ["stable-source-event", "stable-source-event"]

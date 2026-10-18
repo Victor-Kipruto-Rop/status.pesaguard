@@ -10,6 +10,27 @@ This document defines the role of **Alerts** within PesaGuard. It provides a dur
 
 PesaGuard currently runs a Flask and SQLAlchemy backend with PostgreSQL as the production store, Redis and RQ for asynchronous work, Kafka for event transport, and Alembic for schema migration. M-Pesa/Daraja is the active payment scope. Capabilities described here must be marked as implemented, in progress, or planned rather than implied.
 
+## Alert center implementation
+
+The alert center is implemented in the backend and tenant dashboard:
+
+- Typed transaction, reconciliation, fraud, security, and provider events can enqueue notification jobs; the worker normalizes each to a category, source, and severity. Reconciliation outbox events carry a stable source event ID. The worker stores the alert and its initial in-app delivery before attempting external channels.
+- `GET /api/v1/alerts` provides tenant-scoped, paginated filtering by status, severity, category, assignee, and time. The dashboard polls for updates and supports paging, acknowledgement, assignment, investigation notes, resolution, and escalation.
+- `GET /api/v1/alerts/{id}/events` returns paginated append-only history. Repeated source events increment the duplicate count and append `alert.duplicate_suppressed`; replaying the same event ID does not create another history entry or send another notification.
+- Configured alert email is enqueued transactionally in the communications outbox. Delivery attempts and provider status are shown through the linked communications notification. Communications retry and dead-letter operations remain available under `/api/v1/communications`.
+- Slack and SMS attempts are persisted before network calls. Failed attempts are retried by RQ using the same event ID; `PESAGUARD_ALERT_MAX_ATTEMPTS` bounds attempts per retry generation. Exhausted channels become `dead_letter`, and authorized operators can start another generation from the notification center without resetting lifetime attempt history. Channels without required credentials become `not_configured` and are not automatically retried.
+- Escalation can use active severity rules and an on-call shift from the manual escalation action. Webhook escalation requires its configured escalation worker; the manual API does not imply automatic time-based escalation.
+
+Apply Alembic revision `20261018_alert_center_workflow` before enabling these routes. Set `ALERT_EMAIL_RECIPIENTS` or tenant-specific recipient settings to enable operational email, and provide selected provider credentials through the deployment secret store. Run and monitor the notification RQ worker and communications outbox worker. Do not place credentials in committed environment examples.
+
+### Operator checks
+
+1. Confirm the alert migration is at the deployed database head.
+2. Confirm notification and communications workers are consuming their queues and that no alert deliveries remain in `processing` beyond the worker timeout.
+3. Review `GET /api/v1/alerts?status=open` and `GET /api/v1/alerts/{id}` for delivery status, attempt counts, and error codes; inspect paginated event history for causal events and operator actions.
+4. Retry direct Slack/SMS dead letters from the alert notification center after checking provider configuration. Replay communication email dead letters through `/api/v1/communications/dead-letters/{entry_id}/replay`.
+5. Verify active escalation rules and on-call shifts before relying on escalation actions.
+
 ## Design principles
 
 - **Tenant isolation:** every query, mutation, export, cache key, event, audit record, and replay operation carries an authorized tenant and provider-account scope.
@@ -70,3 +91,52 @@ At minimum, validate syntax and imports, focused unit behavior, cross-tenant iso
 - Replace this design baseline with implementation-specific diagrams, schemas, examples, and measured SLOs as the capability matures.
 - Link the final implementation, migration revision, tests, dashboards, and runbook from this document.
 - Review this document whenever the public contract, ownership boundary, or recovery behavior changes.
+
+## Alert rule reference
+
+The following alert rules are defined in `monitoring/alerts.yml` and evaluated by Prometheus:
+
+### Data pipeline alerts
+| Alert | Expression | For | Severity | Service |
+|-------|------------|-----|----------|---------|
+| `PesaGuardTransactionOutboxBacklog` | `pesaguard_transaction_outbox_pending > 1000` | 10m | critical | ingestion |
+| `PesaGuardReconciliationOutboxBacklog` | `pesaguard_reconciliation_outbox_pending > 1000` | 10m | critical | reconciliation |
+| `PesaGuardReconciliationProcessingStuck` | `pesaguard_reconciliation_processing > 0` | 30m | warning | reconciliation |
+| `PesaGuardDeadLetterGrowth` | `pesaguard_dead_letters_total > 100` | 5m | warning | ingestion |
+| `PesaGuardEventRetriesGrowing` | `increase(pesaguard_event_retries_total[10m]) > 100` | 10m | warning | redpanda |
+
+### Notification delivery alerts
+| Alert | Expression | For | Severity | Service |
+|-------|------------|-----|----------|---------|
+| `PesaGuardNotificationQueueBacklog` | `pesaguard_notification_queue_depth > 500` | 10m | critical | communications |
+| `PesaGuardNotificationDeliveryFailureRate` | `(pesaguard_notification_deliveries_failed / max(pesaguard_notification_deliveries_total + pesaguard_notification_deliveries_failed, 1)) > 0.05` | 10m | critical | communications |
+| `PesaGuardNotificationDeliveryPendingHigh` | `pesaguard_notification_deliveries_pending > 1000` | 15m | warning | communications |
+
+### M-Pesa ingestion alerts
+| Alert | Expression | For | Severity | Service |
+|-------|------------|-----|----------|---------|
+| `PesaGuardMpesaIngestionLatencyHigh` | `pesaguard_mpesa_ingestion_latency_p95_seconds > 300` | 10m | warning | ingestion |
+
+### Backup alerts
+| Alert | Expression | For | Severity | Service |
+|-------|------------|-----|----------|---------|
+| `PesaGuardBackupStale` | `pesaguard_backup_age_seconds > 93600` | 30m | critical | backup |
+| `PesaGuardBackupFailed` | `pesaguard_backup_last_success == 0` | 15m | critical | backup |
+
+### API / infrastructure alerts
+| Alert | Expression | For | Severity | Service |
+|-------|------------|-----|----------|---------|
+| `PesaGuardErrorRateHigh` | `pesaguard_error_rate > 0.05` | 10m | warning | api |
+| `PesaGuardRequestLatencyHigh` | `pesaguard_request_p99_ms > 2000` | 10m | warning | api |
+| `PesaGuardDatabasePoolSaturation` | `pesaguard_db_pool_usage > 0.8` | 10m | warning | database |
+| `PesaGuardKafkaConsumerLagHigh` | `pesaguard_kafka_consumer_lag_max > 10000` | 10m | critical | redpanda |
+
+### Fraud / security alerts
+| Alert | Expression | For | Severity | Service |
+|-------|------------|-----|----------|---------|
+| `PesaGuardFraudWorkerFailures` | `increase(pesaguard_business_fraud_engine_failures_total[10m]) > 0` | 5m | critical | fraud |
+| `PesaGuardReconciliationWorkerFailures` | `increase(pesaguard_business_reconciliation_failures_total[10m]) > 0` | 5m | critical | reconciliation |
+| `PesaGuardSecurityEventsHigh` | `increase(pesaguard_business_security_events_total[10m]) > 25` | 10m | warning | security |
+| `PesaGuardAuthenticationRiskBlocksHigh` | `sum(increase(pesaguard_auth_risk_decisions_total{action=~"block\|review"}[10m])) > 5` | 5m | critical | security |
+| `PesaGuardAuthenticationStepUpHigh` | `sum(increase(pesaguard_auth_risk_decisions_total{action="require_mfa"}[10m])) > 50` | 10m | warning | security |
+| `PesaGuardAuthenticationRateLimiterUnavailable` | `increase(pesaguard_business_auth_rate_limiter_unavailable_total[5m]) > 0` | 1m | critical | security |

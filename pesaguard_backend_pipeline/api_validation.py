@@ -25,7 +25,7 @@ TRANSACTION_CREATE_SCHEMA: dict[str, Any] = {
         "provider_account_id": {"type": "string", "minLength": 1, "maxLength": 255},
         "TransID": {"type": "string", "minLength": 1, "maxLength": 255},
         "BusinessShortCode": {"type": ["string", "number"], "minLength": 1},
-        "provider": {"type": "string", "enum": ["mpesa", "safaricom", "airtel-money", "bank", "pos"]},
+        "provider": {"type": "string", "enum": ["mpesa", "safaricom", "airtel-money", "bank", "pos", "visa", "mastercard", "equity", "kcb", "absa"]},
         "TransAmount": {"type": ["string", "number"]},
         "Currency": {"type": "string", "minLength": 1},
         "MSISDN": {"type": "string", "pattern": "^254[17][0-9]{8}$"},

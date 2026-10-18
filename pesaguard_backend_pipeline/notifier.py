@@ -8,13 +8,14 @@ exponential backoff retries, localized templates (English/Swahili), and structur
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import math
 import os
 import smtplib
 import time
 from email.message import EmailMessage
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 from urllib.parse import urlsplit
 
 import requests
@@ -26,7 +27,10 @@ except ImportError:
     HAS_AFRICAS_TALKING = False
 
 from alert_template_loader import load_alert_fields, render_message_template
+from email_addresses import EMAIL_ADDRESSES
+from email_branding import render_branded_email_html
 from localization_utils import format_ke_currency, format_ke_datetime, normalise_locale
+from resend_email import ResendAPIError, ResendEmailClient
 
 logger = logging.getLogger("pesaguard.alerting")
 
@@ -67,6 +71,15 @@ def _is_allowed_slack_webhook_url(value: str) -> bool:
     )
 
 
+def is_alert_channel_configured(channel: str) -> bool:
+    """Return whether a direct alert channel can make a delivery attempt."""
+    if channel == "slack":
+        return bool(SLACK_WEBHOOK_URL and _is_allowed_slack_webhook_url(SLACK_WEBHOOK_URL))
+    if channel == "sms":
+        return bool(SMS_RECIPIENT and sms_client)
+    return False
+
+
 def _slack_retry_delay_seconds(
     attempt: int,
     status_code: Optional[int] = None,
@@ -83,7 +96,12 @@ def _slack_retry_delay_seconds(
     return max(0, min(configured_delay, 300))
 
 
-def send_slack_alert(discrepancy: Dict[str, Any], locale: str = "en", max_retries: int = SLACK_RETRIES) -> bool:
+def send_slack_alert(
+    discrepancy: Dict[str, Any],
+    locale: str = "en",
+    max_retries: int = SLACK_RETRIES,
+    on_attempt: Callable[[int], None] | None = None,
+) -> bool:
     """Send alert payload to Slack via webhook with exponential retries.
 
     Args:
@@ -110,6 +128,8 @@ def send_slack_alert(discrepancy: Dict[str, Any], locale: str = "en", max_retrie
     body = json.dumps({"text": text}).encode("utf-8")
 
     for attempt in range(max_retries + 1):
+        if on_attempt is not None:
+            on_attempt(attempt + 1)
         try:
             with requests.post(
                 SLACK_WEBHOOK_URL,
@@ -158,7 +178,12 @@ def send_slack_alert(discrepancy: Dict[str, Any], locale: str = "en", max_retrie
     return False
 
 
-def send_sms_alert(discrepancy: Dict[str, Any], locale: str = "en", max_retries: int = SMS_RETRIES) -> bool:
+def send_sms_alert(
+    discrepancy: Dict[str, Any],
+    locale: str = "en",
+    max_retries: int = SMS_RETRIES,
+    on_attempt: Callable[[int], None] | None = None,
+) -> bool:
     """Send alert via Africa's Talking SMS API with exponential retries.
 
     Args:
@@ -184,6 +209,8 @@ def send_sms_alert(discrepancy: Dict[str, Any], locale: str = "en", max_retries:
     message = _format_sms_alert_text(discrepancy, locale=locale)
 
     for attempt in range(max_retries + 1):
+        if on_attempt is not None:
+            on_attempt(attempt + 1)
         try:
             sms_client.send_sms(recipient, message)
             logger.info("SMS alert sent successfully trans_id=%s recipient=%s", trans_id, recipient)
@@ -204,7 +231,7 @@ def send_sms_alert(discrepancy: Dict[str, Any], locale: str = "en", max_retries:
 
 
 def send_email_alert(discrepancy: Dict[str, Any], locale: str = "en", max_retries: int = EMAIL_RETRIES) -> bool:
-    """Send alert via SMTP with retries on network failures.
+    """Send an alert through configured Resend or explicitly enabled SMTP.
 
     Args:
         discrepancy: Discrepancy anomaly dictionary
@@ -214,20 +241,105 @@ def send_email_alert(discrepancy: Dict[str, Any], locale: str = "en", max_retrie
     Returns:
         True if delivered successfully, False otherwise
     """
+    if max_retries < 0:
+        raise ValueError("max_retries must not be negative")
     recipients = os.getenv("ALERT_EMAIL_RECIPIENTS")
     trans_id = discrepancy.get("trans_id", "unknown")
     tenant_id = discrepancy.get("tenant_id", "default")
 
-    if not recipients or not SMTP_HOST:
-        logger.debug("Email SMTP host or recipient configuration missing; skipping email dispatch.")
+    if not recipients:
+        logger.debug("Alert email recipients are not configured; skipping email dispatch.")
         return False
 
     message_text = _format_alert_text(discrepancy, locale=locale)
+    subject = f"PesaGuard Alert: {str(discrepancy.get('severity', 'alert')).upper()} - {trans_id}"
+    email_provider = os.getenv("PESAGUARD_EMAIL_PROVIDER", "resend").strip().lower()
+    recipient_list = [value.strip() for value in recipients.split(",") if value.strip()]
+    if not recipient_list:
+        logger.warning("Alert email recipient configuration is empty")
+        return False
+
+    if email_provider == "resend":
+        alert_fingerprint = json.dumps(
+            {
+                "id": discrepancy.get("id"),
+                "trans_id": trans_id,
+                "severity": discrepancy.get("severity"),
+                "status": discrepancy.get("status"),
+                "anomalies": discrepancy.get("anomalies"),
+                "anomaly_type": discrepancy.get("anomaly_type"),
+                "detected_at": discrepancy.get("detected_at") or discrepancy.get("checked_at"),
+                "amount": discrepancy.get("amount") or discrepancy.get("amount_value"),
+            },
+            sort_keys=True,
+            default=str,
+            separators=(",", ":"),
+        )
+        client = ResendEmailClient()
+        for attempt in range(max_retries + 1):
+            try:
+                for recipient in recipient_list:
+                    idempotency_key = hashlib.sha256(
+                        f"{tenant_id}:{alert_fingerprint}:{recipient.casefold()}".encode("utf-8")
+                    ).hexdigest()
+                    client.send_message({
+                        "to": recipient,
+                        "from_email": EMAIL_ADDRESSES.alerts,
+                        "reply_to": EMAIL_ADDRESSES.incidents,
+                        "subject": subject,
+                        "text": message_text,
+                        "preheader": "Review the discrepancy alert and its current status.",
+                        "idempotency_key": idempotency_key,
+                    })
+                logger.info(
+                    "Resend alert accepted trans_id=%s tenant_id=%s recipient_count=%d",
+                    trans_id,
+                    tenant_id,
+                    len(recipient_list),
+                )
+                return True
+            except ResendAPIError as exc:
+                if not exc.retryable or attempt >= max_retries:
+                    logger.error(
+                        "Resend alert delivery failed code=%s retryable=%s",
+                        exc.code,
+                        exc.retryable,
+                    )
+                    return False
+            except Exception as exc:
+                if attempt >= max_retries:
+                    logger.error("Resend alert delivery failed error_type=%s", type(exc).__name__)
+                    return False
+            backoff = RETRY_BACKOFF_SECONDS * (2 ** attempt)
+            logger.warning(
+                "Resend alert delivery retry attempt=%d/%d delay_seconds=%.1f",
+                attempt + 1,
+                max_retries + 1,
+                backoff,
+            )
+            time.sleep(backoff)
+        return False
+
+    if email_provider != "smtp":
+        logger.error("Unsupported PESAGUARD_EMAIL_PROVIDER for alert email")
+        return False
+    if not SMTP_HOST:
+        logger.debug("SMTP host is not configured; skipping email dispatch.")
+        return False
+
     msg = EmailMessage()
-    msg["Subject"] = f"PesaGuard Alert: {str(discrepancy.get('severity', 'alert')).upper()} - {trans_id}"
+    msg["Subject"] = subject
     msg["From"] = EMAIL_FROM
     msg["To"] = recipients
     msg.set_content(message_text)
+    msg.add_alternative(
+        render_branded_email_html(
+            subject,
+            text_body=message_text,
+            preheader="Review the discrepancy alert and its current status.",
+        ),
+        subtype="html",
+    )
 
     for attempt in range(max_retries + 1):
         try:
@@ -236,21 +348,29 @@ def send_email_alert(discrepancy: Dict[str, Any], locale: str = "en", max_retrie
                     s.starttls()
                     s.login(SMTP_USER, SMTP_PASS)
                 s.send_message(msg)
-            logger.info("Email alert sent successfully trans_id=%s recipients=%s", trans_id, recipients)
+            logger.info("Email alert accepted recipient_count=%d", len(recipient_list))
             return True
-        except smtplib.SMTPException as e:
+        except smtplib.SMTPException as exc:
             if attempt < max_retries:
                 backoff = RETRY_BACKOFF_SECONDS * (2 ** attempt)
                 logger.warning(
-                    "Email alert delivery failed (attempt %d/%d): %s. Retrying in %.1fs...",
-                    attempt + 1, max_retries + 1, e, backoff
+                    "Email alert delivery failed (attempt %d/%d, error_type=%s). Retrying in %.1fs...",
+                    attempt + 1, max_retries + 1, type(exc).__name__, backoff
                 )
                 time.sleep(backoff)
             else:
-                logger.error("Email alert delivery failed after %d attempts: %s", max_retries + 1, e)
+                logger.error(
+                    "Email alert delivery failed after %d attempts (error_type=%s)",
+                    max_retries + 1,
+                    type(exc).__name__,
+                )
                 return False
-        except Exception as e:
-            logger.exception("Unexpected error sending email alert trans_id=%s: %s", trans_id, e)
+        except Exception as exc:
+            logger.error(
+                "Unexpected email alert failure trans_id=%s error_type=%s",
+                trans_id,
+                type(exc).__name__,
+            )
             return False
 
     return False

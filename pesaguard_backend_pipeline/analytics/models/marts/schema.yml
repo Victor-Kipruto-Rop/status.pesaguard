@@ -1,0 +1,94 @@
+version: 2
+
+models:
+  - name: fct_reconciliation
+    description: "Reconciliation fact table - one row per reconciliation match with outcomes."
+    columns:
+      - name: reconciliation_fact_key
+        tests:
+          - unique
+          - not_null
+      - name: match_id
+        tests:
+          - not_null
+      - name: tenant_id
+        tests:
+          - not_null
+      - name: match_score
+        tests:
+          - not_null
+
+  - name: fct_transactions
+    description: "Transaction fact table - one row per enriched transaction with measures."
+    columns:
+      - name: transaction_fact_key
+        tests:
+          - unique
+          - not_null
+      - name: transaction_id
+        tests:
+          - not_null
+      - name: tenant_id
+        tests:
+          - not_null
+
+  - name: dim_tenant
+    description: "Tenant dimension."
+    columns:
+      - name: tenant_key
+        tests:
+          - unique
+          - not_null
+      - name: tenant_id
+        tests:
+          - unique
+          - not_null
+
+  - name: dim_merchant
+    description: "Merchant dimension."
+    columns:
+      - name: merchant_key
+        tests:
+          - unique
+          - not_null
+      - name: merchant_id
+        tests:
+          - not_null
+
+  - name: dim_provider
+    description: "Provider dimension."
+    columns:
+      - name: provider_key
+        tests:
+          - unique
+          - not_null
+      - name: provider
+        tests:
+          - unique
+          - not_null
+
+  - name: dim_date
+    description: "Date dimension."
+    columns:
+      - name: date_key
+        tests:
+          - unique
+          - not_null
+      - name: date_value
+        tests:
+          - unique
+          - not_null
+
+  - name: mart_tenant_daily_financials
+    description: "Tenant daily financials mart."
+    columns:
+      - name: financial_fact_key
+        tests:
+          - unique
+          - not_null
+      - name: tenant_id
+        tests:
+          - not_null
+      - name: trans_date
+        tests:
+          - not_null

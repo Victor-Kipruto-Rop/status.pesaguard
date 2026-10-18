@@ -66,15 +66,20 @@ class RiskDecision:
     rules_triggered: tuple[str, ...]
     features: FraudFeatures
     detected_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    # Human-readable per-rule explanations for the triggered rules only.
+    # Trailing defaulted field: positional construction stays backward-compatible.
+    rule_reasons: dict[str, str] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "risk_score": self.risk_score,
             "risk_level": self.risk_level,
             "action": self.action,
+            "priority": risk_priority(self.risk_level, self.rules_triggered),
             "reason_codes": list(self.reason_codes),
             "model_version": self.model_version,
             "rules_triggered": list(self.rules_triggered),
+            "rule_reasons": dict(self.rule_reasons),
             "features": self.features.as_dict(),
             "detected_at": self.detected_at.isoformat(),
         }
@@ -158,6 +163,22 @@ def _identity(transaction: Mapping[str, Any], *keys: str) -> str:
     return "unknown"
 
 
+def _reference(transaction: Mapping[str, Any]) -> str:
+    """Business/reference code attached to a transaction, or '' when absent.
+
+    Unlike ``_identity`` this never falls back to "unknown" so that missing
+    references can never masquerade as a shared reference group.
+    """
+    for key in ("BillRefNumber", "external_reference", "reference", "Reference"):
+        value = str(transaction.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+_FAILURE_STATUSES = frozenset({"FAILED", "REJECTED", "ERROR"})
+
+
 def calculate_features(
     transaction: Mapping[str, Any],
     history: Sequence[Mapping[str, Any]] = (),
@@ -232,6 +253,9 @@ def evaluate_rules(
     amount_threshold: float = 150_000.0,
     amount_threshold_currency: str = DEFAULT_CURRENCY,
     velocity_limit: float = 5.0,
+    reference_limit: int = 3,
+    failure_limit: int = 3,
+    correlation_min_families: int = 3,
 ) -> tuple[RuleResult, ...]:
     transaction_id = _identity(transaction, "TransID", "trans_id", "transaction_id")
     currency = _transaction_currency(transaction)
@@ -249,7 +273,37 @@ def evaluate_rules(
     }) >= 4
     threshold_currency = normalize_currency(amount_threshold_currency)
     threshold_applies = currency == threshold_currency
-    return (
+
+    # Repeated transaction reference: the same business reference shared across
+    # many *other* distinct transaction identities. Absent references never
+    # match, so unrelated reference-less transactions cannot be flagged.
+    current_reference = _reference(transaction)
+    reused_ids = {
+        _identity(item, "TransID", "trans_id", "transaction_id")
+        for item in history
+        if current_reference
+        and _reference(item) == current_reference
+        and _identity(item, "TransID", "trans_id", "transaction_id") != transaction_id
+    }
+    reference_count = len(reused_ids)
+    repeated_reference = bool(current_reference) and reference_count >= reference_limit
+
+    # Repeated processing failures: FAILED/REJECTED/ERROR outcomes accumulating
+    # for the same customer or merchant across recent history. "unknown"
+    # identities never aggregate so unidentifiable rows cannot mass-flag.
+    customer_failures = 0
+    merchant_failures = 0
+    for item in history:
+        status = str(item.get("status") or "").strip().upper()
+        if status not in _FAILURE_STATUSES:
+            continue
+        if features.customer_id != "unknown" and _identity(item, "MSISDN", "customer_id", "customer") == features.customer_id:
+            customer_failures += 1
+        if features.merchant_id != "unknown" and _identity(item, "BusinessShortCode", "merchant_id", "merchant") == features.merchant_id:
+            merchant_failures += 1
+    failure_pattern = customer_failures >= failure_limit or merchant_failures >= failure_limit
+
+    base_rules = (
         RuleResult("velocity", features.velocity * 5 >= velocity_limit, 0.30, "transaction velocity exceeded the configured limit"),
         RuleResult(
             "amount_threshold",
@@ -262,7 +316,54 @@ def evaluate_rules(
         RuleResult("duplicate_activity", duplicate, 0.30, "transaction identity was already observed"),
         RuleResult("unusual_time", features.time_pattern > 0, 0.10, "transaction occurred during an unusual time window"),
         RuleResult("rapid_transaction_changes", rapid_changes, 0.15, "recent transaction amounts changed rapidly"),
+        RuleResult(
+            "repeated_reference",
+            repeated_reference,
+            0.25,
+            f"the same transaction reference was reused across {reference_count} other distinct transactions"
+            if repeated_reference
+            else "no repeated transaction reference reuse observed",
+        ),
+        RuleResult(
+            "processing_failure_pattern",
+            failure_pattern,
+            0.25,
+            "repeated processing failures observed for the same customer or merchant "
+            f"(customer_failures={customer_failures}, merchant_failures={merchant_failures})"
+            if failure_pattern
+            else "no repeated processing failure pattern observed",
+        ),
     )
+
+    # Cross-event correlation is only justified when several independent
+    # signal families fire together on the same transaction; a single signal
+    # and its variants (reference identity) never count as correlation.
+    families: set[str] = set()
+    for rule in base_rules:
+        if not rule.triggered:
+            continue
+        if rule.code == "velocity":
+            families.add("velocity")
+        elif rule.code == "amount_threshold":
+            families.add("amount")
+        elif rule.code in {"duplicate_activity", "repeated_reference"}:
+            families.add("reference")
+        elif rule.code == "unusual_time":
+            families.add("time")
+        elif rule.code == "rapid_transaction_changes":
+            families.add("amount_change")
+        elif rule.code == "processing_failure_pattern":
+            families.add("failure")
+    correlated = len(families) >= max(2, correlation_min_families)
+    correlation_rule = RuleResult(
+        "correlated_indicators",
+        correlated,
+        0.15,
+        f"{len(families)} independent indicator families correlated ({', '.join(sorted(families))})"
+        if correlated
+        else f"only {len(families)} independent indicator families observed",
+    )
+    return (*base_rules, correlation_rule)
 
 
 def _risk_level(score: float) -> str:
@@ -279,6 +380,28 @@ def _action(level: str) -> str:
     return {"LOW": "process", "MEDIUM": "monitor", "HIGH": "review", "CRITICAL": "escalate"}[level]
 
 
+_PRIORITY_BY_LEVEL = {"CRITICAL": "P1", "HIGH": "P2", "MEDIUM": "P3", "LOW": "P4"}
+_PRIORITY_ORDER = ("P4", "P3", "P2", "P1")
+
+
+def risk_priority(risk_level: str, rules_triggered: Iterable[str] = ()) -> str:
+    """Map a risk level to an operational triage priority.
+
+    P1 is the highest operational priority. When independent indicator
+    families are correlated on the same transaction the priority escalates
+    one step (never above P1) because corroborating signals justify faster
+    triage than any single indicator alone.
+    """
+    try:
+        base = _PRIORITY_BY_LEVEL[risk_level]
+    except KeyError:
+        raise ValueError(f"unknown risk level: {risk_level!r}") from None
+    if "correlated_indicators" in set(rules_triggered):
+        index = _PRIORITY_ORDER.index(base)
+        return _PRIORITY_ORDER[min(index + 1, len(_PRIORITY_ORDER) - 1)]
+    return base
+
+
 def assess_transaction(
     transaction: Mapping[str, Any],
     history: Sequence[Mapping[str, Any]] = (),
@@ -288,6 +411,9 @@ def assess_transaction(
     amount_threshold: float = 150_000.0,
     amount_threshold_currency: str = DEFAULT_CURRENCY,
     velocity_limit: float = 5.0,
+    reference_limit: int = 3,
+    failure_limit: int = 3,
+    correlation_min_families: int = 3,
 ) -> RiskDecision:
     features = calculate_features(transaction, history, tenant_baseline)
     rules = evaluate_rules(
@@ -297,6 +423,9 @@ def assess_transaction(
         amount_threshold=amount_threshold,
         amount_threshold_currency=amount_threshold_currency,
         velocity_limit=velocity_limit,
+        reference_limit=reference_limit,
+        failure_limit=failure_limit,
+        correlation_min_families=correlation_min_families,
     )
     feature_score = (
         features.amount_deviation * 0.25
@@ -308,8 +437,18 @@ def assess_transaction(
     rule_score = sum(rule.weight for rule in rules if rule.triggered)
     score = round(min(1.0, max(feature_score, rule_score) + min(feature_score * rule_score, 0.25)), 4)
     triggered = tuple(rule.code for rule in rules if rule.triggered)
+    rule_reasons = {rule.code: rule.reason for rule in rules if rule.triggered}
     level = _risk_level(score)
-    return RiskDecision(score, level, _action(level), triggered, model_version, triggered, features)
+    return RiskDecision(
+        score,
+        level,
+        _action(level),
+        triggered,
+        model_version,
+        triggered,
+        features,
+        rule_reasons=rule_reasons,
+    )
 
 
 def persist_assessment(session: Any, tenant_id: str, transaction_id: str, decision: RiskDecision) -> Any:

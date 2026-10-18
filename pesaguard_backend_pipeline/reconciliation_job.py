@@ -395,7 +395,13 @@ def _publish_downstream(evaluation: Dict[str, Any], trans_id: str, producer: Any
 
         if is_discrepancy:
             logger.warning("Discrepancy event published for trans_id=%s to topic=%s", trans_id, topic)
-            dispatch_discrepancy_alert({**evaluation, **outbox.payload}, tenant_id=tenant_id)
+            dispatch_result = dispatch_discrepancy_alert(
+                {**evaluation, **outbox.payload, "event_id": event_key},
+                tenant_id=tenant_id,
+            )
+            if not isinstance(dispatch_result, dict) or dispatch_result.get("status") not in {"queued", "skipped"}:
+                status = dispatch_result.get("status") if isinstance(dispatch_result, dict) else "invalid_result"
+                raise RuntimeError(f"notification event enqueue did not succeed: {status}")
         else:
             logger.info("Transaction %s cleanly reconciled and published to %s", trans_id, topic)
         outbox.status = "published"

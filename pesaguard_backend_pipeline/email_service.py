@@ -8,16 +8,20 @@ from __future__ import annotations
 
 import logging
 import os
-import smtplib
 import ssl
+import smtplib
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from html import escape
 from typing import Any, Dict, List, Optional
 
 from environment import load_backend_env
+from email_addresses import EMAIL_ADDRESSES, addresses_for_purpose, is_pesaguard_email_address
+from email_branding import render_branded_email_html
+from resend_email import ResendAPIError, ResendEmailClient
 from sqlalchemy.orm import Session
 
 from localization_utils import format_ke_currency, format_ke_datetime, normalise_locale
@@ -41,6 +45,7 @@ class EmailService:
         use_ssl: Optional[bool] = None,
         timeout: int = 10,
         max_workers: int = 5,
+        provider: Optional[str] = None,
     ):
         load_backend_env()
 
@@ -71,6 +76,18 @@ class EmailService:
         self.from_name = from_name if from_name is not None else env_value("SMTP_FROM_NAME", default="PesaGuard")
         self.username = username if username is not None else env_value("SMTP_USERNAME", "EMAIL_USERNAME")
         self.password = password if password is not None else env_value("SMTP_PASSWORD", "EMAIL_PASSWORD")
+        self.email_provider = (
+            provider if provider is not None else env_value("PESAGUARD_EMAIL_PROVIDER", default="resend")
+        ).strip().lower()
+        if self.email_provider not in {"smtp", "resend"}:
+            raise ValueError("PESAGUARD_EMAIL_PROVIDER must be either resend or smtp")
+        self.resend_client = ResendEmailClient() if self.email_provider == "resend" else None
+        if self.email_provider == "resend":
+            self.from_email = (
+                from_email
+                if from_email is not None
+                else env_value("PESAGUARD_EMAIL_FROM", default=EMAIL_ADDRESSES.no_reply)
+            )
         self.timeout = timeout
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="pesaguard_email_worker")
 
@@ -88,8 +105,10 @@ class EmailService:
 
         if locale_code == "sw":
             subject = f"Ripoti ya Upatanishi ya PesaGuard - {date_str}"
+            preheader = "Kagua matokeo ya upatanishi na tofauti zinazosubiri."
         else:
             subject = f"PesaGuard Reconciliation Report - {date_str}"
+            preheader = "Review the reconciliation results and outstanding discrepancies."
 
         html_content = self._build_reconciliation_html(report_data, locale=locale_code)
         text_content = self._build_reconciliation_text(report_data, locale=locale_code)
@@ -109,16 +128,19 @@ class EmailService:
             subject,
             html_content,
             text_content,
+            purpose="reconciliation",
+            idempotency_key=email_record.id,
+            preheader=preheader,
         )
 
         if success:
             email_record.status = "sent"
             email_record.sent_at = datetime.now(timezone.utc)
-            logger.info("Sent reconciliation report to recipient=%s tenant_id=%s", recipient_email, tenant_id)
+            logger.info("Reconciliation email accepted tenant_id=%s", tenant_id)
         else:
             email_record.status = "failed"
             email_record.error_message = error_msg or "SMTP delivery failed"
-            logger.error("Failed sending reconciliation report to recipient=%s: %s", recipient_email, error_msg)
+            logger.error("Reconciliation email submission failed tenant_id=%s", tenant_id)
 
         session.add(email_record)
         session.commit()
@@ -146,8 +168,10 @@ class EmailService:
 
         if locale_code == "sw":
             subject = f"Tahadhari ya PesaGuard: Kipindi Kilichopandishwa - {anomaly}"
+            preheader = "Kagua maelezo ya tukio na hali ya sasa ya tahadhari."
         else:
             subject = f"PesaGuard Alert: Incident Escalated - {anomaly}"
+            preheader = "Review the incident details and current escalation status."
 
         html_content = self._build_escalation_html(incident_data, locale=locale_code)
         text_content = self._build_escalation_text(incident_data, locale=locale_code)
@@ -167,16 +191,19 @@ class EmailService:
             subject,
             html_content,
             text_content,
+            purpose="escalation",
+            idempotency_key=email_record.id,
+            preheader=preheader,
         )
 
         if success:
             email_record.status = "sent"
             email_record.sent_at = datetime.now(timezone.utc)
-            logger.info("Sent escalation alert to recipient=%s tenant_id=%s", recipient_email, tenant_id)
+            logger.info("Escalation email accepted tenant_id=%s", tenant_id)
         else:
             email_record.status = "failed"
             email_record.error_message = error_msg or "SMTP delivery failed"
-            logger.error("Failed sending escalation alert to recipient=%s: %s", recipient_email, error_msg)
+            logger.error("Escalation email submission failed tenant_id=%s", tenant_id)
 
         session.add(email_record)
         session.commit()
@@ -202,8 +229,10 @@ class EmailService:
 
         if locale_code == "sw":
             subject = f"Muhtasari wa Kila Siku wa PesaGuard - {date_str}"
+            preheader = "Kagua muhtasari wa shughuli za PesaGuard wa kila siku."
         else:
             subject = f"PesaGuard Daily Summary - {date_str}"
+            preheader = "Review the daily PesaGuard activity summary."
 
         html_content = self._build_summary_html(summary_data, locale=locale_code)
         text_content = self._build_summary_text(summary_data, locale=locale_code)
@@ -223,6 +252,9 @@ class EmailService:
             subject,
             html_content,
             text_content,
+            purpose="transactional",
+            idempotency_key=email_record.id,
+            preheader=preheader,
         )
 
         if success:
@@ -244,6 +276,14 @@ class EmailService:
 
     def configuration_error(self) -> Optional[str]:
         """Validate delivery configuration without opening a connection."""
+        if self.email_provider == "resend":
+            if self.resend_client is None or not self.resend_client.api_key:
+                return "Resend configuration missing: RESEND_API_KEY is required"
+            if not is_pesaguard_email_address(self.from_email):
+                return "Resend sender must use the verified pesaguard.co.ke domain"
+            return None
+        if self.email_provider != "smtp":
+            return "PESAGUARD_EMAIL_PROVIDER must be either resend or smtp"
         if not self.smtp_server.strip() or not self.from_email.strip():
             return "SMTP configuration missing: SMTP_HOST and SMTP_FROM_EMAIL are required"
         if bool(self.username) != bool(self.password):
@@ -252,15 +292,31 @@ class EmailService:
             return "SMTP delivery requires TLS"
         return None
 
+    @property
+    def is_configured(self) -> bool:
+        return self.configuration_error() is None
+
     def send_email(
         self,
         recipient_email: str,
         subject: str,
         html_content: str,
         text_content: Optional[str] = None,
+        *,
+        purpose: str = "transactional",
+        idempotency_key: str | None = None,
+        preheader: str | None = None,
     ) -> tuple[bool, Optional[str]]:
-        """Send a general transactional email through the configured SMTP transport."""
-        return self._send_email(recipient_email, subject, html_content, text_content)
+        """Send a general transactional email through the configured provider."""
+        return self._send_email(
+            recipient_email,
+            subject,
+            html_content,
+            text_content,
+            purpose=purpose,
+            idempotency_key=idempotency_key,
+            preheader=preheader,
+        )
 
     def _send_email(
         self,
@@ -268,22 +324,57 @@ class EmailService:
         subject: str,
         html_content: str,
         text_content: Optional[str] = None,
+        *,
+        purpose: str = "transactional",
+        idempotency_key: str | None = None,
+        preheader: str | None = None,
     ) -> tuple[bool, Optional[str]]:
-        """Synchronous SMTP transport helper; never expose provider responses."""
+        """Submit email through the configured provider without exposing responses."""
         error = self.configuration_error()
         if error:
             logger.error("%s", error)
             return False, error
+        branded_html = render_branded_email_html(
+            subject,
+            html_body=html_content,
+            text_body=text_content,
+            preheader=preheader,
+        )
+        sender, reply_to = addresses_for_purpose(purpose)
+        if purpose == "transactional" and self.email_provider == "resend":
+            sender = self.from_email
+        if self.email_provider == "resend":
+            try:
+                if self.resend_client is None:
+                    raise ResendAPIError("Resend is not configured", code="RESEND_NOT_CONFIGURED", retryable=False)
+                self.resend_client.send_message({
+                    "to": recipient_email,
+                    "from_email": f"{self.from_name} <{sender}>",
+                    "reply_to": reply_to,
+                    "subject": subject,
+                    "html": branded_html,
+                    "text": text_content or "",
+                    "preheader": preheader,
+                    "idempotency_key": idempotency_key,
+                })
+                return True, None
+            except ResendAPIError as exc:
+                logger.error("Resend delivery failed code=%s retryable=%s", exc.code, exc.retryable)
+                return False, "Email delivery failed"
+            except Exception as exc:
+                logger.error("Resend delivery failed error_type=%s", type(exc).__name__)
+                return False, "Email delivery failed"
         phase = "message_build"
         try:
             msg = MIMEMultipart("alternative")
             msg["Subject"] = subject
             msg["From"] = f"{self.from_name} <{self.from_email}>"
             msg["To"] = recipient_email
+            msg["Reply-To"] = reply_to
 
             if text_content:
                 msg.attach(MIMEText(text_content, "plain", "utf-8"))
-            msg.attach(MIMEText(html_content, "html", "utf-8"))
+            msg.attach(MIMEText(branded_html, "html", "utf-8"))
 
             phase = "connection"
             if self.use_ssl:
@@ -341,23 +432,23 @@ class EmailService:
         <table style="border-collapse: collapse; width: 100%; max-width: 600px; margin: 20px 0;">
             <tr style="background: #f8f9fa;">
                 <td style="padding: 12px; border: 1px solid #dee2e6;"><strong>{total_label}</strong></td>
-                <td style="padding: 12px; border: 1px solid #dee2e6;">{data.get('total_discrepancies', 0)}</td>
+                <td style="padding: 12px; border: 1px solid #dee2e6;">{escape(str(data.get('total_discrepancies', 0)))}</td>
             </tr>
             <tr>
                 <td style="padding: 12px; border: 1px solid #dee2e6;"><strong>{resolved_label}</strong></td>
-                <td style="padding: 12px; border: 1px solid #dee2e6; color: #28a745;">{data.get('resolved', 0)}</td>
+                <td style="padding: 12px; border: 1px solid #dee2e6; color: #28a745;">{escape(str(data.get('resolved', 0)))}</td>
             </tr>
             <tr style="background: #f8f9fa;">
                 <td style="padding: 12px; border: 1px solid #dee2e6;"><strong>{pending_label}</strong></td>
-                <td style="padding: 12px; border: 1px solid #dee2e6; color: #dc3545;">{data.get('pending', 0)}</td>
+                <td style="padding: 12px; border: 1px solid #dee2e6; color: #dc3545;">{escape(str(data.get('pending', 0)))}</td>
             </tr>
             <tr>
                 <td style="padding: 12px; border: 1px solid #dee2e6;"><strong>{sla_label}</strong></td>
-                <td style="padding: 12px; border: 1px solid #dee2e6;">{data.get('sla_compliance', 'N/A')}%</td>
+                <td style="padding: 12px; border: 1px solid #dee2e6;">{escape(str(data.get('sla_compliance', 'N/A')))}%</td>
             </tr>
             <tr style="background: #f8f9fa;">
                 <td style="padding: 12px; border: 1px solid #dee2e6;"><strong>{avg_label}</strong></td>
-                <td style="padding: 12px; border: 1px solid #dee2e6;">{data.get('avg_resolution_time', 'N/A')} minutes</td>
+                <td style="padding: 12px; border: 1px solid #dee2e6;">{escape(str(data.get('avg_resolution_time', 'N/A')))} minutes</td>
             </tr>
         </table>
         <p style="margin-top: 30px; color: #6c757d; font-size: 12px;">
@@ -404,11 +495,11 @@ class EmailService:
     <body style="font-family: Arial, sans-serif; color: #333; line-height: 1.5; padding: 20px;">
         <h2 style="color: #d32f2f;">{title}</h2>
         <div style="background: #fff3cd; padding: 15px; border-left: 4px solid #ffc107; margin: 20px 0;">
-            <p><strong>{anomaly_label}:</strong> {incident_data.get('anomaly_type', 'Unknown')}</p>
-            <p><strong>{severity_label}:</strong> {str(incident_data.get('severity', 'Unknown')).upper()}</p>
-            <p><strong>{amount_label}:</strong> {amount_value}</p>
-            <p><strong>{trans_label}:</strong> {incident_data.get('trans_id', 'N/A')}</p>
-            <p><strong>{detected_label}:</strong> {detected_value}</p>
+            <p><strong>{anomaly_label}:</strong> {escape(str(incident_data.get('anomaly_type', 'Unknown')))}</p>
+            <p><strong>{severity_label}:</strong> {escape(str(incident_data.get('severity', 'Unknown')).upper())}</p>
+            <p><strong>{amount_label}:</strong> {escape(str(amount_value))}</p>
+            <p><strong>{trans_label}:</strong> {escape(str(incident_data.get('trans_id', 'N/A')))}</p>
+            <p><strong>{detected_label}:</strong> {escape(str(detected_value))}</p>
         </div>
         <p><strong>{action_text}</strong></p>
     </body>
@@ -434,9 +525,9 @@ class EmailService:
     <head><meta charset="utf-8"></head>
     <body style="font-family: Arial, sans-serif; color: #333; padding: 20px;">
         <h2 style="color: #0b3d91;">{title}</h2>
-        <p>{total_label}: <strong>{summary_data.get('total_incidents', 0)}</strong></p>
-        <p>{resolved_label}: <strong>{summary_data.get('resolved_today', 0)}</strong></p>
-        <p>{pending_label}: <strong>{summary_data.get('pending', 0)}</strong></p>
+        <p>{total_label}: <strong>{escape(str(summary_data.get('total_incidents', 0)))}</strong></p>
+        <p>{resolved_label}: <strong>{escape(str(summary_data.get('resolved_today', 0)))}</strong></p>
+        <p>{pending_label}: <strong>{escape(str(summary_data.get('pending', 0)))}</strong></p>
     </body>
 </html>"""
 

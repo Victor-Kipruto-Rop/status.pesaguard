@@ -73,16 +73,16 @@ At minimum, validate syntax and imports, focused unit behavior, cross-tenant iso
 
 ## Implemented CI/CD pipeline
 
-`../../../.github/workflows/backend-release.yml` is the release path for `staging` and `main`:
+`../../../.github/workflows/backend-release.yml` is the active release path:
 
-1. Type-check/build the developer-platform frontend, compile Python, apply Alembic migrations to a disposable PostgreSQL service, and run the backend test suite.
+1. Type-check/build the tracked PesaGuard dashboard, compile Python, apply Alembic migrations to a disposable PostgreSQL service, and run the backend test suite.
 2. Build and publish the backend image to GHCR, scan that exact digest with Trivy, and retain an SBOM for it.
-3. On `staging`, request the immutable digest through Render's deploy API, wait for that exact deployment ID to become `live`, then require `status: "ok"` from `STAGING_HEALTH_URL`.
-4. On `main`, deploy that run's same digest to staging, wait for its deployment ID and verify health before promoting it to production; wait for the production deployment ID and require `status: "ok"` from `PRODUCTION_HEALTH_URL`.
+3. A push to `staging` deploys its immutable digest through Render, waits for that deployment ID to become `live`, then requires `status: "ok"` from `STAGING_HEALTH_URL`.
+4. A push to `main` runs verification and publishes an image but does not deploy it. To promote, manually dispatch the workflow from `staging` with `promote_production=true`. That run verifies and health-checks the staged digest before deploying that same digest to production; the protected `production` environment requires approval.
 
 Release jobs that deploy environments share a concurrency group to prevent `staging` and `main` workflows from racing on the same staging service. Pull-request verification runs use per-PR groups and do not serialize unrelated checks.
 
-Configure these secrets in the GitHub environments:
+Configure these secrets in the GitHub environments from the approved secret store. Do not add secret values to the repository, workflow files, or chat:
 
 - `staging`: `RENDER_API_KEY`, `RENDER_SERVICE_ID`, `STAGING_HEALTH_URL`
 - `production`: `RENDER_API_KEY`, `RENDER_SERVICE_ID`, `PRODUCTION_HEALTH_URL`
@@ -91,6 +91,6 @@ For production Developer Platform API-key operations, configure the same indepen
 
 Payment/transaction functionality is not production-ready merely because an API route, UI, schema, or callback handler exists. Keep any capability without verified provider acceptance, durable idempotency, reconciliation and recovery disabled or label it clearly as unavailable. No production promotion is permitted on the basis of UI/API surface alone.
 
-Configure each Render service as an image-backed service for the exact GHCR image emitted by the workflow, with pull credentials if the package is private. The workflow submits the full `@sha256:` reference through Render's `imageUrl` API field, not a deploy hook that might ignore the image. Configure required reviewers and branch restrictions on both GitHub environments; naming an environment in workflow YAML alone does not enforce approvals. The `staging` environment must permit both `staging` and `main` branches because main is staged and health-checked before production promotion; `production` should permit only `main`. Verify the settings and secrets in GitHub before relying on deployment protection. Rollback follows [ROLLBACK.md](ROLLBACK.md).
+Configure each Render service as an image-backed service for the exact GHCR image emitted by the workflow, with pull credentials if the package is private. The workflow submits the full `@sha256:` reference through Render's `imageUrl` API field, not a deploy hook that might ignore the image. The GitHub `staging` environment is restricted to the `staging` branch. The `production` environment is also restricted to `staging`, requires `Victor-Kipruto-Rop` to approve, prevents self-review, and does not allow administrator bypass. Rollback follows [ROLLBACK.md](ROLLBACK.md).
 
-**Current repository gate (checked 2026-10-07):** The remote repository had no `staging` or `production` environment, `main` was not branch-protected, and GitHub did not yet register `backend-release.yml`; the local workflow file was untracked. Do not publish it to `main` until branch protection, environment reviewers/branch policies, Render service settings, and required secret names/values have been provisioned and verified. The workflow's `main` push path promotes to production, so an unguarded push is not a safe validation method.
+**Current staging gate (checked 2026-10-17):** GitHub environments and branch restrictions are configured, but the remote `staging` branch does not exist and the required environment secrets have not been configured. The workflow fixes in the current checkout are uncommitted, and the latest recorded remote release run (2026-10-13) failed both frontend and backend verification; staging deployment and image publication were skipped. Do not treat the backend as staged until the release workflow is merged to the current repository head, the required secrets are provisioned, CI passes, and the staging deployment and smoke checks are recorded. The `main` push path no longer promotes to production in the local workflow; production promotion is a separate manual dispatch from `staging` after its health check and reviewer approval.

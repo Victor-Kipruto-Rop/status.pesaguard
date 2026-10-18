@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy.orm import Session
 
+from email_addresses import EMAIL_ADDRESSES, is_pesaguard_email_address
+from resend_email import ResendAPIError, ResendEmailClient
 from ..core.enums import CommunicationChannel
+from ..core.exceptions import PermanentCommunicationError, TransientCommunicationError
 from ..core.interfaces import CommunicationProvider, NotificationRequest, ProviderMessage
 from .factory import build_default_provider_for_channel
 from .router import ProviderRouter
@@ -47,6 +51,61 @@ class MailgunEmailProvider(_BaseCloudEmailProvider):
         super().__init__(client, from_email=from_email, provider_name=self.name)
 
 
+class ResendEmailProvider(SmtpEmailProvider):
+    """Resend REST adapter for durable communications-outbox messages."""
+
+    name = "resend_email"
+
+    def __init__(
+        self,
+        client: Any,
+        *,
+        from_email: str = EMAIL_ADDRESSES.no_reply,
+        reply_to: str = EMAIL_ADDRESSES.support,
+    ):
+        super().__init__(client, from_email=from_email)
+        self.reply_to = reply_to
+
+    def _send(self, request: NotificationRequest) -> ProviderMessage:
+        recipient = self.validate_recipient(request.channel, request.recipient)
+        variables = dict(request.variables or {})
+        subject = variables.get("subject") or "PesaGuard notification"
+        message: dict[str, Any] = {
+            "to": recipient,
+            "from_email": self.from_email,
+            "reply_to": self.reply_to,
+            "subject": subject,
+            "text": variables.get("text") if isinstance(variables.get("text"), str) else request.message,
+            "idempotency_key": request.idempotency_key,
+        }
+        html = variables.get("html")
+        if isinstance(html, str) and html:
+            message["html"] = html
+        try:
+            response = self.client.send_message(message)
+        except ResendAPIError as exc:
+            error_type = TransientCommunicationError if exc.retryable else PermanentCommunicationError
+            raise error_type(str(exc), code=exc.code) from exc
+        except TimeoutError as exc:
+            raise TransientCommunicationError("Resend request timed out", code="PROVIDER_TIMEOUT") from exc
+        except ConnectionError as exc:
+            raise TransientCommunicationError("Resend request failed", code="PROVIDER_REQUEST_ERROR") from exc
+        except Exception as exc:
+            raise TransientCommunicationError("Resend request failed", code="PROVIDER_REQUEST_ERROR") from exc
+
+        message_id = response.get("message_id") if isinstance(response, dict) else None
+        if not isinstance(message_id, str) or not message_id:
+            raise PermanentCommunicationError(
+                "Resend returned an invalid response",
+                code="PROVIDER_INVALID_RESPONSE",
+            )
+        return ProviderMessage(
+            provider=self.name,
+            provider_message_id=message_id,
+            status="accepted",
+        )
+
+
 class EmailProviderRegistry:
     """Explicit registry that names the enterprise email providers in the repo.
 
@@ -66,6 +125,8 @@ class EmailProviderRegistry:
             "sendgrid": SendGridEmailProvider,
             "mailgun_email": MailgunEmailProvider,
             "mailgun": MailgunEmailProvider,
+            "resend_email": ResendEmailProvider,
+            "resend": ResendEmailProvider,
             "mock_email": MockEmailProvider,
             "mock": MockEmailProvider,
             "email_mock": MockEmailProvider,
@@ -152,9 +213,20 @@ class EmailProviderConfig:
     directly in a way that is discoverable for operators and tests.
     """
 
-    provider: str = "smtp_email"
-    from_email: str = "no-reply@pesaguard.co.ke"
+    provider: str = "resend"
+    from_email: str = EMAIL_ADDRESSES.no_reply
     gateway_client: Any | None = None
+    api_key: str | None = None
+    reply_to: str = EMAIL_ADDRESSES.support
+
+    @classmethod
+    def from_environment(cls) -> "EmailProviderConfig":
+        return cls(
+            provider=os.getenv("PESAGUARD_EMAIL_PROVIDER", "resend").strip().lower(),
+            from_email=os.getenv("PESAGUARD_EMAIL_FROM", EMAIL_ADDRESSES.no_reply).strip(),
+            api_key=os.getenv("RESEND_API_KEY"),
+            reply_to=os.getenv("PESAGUARD_EMAIL_REPLY_TO", EMAIL_ADDRESSES.support).strip(),
+        )
 
 
 class EmailProviderFactory:
@@ -174,6 +246,21 @@ class EmailProviderFactory:
             if self.gateway_client is None:
                 raise RuntimeError("email provider requires an injected gateway client")
             return provider_cls(self.gateway_client, from_email=self.config.from_email)
+        if provider_name in {"resend_email", "resend"}:
+            client = self.gateway_client or self.config.gateway_client
+            if client is None:
+                client = ResendEmailClient(api_key=self.config.api_key)
+            if isinstance(client, ResendEmailClient) and not client.api_key:
+                raise RuntimeError("Resend email provider requires RESEND_API_KEY")
+            if not is_pesaguard_email_address(self.config.from_email) or not is_pesaguard_email_address(
+                self.config.reply_to
+            ):
+                raise RuntimeError("Resend sender and reply-to must use valid pesaguard.co.ke addresses")
+            return provider_cls(
+                client,
+                from_email=self.config.from_email,
+                reply_to=self.config.reply_to,
+            )
         if provider_name in {"mock_email", "mock", "email_mock"}:
             return provider_cls(self.gateway_client, from_email=self.config.from_email)
         raise ValueError(f"unsupported explicit email provider: {self.config.provider}")
@@ -303,11 +390,13 @@ class EmailProviderHealth:
 
     def __init__(self, score: float = 100.0):
         self.score = score
+        self.provider = "smtp_email"
         self.samples = 0
         self.failures = 0
         self.latencies_ms: list[int] = []
 
     def register_result(self, provider: str, failed: bool = False, latency_ms: int = 0) -> None:
+        self.provider = provider
         self.samples += 1
         if failed:
             self.failures += 1
@@ -319,7 +408,7 @@ class EmailProviderHealth:
 
     def snapshot(self) -> dict[str, Any]:
         return {
-            "provider": "smtp_email",
+            "provider": self.provider,
             "health_score": self.score,
             "status": "healthy" if self.score >= 90 else "degraded",
             "samples": self.samples,

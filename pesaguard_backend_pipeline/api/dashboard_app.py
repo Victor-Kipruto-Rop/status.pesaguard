@@ -2013,6 +2013,22 @@ def openapi_spec():
         "response_header": "X-API-Version",
         "breaking_change_policy": "Introduce a new major version and retain supported prior versions.",
     }
+    provider_path_parameters = [
+        {
+            "name": "provider_id",
+            "in": "path",
+            "required": True,
+            "schema": {"type": "string", "minLength": 1},
+        }
+    ]
+    discrepancy_path_parameters = [
+        {
+            "name": "discrepancy_id",
+            "in": "path",
+            "required": True,
+            "schema": {"type": "string", "minLength": 1},
+        }
+    ]
     dashboard_paths = {
         "/public/status": {
             "get": {
@@ -2044,19 +2060,23 @@ def openapi_spec():
             "post": {"summary": "Register a payment provider", "responses": {"201": {"description": "Provider registered"}}},
         },
         "/providers/{provider_id}": {
+            "parameters": provider_path_parameters,
             "get": {"summary": "Get provider details", "responses": {"200": {"description": "Provider details"}}},
             "patch": {"summary": "Update provider configuration", "responses": {"200": {"description": "Provider updated"}}},
         },
         "/providers/{provider_id}/connection": {
+            "parameters": provider_path_parameters,
             "post": {"summary": "Update provider connection status", "responses": {"200": {"description": "Connection status updated"}}},
         },
         "/providers/{provider_id}/health": {
+            "parameters": provider_path_parameters,
             "post": {"summary": "Update provider health status", "responses": {"200": {"description": "Health status updated"}}},
         },
         "/discrepancies": {
             "get": {"summary": "List discrepancies with advanced filters", "responses": {"200": {"description": "Paginated list"}}},
         },
         "/discrepancies/{discrepancy_id}/resolve": {
+            "parameters": discrepancy_path_parameters,
             "post": {"summary": "Resolve single discrepancy", "responses": {"200": {"description": "Successfully resolved"}}},
         },
         "/discrepancies/bulk-resolve": {

@@ -23,6 +23,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 from uuid import uuid4
 
 from data_protection import unprotect_payload
+from ingestion import IngestionError
 from models import (
     AccountBalance,
     AccountRelationship,
@@ -33,6 +34,7 @@ from models import (
 from normalization import (
     CURRENCY_MINOR_UNITS,
     DEFAULT_CURRENCY,
+    NormalizationError,
     normalize_amount,
     normalize_currency,
     quantize_money,
@@ -105,7 +107,7 @@ class CustomerLedgerDispatcher:
         """Return True when the derived ledger rows already exist for this pair."""
         internal_ref = str(payload.get("internal_ref") or "")
         phone_number = str(payload.get("phone_number") or "")
-        currency = normalize_currency(str(payload.get("currency") or "KES"))
+        currency = normalize_currency(str(payload.get("currency") or DEFAULT_CURRENCY))
         match = (
             self.session.query(Transaction)
             .filter(
@@ -138,7 +140,7 @@ class CustomerLedgerDispatcher:
         internal_ref = str(payload.get("internal_ref") or "")
         phone_number = str(payload.get("phone_number") or "")
         transaction_time = str(payload.get("timestamp") or "")
-        currency = normalize_currency(str(payload.get("currency") or "KES"))
+        currency = normalize_currency(str(payload.get("currency") or DEFAULT_CURRENCY))
         provider_account_id = str(payload.get("provider_account_id") or account_id)
         matched_status = _match_status(payload)
 
@@ -157,6 +159,7 @@ class CustomerLedgerDispatcher:
             account_id=account_id,
             role=role,
             matched_status=matched_status,
+            currency=currency,
             transaction_time=transaction_time,
             pair_id=account_id,
         )
@@ -197,13 +200,14 @@ def _upsert_from_pair(
     account_id: str,
     role: str,
     matched_status: str,
+    currency: str,
     transaction_time: str,
     pair_id: Optional[str],
 ) -> None:
     """Idempotently upsert the derived customer ledger for one pair."""
     account_guard(session=session, tenant_id=tenant_id, customer_key=customer_key, account_id=account_id)
 
-    currency = normalize_currency(_currency_for_transaction(transaction_time))
+    currency = normalize_currency(currency)
 
     customer = _fetch_or_create_customer(
         session=session,
@@ -345,8 +349,6 @@ def _resolve_account(
 
 
 
-
-def _currency_for_transaction(transaction_time: Optional[str]) -> str:
 
 def _status_value(status: str) -> str:
     return str(status).upper()

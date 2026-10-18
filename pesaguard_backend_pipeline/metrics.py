@@ -679,9 +679,14 @@ def _query_live_metrics() -> Dict[str, Any]:
         "transaction_outbox_pending": 0,
         "reconciliation_outbox_pending": 0,
         "reconciliation_processing": 0,
+        "notification_queue_depth": 0,
+        "notification_deliveries_total": 0,
+        "notification_deliveries_failed": 0,
+        "notification_deliveries_pending": 0,
         "kafka_consumer_lag": 0,
         "kafka_consumer_lag_max": 0,
         "reconciliation_latency_p95_seconds": 0.0,
+        "mpesa_ingestion_latency_p95_seconds": 0.0,
         "reconciliation_matches": {},
         "reconciliation_match_latency_ms": 0.0,
         "certification_cases": 0,
@@ -709,6 +714,14 @@ def _query_live_metrics() -> Dict[str, Any]:
             Transaction,
             TransactionOutbox,
         )
+        try:
+            from communications.models import (
+                CommunicationNotification,
+                CommunicationOutboxEntry,
+            )
+        except Exception:
+            CommunicationNotification = None
+            CommunicationOutboxEntry = None
 
         global _metrics_engine
         if _metrics_engine is None:
@@ -731,6 +744,18 @@ def _query_live_metrics() -> Dict[str, Any]:
             metrics_data["transaction_outbox_pending"] = session.query(func.count(TransactionOutbox.id)).filter(TransactionOutbox.status.in_(["pending", "failed", "processing"])).scalar() or 0
             metrics_data["reconciliation_outbox_pending"] = session.query(func.count(ReconciliationOutbox.id)).filter(ReconciliationOutbox.status.in_(["pending", "failed", "processing"])).scalar() or 0
             metrics_data["reconciliation_processing"] = session.query(func.count(ProcessedTransaction.id)).filter(ProcessedTransaction.reconciliation_status == "processing").scalar() or 0
+            metrics_data["notification_queue_depth"] = (
+                session.query(func.count(CommunicationOutboxEntry.id)).filter(CommunicationOutboxEntry.status.in_(["pending", "retrying", "leased"])).scalar() or 0
+            ) if CommunicationOutboxEntry is not None else 0
+            metrics_data["notification_deliveries_total"] = (
+                session.query(func.count(CommunicationNotification.id)).filter(CommunicationNotification.status == "delivered").scalar() or 0
+            ) if CommunicationNotification is not None else 0
+            metrics_data["notification_deliveries_failed"] = (
+                session.query(func.count(CommunicationNotification.id)).filter(CommunicationNotification.status.in_(["failed", "dead_letter", "bounced", "complained"])).scalar() or 0
+            ) if CommunicationNotification is not None else 0
+            metrics_data["notification_deliveries_pending"] = (
+                session.query(func.count(CommunicationNotification.id)).filter(CommunicationNotification.status.in_(["created", "queued", "processing", "accepted", "submitted", "sent"])).scalar() or 0
+            ) if CommunicationNotification is not None else 0
             if session.bind.dialect.name == "postgresql":
                 metrics_data["db_connections"] = int(session.execute(text("SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()")).scalar() or 0)
                 metrics_data["db_locks"] = int(session.execute(text("SELECT count(*) FROM pg_locks WHERE NOT granted")).scalar() or 0)
@@ -759,6 +784,14 @@ def _query_live_metrics() -> Dict[str, Any]:
                 "WHERE processing_time_ms IS NOT NULL"
             )).scalar() or 0
             metrics_data["reconciliation_latency_p95_seconds"] = float(latency_ms) / 1000
+            mpesa_latency_ms = session.execute(text(
+                "SELECT COALESCE(percentile_cont(0.95) WITHIN GROUP "
+                "(ORDER BY processing_time_ms), 0) "
+                "FROM processed_transactions "
+                "WHERE processing_time_ms IS NOT NULL "
+                "AND provider_account_id ILIKE '%mpesa%'"
+            )).scalar() or 0
+            metrics_data["mpesa_ingestion_latency_p95_seconds"] = float(mpesa_latency_ms) / 1000
             status_rows = (
                 session.query(ReconciliationMatch.status, func.count(ReconciliationMatch.id))
                 .group_by(ReconciliationMatch.status)
@@ -962,12 +995,47 @@ def build_metrics_payload() -> str:
         )
         reconciliation_processing.set(live_data["reconciliation_processing"])
 
+        notification_queue_depth = Gauge(
+            "pesaguard_notification_queue_depth",
+            "Notification outbox entries pending, retrying, or leased",
+            registry=registry,
+        )
+        notification_queue_depth.set(live_data["notification_queue_depth"])
+
+        notification_deliveries_total = Gauge(
+            "pesaguard_notification_deliveries_total",
+            "Total notification deliveries that reached delivered state",
+            registry=registry,
+        )
+        notification_deliveries_total.set(live_data["notification_deliveries_total"])
+
+        notification_deliveries_failed = Gauge(
+            "pesaguard_notification_deliveries_failed",
+            "Total notification deliveries that failed, dead-lettered, bounced, or were complained",
+            registry=registry,
+        )
+        notification_deliveries_failed.set(live_data["notification_deliveries_failed"])
+
+        notification_deliveries_pending = Gauge(
+            "pesaguard_notification_deliveries_pending",
+            "Total notification deliveries pending acceptance or submission",
+            registry=registry,
+        )
+        notification_deliveries_pending.set(live_data["notification_deliveries_pending"])
+
         reconciliation_latency = Gauge(
             "pesaguard_reconciliation_latency_p95_seconds",
             "95th percentile reconciliation processing time in seconds",
             registry=registry,
         )
         reconciliation_latency.set(live_data["reconciliation_latency_p95_seconds"])
+
+        mpesa_ingestion_latency = Gauge(
+            "pesaguard_mpesa_ingestion_latency_p95_seconds",
+            "95th percentile M-Pesa callback ingestion latency in seconds",
+            registry=registry,
+        )
+        mpesa_ingestion_latency.set(live_data["mpesa_ingestion_latency_p95_seconds"])
         reconciliation_matches = Gauge(
             "pesaguard_reconciliation_matches_total",
             "Reconciliation decisions by canonical status",
@@ -1058,6 +1126,9 @@ def build_metrics_payload() -> str:
         "# HELP pesaguard_reconciliation_latency_p95_seconds 95th percentile reconciliation processing time in seconds",
         "# TYPE pesaguard_reconciliation_latency_p95_seconds gauge",
         f"pesaguard_reconciliation_latency_p95_seconds {live_data['reconciliation_latency_p95_seconds']}",
+        "# HELP pesaguard_mpesa_ingestion_latency_p95_seconds 95th percentile M-Pesa callback ingestion latency in seconds",
+        "# TYPE pesaguard_mpesa_ingestion_latency_p95_seconds gauge",
+        f"pesaguard_mpesa_ingestion_latency_p95_seconds {live_data['mpesa_ingestion_latency_p95_seconds']}",
         "# TYPE pesaguard_reconciliation_certification_cases gauge",
         f"pesaguard_reconciliation_certification_cases {live_data['certification_cases']}",
         "# TYPE pesaguard_reconciliation_certification_ready gauge",
@@ -1073,5 +1144,17 @@ def build_metrics_payload() -> str:
         "# HELP pesaguard_backup_age_seconds Age of the newest local database backup in seconds",
         "# TYPE pesaguard_backup_age_seconds gauge",
         f"pesaguard_backup_age_seconds {live_data['backup_age_seconds']}",
+        "# HELP pesaguard_notification_queue_depth Notification outbox entries pending, retrying, or leased",
+        "# TYPE pesaguard_notification_queue_depth gauge",
+        f"pesaguard_notification_queue_depth {live_data['notification_queue_depth']}",
+        "# HELP pesaguard_notification_deliveries_total Total notification deliveries that reached delivered state",
+        "# TYPE pesaguard_notification_deliveries_total gauge",
+        f"pesaguard_notification_deliveries_total {live_data['notification_deliveries_total']}",
+        "# HELP pesaguard_notification_deliveries_failed Total notification deliveries that failed, dead-lettered, bounced, or were complained",
+        "# TYPE pesaguard_notification_deliveries_failed gauge",
+        f"pesaguard_notification_deliveries_failed {live_data['notification_deliveries_failed']}",
+        "# HELP pesaguard_notification_deliveries_pending Total notification deliveries pending acceptance or submission",
+        "# TYPE pesaguard_notification_deliveries_pending gauge",
+        f"pesaguard_notification_deliveries_pending {live_data['notification_deliveries_pending']}",
     ]
     return "\n".join(lines) + "\n"

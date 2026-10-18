@@ -21,7 +21,12 @@
     "mpesa-1.0.json",
     "airtel-money-1.0.json",
     "bank-1.0.json",
-    "pos-merchant-1.0.json"
+    "pos-merchant-1.0.json",
+    "visa-1.0.json",
+    "mastercard-1.0.json",
+    "equity-1.0.json",
+    "kcb-1.0.json",
+    "absa-1.0.json"
   ],
   "serialization": {"events": "json", "transport": "redpanda", "registry_compatible": true, "avro_or_protobuf": "reserved for high-volume polyglot topics"}
 }

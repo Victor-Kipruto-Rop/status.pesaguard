@@ -1,0 +1,30 @@
+# PesaGuard Analytics dbt Profile
+# Copy this file to profiles.yml and fill in your credentials.
+# Never commit profiles.yml with real credentials to source control.
+
+pesaguard_analytics:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: ${PESAGUARD_DB_HOST:-localhost}
+      port: ${PESAGUARD_DB_PORT:-5432}
+      user: ${PESAGUARD_DB_USER:-pesaguard}
+      password: ${PESAGUARD_DB_PASSWORD:-change-me}
+      dbname: ${PESAGUARD_DB_NAME:-pesaguard}
+      schema: analytics
+      threads: 4
+      keepalives_idle: 300
+      sslmode: require
+
+    production:
+      type: postgres
+      host: ${PESAGUARD_DB_HOST}
+      port: ${PESAGUARD_DB_PORT:-5432}
+      user: ${PESAGUARD_DB_USER}
+      password: ${PESAGUARD_DB_PASSWORD}
+      dbname: ${PESAGUARD_DB_NAME}
+      schema: analytics
+      threads: 8
+      keepalives_idle: 300
+      sslmode: require

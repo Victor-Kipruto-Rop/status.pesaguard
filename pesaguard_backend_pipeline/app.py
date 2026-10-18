@@ -39,6 +39,9 @@ from ingestion import IngestionError, IngestionService
 from auth_rbac import AuthRBAC, get_current_user, require_auth
 from transaction_routes import create_transaction_blueprint
 from ledger_routes import create_ledger_blueprint
+from transformation_routes import create_transformation_blueprint
+from api_routes import bp as api_v1_bp
+from alert_api_routes import bp as alert_bp
 
 configure_logging()
 logger = logging.getLogger("pesaguard.webhook")
@@ -49,12 +52,18 @@ init_sentry(service="webhook", provider="mpesa")
 app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("PESAGUARD_WEBHOOK_MAX_BODY_BYTES", "1048576"))
 
 event_store = EventStore()
+app.extensions["pesaguard_event_store"] = event_store
 ingestion_service = IngestionService(event_store)
 webhook_rate_limiter = RateLimiter()
 webhook_rate_limiter.set_limits(int(os.getenv("PESAGUARD_WEBHOOK_RATE_LIMIT_PER_MINUTE", "30")))
 
 
 def _transaction_read_session():
+    event_store._ensure_ready()
+    return event_store.Session()
+
+
+def _transformation_read_session():
     event_store._ensure_ready()
     return event_store.Session()
 
@@ -69,6 +78,13 @@ app.register_blueprint(
         lambda: event_store.Session(),
     )
 )
+
+app.register_blueprint(
+    create_transformation_blueprint(_transformation_read_session)
+)
+
+app.register_blueprint(api_v1_bp)
+app.register_blueprint(alert_bp)
 
 
 tenant_store = TenantSettingsStore()

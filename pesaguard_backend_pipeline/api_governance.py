@@ -195,10 +195,13 @@ class OpenAPISpecService:
                     operation_ids.add(operation_id)
 
         self._validate_local_refs(document)
+        self._validate_path_parameters(document)
 
     def _validate_local_refs(self, document: Mapping[str, Any]) -> None:
         def walk(value: Any) -> None:
             if isinstance(value, dict):
+                if any(not isinstance(key, str) or not key for key in value):
+                    raise OpenAPIContractError("OpenAPI objects must have non-empty string keys")
                 ref = value.get("$ref")
                 if isinstance(ref, str) and ref.startswith("#/"):
                     target: Any = document
@@ -217,6 +220,39 @@ class OpenAPISpecService:
                     walk(child)
 
         walk(document)
+
+    def _validate_path_parameters(self, document: Mapping[str, Any]) -> None:
+        """Require every path placeholder to have a matching required parameter."""
+        paths = document.get("paths", {})
+        for path, path_item in paths.items():
+            placeholders = set(re.findall(r"\{([^{}]+)\}", path))
+            if not placeholders:
+                continue
+            path_parameters = path_item.get("parameters", [])
+            for method, operation in path_item.items():
+                if not isinstance(method, str) or method.lower() not in _METHODS:
+                    continue
+                parameters = path_parameters + operation.get("parameters", [])
+                names: set[str] = set()
+                for parameter in parameters:
+                    ref = parameter.get("$ref") if isinstance(parameter, dict) else None
+                    if isinstance(ref, str) and ref.startswith("#/"):
+                        target: Any = document
+                        for part in ref[2:].split("/"):
+                            key = part.replace("~1", "/").replace("~0", "~")
+                            target = target[int(key)] if isinstance(target, list) else target[key]
+                        parameter = target
+                    if isinstance(parameter, dict) and parameter.get("in") == "path":
+                        name = parameter.get("name")
+                        if not isinstance(name, str) or parameter.get("required") is not True:
+                            raise OpenAPIContractError(
+                                f"Path parameter on {method.upper()} {path} must be named and required"
+                            )
+                        names.add(name)
+                if names != placeholders:
+                    raise OpenAPIContractError(
+                        f"Path parameters for {method.upper()} {path} must match its placeholders"
+                    )
 
 
 class ApiErrorService:

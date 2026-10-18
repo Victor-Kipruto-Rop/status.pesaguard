@@ -244,6 +244,75 @@ class LineageRecord(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
 
+class TransformationResource(Base):
+    """A version-controlled transformation resource (dataset, component, workflow)."""
+
+    __tablename__ = "transformation_resources"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "resource_type",
+            "name",
+            name="uq_transformation_resource_tenant_type_name",
+        ),
+        Index(
+            "ix_transformation_resources_tenant_type",
+            "tenant_id",
+            "resource_type",
+            "name",
+        ),
+        CheckConstraint("tenant_id IS NOT NULL AND tenant_id <> ''", name="ck_transformation_resources_tenant_id_nonempty"),
+        CheckConstraint("name IS NOT NULL AND name <> ''", name="ck_transformation_resources_name_nonempty"),
+        CheckConstraint("resource_type IN ('dataset', 'component', 'workflow')", name="ck_transformation_resources_type"),
+        CheckConstraint("current_version >= 1", name="ck_transformation_resources_version_positive"),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: f"tres_{uuid.uuid4().hex}")
+    tenant_id = Column(String, nullable=False)
+    resource_type = Column(String(32), nullable=False)
+    name = Column(String(128), nullable=False)
+    description = Column(Text, nullable=True)
+    tags = Column(JSON, nullable=False, default=list, server_default="[]")
+    current_version = Column(Integer, nullable=False, default=1, server_default="1")
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class TransformationResourceVersion(Base):
+    """One immutable version of a transformation resource definition."""
+
+    __tablename__ = "transformation_resource_versions"
+    __table_args__ = (
+        UniqueConstraint("resource_id", "version", name="uq_transformation_resource_version"),
+        Index(
+            "ix_transformation_versions_tenant_resource",
+            "tenant_id",
+            "resource_id",
+            "version",
+        ),
+        ForeignKeyConstraint(
+            ["resource_id"],
+            ["transformation_resources.id"],
+            name="fk_transformation_versions_resource",
+        ),
+        CheckConstraint("tenant_id IS NOT NULL AND tenant_id <> ''", name="ck_transformation_versions_tenant_id_nonempty"),
+        CheckConstraint("version >= 1", name="ck_transformation_versions_version_positive"),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: f"trev_{uuid.uuid4().hex}")
+    resource_id = Column(String, nullable=False)
+    tenant_id = Column(String, nullable=False)
+    version = Column(Integer, nullable=False)
+    definition = Column(JSON, nullable=False)
+    definition_hash = Column(String(64), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
 class IdempotencyRecord(Base):
     """Durable request identity ledger shared by API and provider ingestion."""
 
@@ -2113,6 +2182,175 @@ class ScheduledJob(Base):
     job_key = Column(String(255), nullable=False)
     task_name = Column(String(255), nullable=False)
     interval_seconds = Column(Integer, nullable=False)
+    payload = Column(JSON, nullable=False, default=dict, server_default="{}")
+    enabled = Column(Boolean, nullable=False, default=True, server_default="true")
+    next_run_at = Column(DateTime(timezone=True), nullable=True)
+    timeout_seconds = Column(Integer, nullable=True)
+    run_count = Column(Integer, nullable=False, default=0, server_default="0")
+    failure_count = Column(Integer, nullable=False, default=0, server_default="0")
+    max_attempts = Column(Integer, nullable=False, default=3, server_default="3")
+    retry_backoff_seconds = Column(Integer, nullable=False, default=30, server_default="30")
+
+
+class Alert(Base):
+    """Alert records for operational and fraud notifications."""
+
+    __tablename__ = "alerts"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_alert_tenant_id"),
+        Index("uq_alert_tenant_fingerprint", "tenant_id", "fingerprint", unique=True),
+        Index("ix_alerts_tenant_severity", "tenant_id", "severity", "created_at"),
+        Index("ix_alerts_tenant_status", "tenant_id", "status"),
+        Index("ix_alerts_tenant_transaction", "tenant_id", "transaction_id"),
+        Index("ix_alerts_tenant_assignee_status", "tenant_id", "assigned_to", "status"),
+        CheckConstraint("tenant_id IS NOT NULL AND tenant_id <> ''", name="ck_alerts_tenant_id_nonempty"),
+        CheckConstraint("severity IN ('info', 'warning', 'critical')", name="ck_alerts_severity"),
+        CheckConstraint("status IN ('open', 'acknowledged', 'resolved', 'suppressed')", name="ck_alerts_status"),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: f"alert_{uuid.uuid4().hex}")
+    tenant_id = Column(String, nullable=False)
+    alert_type = Column(String(64), nullable=False)
+    severity = Column(String(16), nullable=False)
+    status = Column(String(16), nullable=False, default="open")
+    title = Column(String(255), nullable=False)
+    message = Column(Text, nullable=True)
+    source = Column(String(64), nullable=True)
+    transaction_id = Column(String, nullable=True)
+    discrepancy_id = Column(String, nullable=True)
+    acknowledged_at = Column(DateTime(timezone=True), nullable=True)
+    acknowledged_by = Column(String(128), nullable=True)
+    assigned_to = Column(String(128), nullable=True)
+    investigation_notes = Column(Text, nullable=True)
+    resolution_note = Column(Text, nullable=True)
+    resolution_outcome = Column(String(64), nullable=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    fingerprint = Column(String(64), nullable=True)
+    duplicate_count = Column(Integer, nullable=False, default=0, server_default="0")
+    last_seen_at = Column(DateTime(timezone=True), nullable=True)
+    request_id = Column(String(128), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class AlertEvent(Base):
+    """Append-only lifecycle history for an alert and each suppressed duplicate."""
+
+    __tablename__ = "alert_events"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "event_key", name="uq_alert_event_tenant_key"),
+        Index("ix_alert_events_tenant_alert_created", "tenant_id", "alert_id", "created_at"),
+        CheckConstraint("tenant_id IS NOT NULL AND tenant_id <> ''", name="ck_alert_events_tenant_nonempty"),
+    )
+
+    id = Column(String(64), primary_key=True)
+    tenant_id = Column(String(128), nullable=False)
+    alert_id = Column(String(128), nullable=False)
+    event_key = Column(String(255), nullable=False)
+    event_type = Column(String(64), nullable=False)
+    actor = Column(String(128), nullable=False)
+    from_status = Column(String(16), nullable=True)
+    to_status = Column(String(16), nullable=True)
+    details = Column(JSON, nullable=False, default=dict, server_default="{}")
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+@event.listens_for(AlertEvent, "before_update")
+@event.listens_for(AlertEvent, "before_delete")
+def _prevent_alert_event_mutation(_mapper, _connection, _event_record):
+    raise ValueError("alert event history is append-only")
+
+
+class AlertDelivery(Base):
+    """Latest delivery state for one alert, channel, and idempotent destination."""
+
+    __tablename__ = "alert_deliveries"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "idempotency_key", name="uq_alert_delivery_tenant_idempotency"),
+        Index("ix_alert_deliveries_tenant_alert", "tenant_id", "alert_id", "channel"),
+        CheckConstraint("tenant_id IS NOT NULL AND tenant_id <> ''", name="ck_alert_deliveries_tenant_nonempty"),
+        CheckConstraint(
+            "status IN ('available', 'queued', 'processing', 'accepted', 'sent', 'delivered', 'retrying', 'failed', 'dead_letter', 'not_configured')",
+            name="ck_alert_deliveries_status",
+        ),
+          CheckConstraint("retry_generation >= 0", name="ck_alert_deliveries_retry_generation_nonnegative"),
+    )
+
+    id = Column(String(64), primary_key=True)
+    tenant_id = Column(String(128), nullable=False)
+    alert_id = Column(String(128), nullable=False)
+    channel = Column(String(32), nullable=False)
+    idempotency_key = Column(String(255), nullable=False)
+    destination_hash = Column(String(64), nullable=True)
+    communication_notification_id = Column(String(64), nullable=True)
+    status = Column(String(32), nullable=False, default="queued", server_default="queued")
+    attempt_count = Column(Integer, nullable=False, default=0, server_default="0")
+    retry_generation = Column(Integer, nullable=False, default=0, server_default="0")
+    error_code = Column(String(64), nullable=True)
+    last_error = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+class RateLimitRecord(Base):
+    """Per-tenant, per-endpoint rate-limit telemetry records."""
+
+    __tablename__ = "rate_limit_records"
+    __table_args__ = (
+        Index("ix_rate_limit_records_tenant_endpoint", "tenant_id", "endpoint", "window_start"),
+        CheckConstraint("tenant_id IS NOT NULL AND tenant_id <> ''", name="ck_rate_limit_records_tenant_id_nonempty"),
+        CheckConstraint("request_count >= 0", name="ck_rate_limit_records_count_nonnegative"),
+        CheckConstraint("blocked_count >= 0", name="ck_rate_limit_records_blocked_nonnegative"),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: f"rlr_{uuid.uuid4().hex}")
+    tenant_id = Column(String, nullable=False)
+    endpoint = Column(String(255), nullable=False)
+    window_start = Column(DateTime(timezone=True), nullable=False)
+    window_end = Column(DateTime(timezone=True), nullable=False)
+    request_count = Column(Integer, nullable=False, default=0, server_default="0")
+    blocked_count = Column(Integer, nullable=False, default=0, server_default="0")
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class ScheduledReport(Base):
+    """Scheduled report definitions for recurring report generation."""
+
+    __tablename__ = "scheduled_reports"
+    __table_args__ = (
+        Index("ix_scheduled_reports_tenant_active", "tenant_id", "active", "next_run_at"),
+        CheckConstraint("tenant_id IS NOT NULL AND tenant_id <> ''", name="ck_scheduled_reports_tenant_id_nonempty"),
+        CheckConstraint("format IN ('csv', 'json', 'pdf')", name="ck_scheduled_reports_format"),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: f"schedrep_{uuid.uuid4().hex}")
+    tenant_id = Column(String, nullable=False)
+    name = Column(String(255), nullable=False)
+    report_type = Column(String(64), nullable=False)
+    format = Column(String(16), nullable=False, default="csv")
+    schedule_cron = Column(String(128), nullable=False)
+    recipients = Column(JSON, nullable=False, default=list, server_default="[]")
+    active = Column(Boolean, nullable=False, default=True, server_default="true")
+    last_run_at = Column(DateTime(timezone=True), nullable=True)
+    next_run_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
     enabled = Column(Boolean, nullable=False, default=True, server_default="true")
     next_run_at = Column(DateTime(timezone=True), nullable=True)
     retry_at = Column(DateTime(timezone=True), nullable=True)
@@ -2397,3 +2635,87 @@ class LedgerEntry(Base):
     currency = Column(String(3), nullable=False, default="KES", server_default="KES")
     memo = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class TransactionVersion(Base):
+    """Immutable audit trail of changes to a transaction record."""
+
+    __tablename__ = "transaction_versions"
+    __table_args__ = (
+        Index("ix_transaction_versions_transaction", "tenant_id", "transaction_id", "version_number"),
+        Index("ix_transaction_versions_created_at", "tenant_id", "created_at"),
+        CheckConstraint("tenant_id IS NOT NULL AND tenant_id <> ''", name="ck_transaction_versions_tenant_id_nonempty"),
+        CheckConstraint("version_number >= 1", name="ck_transaction_versions_version_positive"),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: f"txnver_{uuid.uuid4().hex}")
+    tenant_id = Column(String, nullable=False)
+    transaction_id = Column(String, nullable=False)
+    version_number = Column(Integer, nullable=False)
+    changed_fields = Column(JSON, nullable=False, default=list, server_default="[]")
+    previous_values = Column(JSON, nullable=False, default=dict, server_default="{}")
+    new_values = Column(JSON, nullable=False, default=dict, server_default="{}")
+    changed_by = Column(String(128), nullable=True)
+    change_reason = Column(String(255), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class RiskEvent(Base):
+    """Risk and fraud events detected independently of reconciliation state."""
+
+    __tablename__ = "risk_events"
+    __table_args__ = (
+        Index("ix_risk_events_tenant_level", "tenant_id", "risk_level", "created_at"),
+        Index("ix_risk_events_tenant_transaction", "tenant_id", "transaction_id"),
+        Index("ix_risk_events_tenant_status", "tenant_id", "status", "created_at"),
+        CheckConstraint("tenant_id IS NOT NULL AND tenant_id <> ''", name="ck_risk_events_tenant_id_nonempty"),
+        CheckConstraint("risk_score >= 0 AND risk_score <= 1", name="ck_risk_events_score_range"),
+        CheckConstraint("risk_level IN ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL')", name="ck_risk_events_level"),
+        CheckConstraint("status IN ('open', 'investigating', 'resolved', 'dismissed')", name="ck_risk_events_status"),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: f"risk_{uuid.uuid4().hex}")
+    tenant_id = Column(String, nullable=False)
+    event_type = Column(String(64), nullable=False)
+    risk_level = Column(String(16), nullable=False)
+    risk_score = Column(Numeric(6, 4), nullable=False)
+    transaction_id = Column(String, nullable=True)
+    description = Column(Text, nullable=True)
+    evidence = Column(JSON, nullable=False, default=dict, server_default="{}")
+    status = Column(String(16), nullable=False, default="open")
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    resolution_note = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class ReportExport(Base):
+    """Report and export job records for the report/export APIs."""
+
+    __tablename__ = "report_exports"
+    __table_args__ = (
+        Index("ix_report_exports_tenant_type", "tenant_id", "report_type", "created_at"),
+        Index("ix_report_exports_tenant_status", "tenant_id", "status"),
+        CheckConstraint("tenant_id IS NOT NULL AND tenant_id <> ''", name="ck_report_exports_tenant_id_nonempty"),
+        CheckConstraint("status IN ('queued', 'generating', 'ready', 'failed', 'expired')", name="ck_report_exports_status"),
+        CheckConstraint("format IN ('csv', 'json', 'pdf')", name="ck_report_exports_format"),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: f"rexp_{uuid.uuid4().hex}")
+    tenant_id = Column(String, nullable=False)
+    report_type = Column(String(64), nullable=False)
+    format = Column(String(16), nullable=False)
+    status = Column(String(16), nullable=False, default="queued")
+    record_count = Column(Integer, nullable=False, default=0, server_default="0")
+    file_url = Column(String(1024), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    download_count = Column(Integer, nullable=False, default=0, server_default="0")
+    filters = Column(JSON, nullable=False, default=dict, server_default="{}")
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    error_message = Column(Text, nullable=True)

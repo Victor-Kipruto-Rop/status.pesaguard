@@ -27,6 +27,11 @@ CONTRACT_POLICIES = {
     "airtel-money": ContractPolicy("airtel-money", "1.0", ("1.0",), migration="Map provider payloads to the canonical transaction contract."),
     "bank": ContractPolicy("bank", "1.0", ("1.0",), migration="Add statement/API adapters without changing canonical fields."),
     "pos": ContractPolicy("pos", "1.0", ("1.0",), migration="Map terminal and merchant fields into canonical metadata."),
+    "equity": ContractPolicy("equity", "1.0", ("1.0",), migration="Map Equity Bank statement fields into canonical metadata."),
+    "kcb": ContractPolicy("kcb", "1.0", ("1.0",), migration="Map KCB Bank statement fields into canonical metadata."),
+    "absa": ContractPolicy("absa", "1.0", ("1.0",), migration="Map Absa Bank statement fields into canonical metadata."),
+    "visa": ContractPolicy("visa", "1.0", ("1.0",), migration="Map card network fields into canonical metadata."),
+    "mastercard": ContractPolicy("mastercard", "1.0", ("1.0",), migration="Map card network fields into canonical metadata."),
     "database": ContractPolicy("database", "1.0", ("1.0",), migration="Use expand, backfill, contract Alembic revisions."),
 }
 

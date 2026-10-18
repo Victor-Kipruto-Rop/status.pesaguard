@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import create_engine, text
 
 psycopg2 = pytest.importorskip("psycopg2")
 from tenant_context import tenant_scope
@@ -61,7 +62,12 @@ def test_concurrent_same_transaction_has_one_winner():
     for worker in workers:
         worker.join(timeout=20)
 
-    cleanup = psycopg2.connect(database_url)
+    cleanup_url = (
+        os.getenv("PYTEST_TEST_DB_URL")
+        or os.getenv("DATABASE_URL")
+        or database_url
+    )
+    cleanup = psycopg2.connect(cleanup_url)
     try:
         with cleanup:
             with cleanup.cursor() as cursor:
@@ -82,7 +88,7 @@ def test_concurrent_same_transaction_has_one_winner():
     reason="set PESAGUARD_RUN_POSTGRES_INTEGRATION=1 and PESAGUARD_POSTGRES_TEST_URL",
 )
 def test_concurrent_first_device_sessions_upsert_once_and_count_both():
-    from sqlalchemy import create_engine, inspect
+    from sqlalchemy import inspect
     from sqlalchemy.orm import sessionmaker
 
     database_url = os.environ["PESAGUARD_POSTGRES_TEST_URL"]
@@ -147,11 +153,20 @@ def test_concurrent_first_device_sessions_upsert_once_and_count_both():
             assert len(rows) == 1
             assert rows[0].session_count == 2
     finally:
-        with tenant_scope(tenant_id), sessions() as session:
-            session.query(DeviceIdentity).filter_by(
-                tenant_id=tenant_id,
-                user_id=user_id,
-                device_id=device_id,
-            ).delete(synchronize_session=False)
-            session.commit()
+        cleanup_url = (
+            os.getenv("PYTEST_TEST_DB_URL")
+            or os.getenv("DATABASE_URL")
+            or database_url
+        )
+        cleanup_engine = create_engine(cleanup_url, pool_pre_ping=True)
+        with cleanup_engine.begin() as connection:
+            connection.execute(
+                text(
+                    "DELETE FROM user_devices "
+                    "WHERE tenant_id = :tenant_id AND user_id = :user_id "
+                    "AND device_id = :device_id"
+                ),
+                {"tenant_id": tenant_id, "user_id": user_id, "device_id": device_id},
+            )
+        cleanup_engine.dispose()
         engine.dispose()

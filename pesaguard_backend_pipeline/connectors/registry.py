@@ -4,11 +4,16 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict
 
+from connectors.absa import AbsaConnector
 from connectors.airtel import AirtelConnector
 from connectors.banks import BankConnector
+from connectors.equity import EquityConnector
 from connectors.files import FileConnector
+from connectors.kcb import KcbConnector
+from connectors.mastercard import MastercardConnector
 from connectors.mpesa import MpesaConnector, SafaricomConnector
 from connectors.pos import PosConnector
+from connectors.visa import VisaConnector
 
 
 def connector_factories(ingestion_service: Any) -> Dict[str, Callable[..., Any]]:
@@ -19,6 +24,11 @@ def connector_factories(ingestion_service: Any) -> Dict[str, Callable[..., Any]]
         "bank": lambda credentials=None: BankConnector(ingestion_service, credentials),
         "pos": lambda credentials=None: PosConnector(ingestion_service, credentials),
         "csv": lambda credentials=None: FileConnector(ingestion_service, credentials),
+        "equity": lambda credentials=None: EquityConnector(ingestion_service, credentials),
+        "kcb": lambda credentials=None: KcbConnector(ingestion_service, credentials),
+        "absa": lambda credentials=None: AbsaConnector(ingestion_service, credentials),
+        "visa": lambda credentials=None: VisaConnector(ingestion_service, credentials),
+        "mastercard": lambda credentials=None: MastercardConnector(ingestion_service, credentials),
     }
 
 

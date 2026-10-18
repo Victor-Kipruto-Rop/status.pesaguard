@@ -16,6 +16,7 @@ def smtp_setup(monkeypatch):
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
+    monkeypatch.setenv("PESAGUARD_EMAIL_PROVIDER", "smtp")
     monkeypatch.setenv("EMAIL_HOST", "smtp.example.test")
     monkeypatch.setenv("EMAIL_FROM", "sender@example.test")
     smtp = MagicMock()
@@ -176,4 +177,3 @@ def test_connection_failure_diagnostics_are_safe(smtp_setup, caplog):
     assert "phase=connection" in caplog.text
     assert "error_type=TimeoutError" in caplog.text
     assert "private-provider-detail" not in caplog.text
-

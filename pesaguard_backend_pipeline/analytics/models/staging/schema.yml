@@ -1,0 +1,94 @@
+version: 2
+
+models:
+  - name: stg_transactions
+    description: "Staged raw M-Pesa/Daraja transactions, deduplicated by tenant + provider + external transaction ID."
+    columns:
+      - name: transaction_id
+        description: "Primary key for the staged transaction record."
+        tests:
+          - unique
+          - not_null
+      - name: tenant_id
+        description: "Tenant identifier for data isolation."
+        tests:
+          - not_null
+      - name: provider_account_id
+        description: "Connected provider account for the tenant."
+        tests:
+          - not_null
+      - name: amount
+        description: "Transaction amount in minor currency units."
+        tests:
+          - not_null
+      - name: currency
+        description: "ISO 4217 currency code (3-letter uppercase)."
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["KES", "USD", "EUR", "GBP"]
+      - name: status
+        description: "Transaction lifecycle status."
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["RECEIVED", "VALIDATED", "PROCESSING", "RECONCILING", "RECONCILED", "FAILED", "REJECTED"]
+
+  - name: stg_discrepancies
+    description: "Staged reconciliation discrepancies requiring investigation."
+    columns:
+      - name: discrepancy_id
+        tests:
+          - unique
+          - not_null
+      - name: tenant_id
+        tests:
+          - not_null
+      - name: anomaly_type
+        tests:
+          - not_null
+      - name: severity
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["low", "medium", "high", "critical"]
+
+  - name: stg_reconciliation_matches
+    description: "Staged reconciliation match results with match scores and processing latency."
+    columns:
+      - name: match_id
+        tests:
+          - unique
+          - not_null
+      - name: tenant_id
+        tests:
+          - not_null
+      - name: match_score
+        description: "Reconciliation confidence score (0-1)."
+        tests:
+          - not_null
+      - name: engine_version
+        tests:
+          - not_null
+
+  - name: stg_merchant_metrics
+    description: "Staged incremental merchant metrics by time bucket."
+    columns:
+      - name: metric_id
+        tests:
+          - unique
+          - not_null
+      - name: tenant_id
+        tests:
+          - not_null
+      - name: merchant_id
+        tests:
+          - not_null
+      - name: currency
+        tests:
+          - not_null
+      - name: granularity
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["hour", "day", "week"]

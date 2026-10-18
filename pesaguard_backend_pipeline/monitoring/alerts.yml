@@ -170,3 +170,43 @@ groups:
         annotations:
           summary: Distributed authentication rate limiting is unavailable
           description: Redis-backed login throttling failed closed; inspect the Redis service and authentication traffic.
+
+      - alert: PesaGuardNotificationQueueBacklog
+        expr: pesaguard_notification_queue_depth > 500
+        for: 10m
+        labels:
+          severity: critical
+          service: communications
+        annotations:
+          summary: Notification queue backlog is growing
+          description: More than 500 notification outbox entries are pending, retrying, or leased; inspect the communications worker and email provider health.
+
+      - alert: PesaGuardNotificationDeliveryFailureRate
+        expr: (pesaguard_notification_deliveries_failed / max(pesaguard_notification_deliveries_total + pesaguard_notification_deliveries_failed, 1)) > 0.05
+        for: 10m
+        labels:
+          severity: critical
+          service: communications
+        annotations:
+          summary: Notification delivery failure rate is elevated
+          description: More than 5 percent of notification deliveries are failing, dead-lettering, bouncing, or being complained about.
+
+      - alert: PesaGuardNotificationDeliveryPendingHigh
+        expr: pesaguard_notification_deliveries_pending > 1000
+        for: 15m
+        labels:
+          severity: warning
+          service: communications
+        annotations:
+          summary: Notification deliveries are pending for an extended period
+          description: More than 1000 notifications remain in created, queued, processing, accepted, submitted, or sent state; inspect provider acceptance and delivery webhook processing.
+
+      - alert: PesaGuardMpesaIngestionLatencyHigh
+        expr: pesaguard_mpesa_ingestion_latency_p95_seconds > 300
+        for: 10m
+        labels:
+          severity: warning
+          service: ingestion
+        annotations:
+          summary: M-Pesa ingestion latency is elevated
+          description: The p95 time from M-Pesa callback receipt to durable persistence exceeds 300 seconds; inspect the Daraja callback handler and database write path.

@@ -165,7 +165,7 @@ def test_reconciliation_audit_writes(tmp_path):
 
 def test_scheduled_reports_generation(tmp_path):
     setup_test_db(tmp_path)
-    sched = __import__("pesaguard_backend_pipeline.scheduled_reports", fromlist=["*"])
+    sched = __import__("pesaguard_backend_pipeline.operations.scheduled_reports", fromlist=["*"])
     from pesaguard_backend_pipeline.models import Discrepancy
     from pesaguard_backend_pipeline import app_2
     app_2 = importlib.reload(app_2)

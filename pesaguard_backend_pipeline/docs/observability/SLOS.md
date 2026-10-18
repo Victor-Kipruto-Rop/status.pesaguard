@@ -20,6 +20,9 @@ PesaGuard currently runs a Flask and SQLAlchemy backend with PostgreSQL as the p
 | Reconciliation completion | 99% <= 5 minutes | 1 hour | processing and outbox gauges | Reconciliation on-call / `docs/runbooks/RECONCILIATION_FAILURE.md` |
 | Backup freshness | <= 26 hours | continuous | `pesaguard_backup_age_seconds` | Database on-call / `docs/database/BACKUPS.md` |
 | Restore drill integrity | 100% sentinel checks | quarterly | isolated restore result | Database on-call / `docs/database/RESTORE_PROCEDURES.md` |
+| Notification delivery rate | >= 99.5% | 1 hour | `pesaguard_notification_deliveries_total` / `pesaguard_notification_deliveries_failed` | Communications on-call |
+| Notification queue depth | < 500 entries | continuous | `pesaguard_notification_queue_depth` | Communications on-call |
+| M-Pesa ingestion latency | p95 <= 300 seconds | 1 hour | `pesaguard_mpesa_ingestion_latency_p95_seconds` | Ingestion on-call |
 
 An SLO breach records the affected window and tenant scope and consumes the corresponding error budget. These pilot targets must be re-baselined after 30 days of production telemetry.
 

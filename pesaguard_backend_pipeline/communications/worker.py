@@ -26,11 +26,24 @@ from .incidents import report_incident, sla_breach
 from .models import CommunicationAttempt, CommunicationNotification
 from .outbox import claim_entries, complete_entry, fail_entry
 from .providers.factory import build_africas_talking_provider
+from .providers.email import EmailProviderConfig, EmailProviderFactory
 
 logger = logging.getLogger(__name__)
 
 _PROVIDER_FAILURE_THRESHOLD = max(1, int(os.getenv("PESAGUARD_COMMUNICATION_PROVIDER_INCIDENT_THRESHOLD", "10")))
 _MAX_ATTEMPTS_DEFAULT = 5
+
+
+def _default_channel_provider(
+    channel: CommunicationChannel,
+    *,
+    fallback_factory: Callable[[], Any] | None = None,
+) -> Any:
+    if channel is CommunicationChannel.EMAIL:
+        return EmailProviderFactory(config=EmailProviderConfig.from_environment()).create()
+    if channel is CommunicationChannel.SMS:
+        return (fallback_factory or build_africas_talking_provider)()
+    return (fallback_factory or build_africas_talking_provider)()
 
 
 def process_outbox_once(
@@ -114,7 +127,11 @@ def _process_outbox_in_scope(
         session.add(attempt)
         try:
             channel = CommunicationChannel(notification.channel)
-            provider = channel_provider_factory(channel) if channel_provider_factory else provider_factory()
+            provider = (
+                channel_provider_factory(channel)
+                if channel_provider_factory
+                else _default_channel_provider(channel, fallback_factory=provider_factory)
+            )
             recipient = notification.recipient
             if channel is CommunicationChannel.PUSH:
                 recipient = decrypt_value(recipient)

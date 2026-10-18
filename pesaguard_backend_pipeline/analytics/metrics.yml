@@ -1,0 +1,146 @@
+version: 2
+
+metrics:
+  - name: transaction_volume
+    label: "Transaction Volume"
+    description: "Total transaction volume in minor currency units"
+    type: cumulative
+    timestamp: created_at
+    type_params:
+      window: day
+    sql_expression: sum(trans_amount)
+    dimensions:
+      - tenant_id
+      - currency
+      - provider
+      - status
+
+  - name: transaction_count
+    label: "Transaction Count"
+    description: "Number of transactions processed"
+    type: count
+    timestamp: created_at
+    type_params:
+      window: day
+    sql_expression: count(*)
+    dimensions:
+      - tenant_id
+      - currency
+      - provider
+      - status
+
+  - name: reconciliation_rate
+    label: "Reconciliation Rate"
+    description: "Percentage of transactions reconciled successfully"
+    type: ratio
+    timestamp: match_timestamp
+    type_params:
+      window: day
+    numerator: reconciliation_matches_count
+    denominator: transaction_count
+    dimensions:
+      - tenant_id
+
+  - name: discrepancy_count
+    label: "Discrepancy Count"
+    description: "Number of open discrepancies requiring investigation"
+    type: count
+    timestamp: detected_at
+    type_params:
+      window: day
+    sql_expression: count(*)
+    dimensions:
+      - tenant_id
+      - anomaly_type
+      - severity
+
+  - name: avg_processing_latency_ms
+    label: "Average Processing Latency (ms)"
+    description: "Average end-to-end transaction processing latency in milliseconds"
+    type: average
+    timestamp: created_at
+    type_params:
+      window: hour
+    sql_expression: avg(processing_latency_ms)
+    dimensions:
+      - tenant_id
+      - provider
+
+  - name: merchant_failure_rate
+    label: "Merchant Failure Rate"
+    description: "Percentage of merchant transactions that failed"
+    type: ratio
+    timestamp: bucket_start
+    type_params:
+      window: day
+    numerator: failed_transactions
+    denominator: transaction_count
+    dimensions:
+      - tenant_id
+      - merchant_id
+      - currency
+
+  - name: anomaly_rate
+    label: "Anomaly Rate"
+    description: "Percentage of transactions flagged as anomalies"
+    type: ratio
+    timestamp: detected_at
+    type_params:
+      window: day
+    numerator: anomaly_count
+    denominator: transaction_count
+    dimensions:
+      - tenant_id
+
+entities:
+  - name: tenant
+    expr: tenant_id
+  - name: merchant
+    expr: merchant_id
+  - name: provider
+    expr: provider
+  - name: transaction
+    expr: id
+
+dimensions:
+  - name: tenant_id
+    label: "Tenant ID"
+    description: "Unique tenant identifier"
+    type: categorical
+    sql_expression: tenant_id
+
+  - name: currency
+    label: "Currency"
+    description: "ISO 4217 currency code"
+    type: categorical
+    sql_expression: currency
+
+  - name: provider
+    label: "Provider"
+    description: "Payment provider (e.g., mpesa)"
+    type: categorical
+    sql_expression: provider
+
+  - name: status
+    label: "Transaction Status"
+    description: "Transaction lifecycle status"
+    type: categorical
+    sql_expression: status
+
+  - name: anomaly_type
+    label: "Anomaly Type"
+    description: "Type of anomaly detected"
+    type: categorical
+    sql_expression: anomaly_type
+
+  - name: severity
+    label: "Severity"
+    description: "Discrepancy severity level"
+    type: categorical
+    sql_expression: severity
+
+  - name: merchant_id
+    label: "Merchant ID"
+    description: "Merchant or account identifier"
+    type: categorical
+    sql_expression: merchant_id

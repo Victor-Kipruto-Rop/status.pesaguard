@@ -98,7 +98,54 @@ jobs:
           JWT_SECRET_KEY: test_ci_jwt_secret_key_12345_min32bytes
         run: alembic -c pesaguard_backend_pipeline/alembic.ini upgrade head
 
+      - name: Start disposable Redpanda broker
+        run: |
+          docker run --detach --rm --name pesaguard-ci-redpanda \
+            --publish 19092:9092 \
+            docker.redpanda.com/redpandadata/redpanda:v25.2.2 \
+            redpanda start \
+            --overprovisioned \
+            --smp=1 \
+            --memory=1G \
+            --reserve-memory=0M \
+            --node-id=0 \
+            --check=false \
+            --kafka-addr=PLAINTEXT://0.0.0.0:9092 \
+            --advertise-kafka-addr=PLAINTEXT://localhost:19092
+
+      - name: Wait for Redpanda Kafka API
+        run: |
+          python - <<'PY'
+          import time
+
+          from kafka.admin import KafkaAdminClient
+
+          deadline = time.monotonic() + 120
+          last_error = None
+          while time.monotonic() < deadline:
+              admin = None
+              try:
+                  admin = KafkaAdminClient(
+                      bootstrap_servers="localhost:19092",
+                      client_id="pesaguard-ci-healthcheck",
+                      request_timeout_ms=2_000,
+                      api_version_auto_timeout_ms=2_000,
+                  )
+                  admin.list_topics()
+                  print("Redpanda Kafka API is ready")
+                  break
+              except Exception as exc:
+                  last_error = exc
+                  time.sleep(2)
+              finally:
+                  if admin is not None:
+                      admin.close()
+          else:
+              raise SystemExit(f"Redpanda did not become ready: {last_error!r}")
+          PY
+
       - name: Run test suite
+        working-directory: pesaguard_backend_pipeline
         env:
           PYTHONPATH: .
           DATABASE_URL: postgresql://pesaguard:pesaguard@localhost:5432/pesaguard_test
@@ -109,12 +156,15 @@ jobs:
           PESAGUARD_RUN_POSTGRES_INTEGRATION: "1"
           PESAGUARD_POSTGRES_TEST_URL: postgresql://pesaguard:pesaguard@localhost:5432/pesaguard_test?options=-c%20role%3Dpesaguard_app
           REDIS_URL: redis://localhost:6379/0
+          PESAGUARD_RUN_REDIS_INTEGRATION: "1"
+          PESAGUARD_RUN_KAFKA_INTEGRATION: "1"
+          PESAGUARD_LIVE_KAFKA_BOOTSTRAP: localhost:19092
           DARAJA_SHARED_SECRET: test_ci_secret_key_12345
           # Do not disable source validation; tests must exercise authenticated callbacks.
           # Application startup rejects JWT secrets shorter than 32 bytes.
           JWT_SECRET_KEY: test_ci_jwt_secret_key_12345_min32bytes
         run: |
-          pytest -c pesaguard_backend_pipeline/pytest.ini -v --tb=short --durations=10
+          pytest -c pytest.ini -v --tb=short --durations=10
 
       - name: Run breaking-change contract gate
         shell: bash

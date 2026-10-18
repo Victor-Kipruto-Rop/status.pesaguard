@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import hashlib
 from datetime import datetime, timezone
 import os
@@ -312,6 +312,106 @@ class WebhookAdapter(GenericProviderAdapter):
         super().__init__("webhook")
 
 
+class BankPartnerAdapter(GenericProviderAdapter):
+    """Base adapter for banking partners (Equity, KCB, Absa).
+
+    Maps bank-specific fields (sort_code, account_number, beneficiary_name,
+    swift_code, branch_code, clearing_code, cheque_number, narration,
+    balance_after) into canonical metadata and merchant_id.
+    """
+
+    BANK_FIELDS = (
+        "sort_code",
+        "account_number",
+        "beneficiary_name",
+        "swift_code",
+        "branch_code",
+        "clearing_code",
+        "cheque_number",
+        "narration",
+        "balance_after",
+    )
+
+    def normalize(self, payload: Mapping[str, Any], *, tenant_id: str) -> IngestionEnvelope:
+        envelope = super().normalize(payload, tenant_id=tenant_id)
+        source = dict(payload)
+        metadata = dict(envelope.canonical.metadata)
+        for field_name in self.BANK_FIELDS:
+            value = source.get(field_name)
+            if value is not None and str(value).strip():
+                metadata[field_name] = str(value).strip()
+        narration = (
+            source.get("narration")
+            or source.get("description")
+            or source.get("reference")
+            or ""
+        )
+        if narration:
+            metadata["narration"] = str(narration).strip()
+        balance_after = source.get("balance_after")
+        if balance_after is not None and str(balance_after).strip():
+            metadata["balance_after"] = str(balance_after).strip()
+        merchant_id = str(
+            source.get("merchant_id")
+            or source.get("terminal_id")
+            or source.get("branch_code")
+            or ""
+        ).strip()
+        canonical = replace(
+            envelope.canonical,
+            merchant_id=merchant_id,
+            metadata=metadata,
+        )
+        return _build_envelope(canonical, source)
+
+
+class EquityAdapter(BankPartnerAdapter):
+    def __init__(self):
+        super().__init__("equity")
+
+
+class KcbAdapter(BankPartnerAdapter):
+    def __init__(self):
+        super().__init__("kcb")
+
+
+class AbsaAdapter(BankPartnerAdapter):
+    def __init__(self):
+        super().__init__("absa")
+
+
+class CardNetworkAdapter(GenericProviderAdapter):
+    """Map card-network fields (merchant, PAN fragments, auth) into metadata."""
+
+    CARD_FIELDS = ("card_last4", "card_bin", "authorization_code", "settlement_id")
+
+    def normalize(self, payload: Mapping[str, Any], *, tenant_id: str) -> IngestionEnvelope:
+        envelope = super().normalize(payload, tenant_id=tenant_id)
+        source = dict(payload)
+        canonical = envelope.canonical
+        metadata = dict(canonical.metadata)
+        for key in self.CARD_FIELDS:
+            value = source.get(key)
+            if value is not None and str(value).strip():
+                metadata[key] = str(value).strip()
+        canonical = replace(
+            canonical,
+            merchant_id=str(source.get("merchant_id") or "").strip(),
+            metadata=metadata,
+        )
+        return _build_envelope(canonical, source)
+
+
+class VisaAdapter(CardNetworkAdapter):
+    def __init__(self):
+        super().__init__("visa")
+
+
+class MastercardAdapter(CardNetworkAdapter):
+    def __init__(self):
+        super().__init__("mastercard")
+
+
 def _build_envelope(canonical: CanonicalTransaction, raw_payload: Dict[str, Any]) -> IngestionEnvelope:
     tenant = str(canonical.tenant_id).strip()
     if not tenant:
@@ -356,6 +456,11 @@ ADAPTERS = {
     "csv": CsvAdapter(),
     "external-api": ExternalApiAdapter(),
     "webhook": WebhookAdapter(),
+    "equity": EquityAdapter(),
+    "kcb": KcbAdapter(),
+    "absa": AbsaAdapter(),
+    "visa": VisaAdapter(),
+    "mastercard": MastercardAdapter(),
 }
 
 

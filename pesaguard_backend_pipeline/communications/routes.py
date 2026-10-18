@@ -133,10 +133,7 @@ def create_webhook_blueprint(
         try:
             priority = CommunicationPriority(str(payload.get("priority", "normal")).lower())
             provider = email_provider_factory() if email_provider_factory is not None else None
-            config = EmailProviderConfig(
-                provider=str(payload.get("provider", "smtp_email")).lower(),
-                from_email=str(payload.get("from_email") or "no-reply@pesaguard.co.ke"),
-            )
+            config = EmailProviderConfig.from_environment()
             email_service = EmailService(
                 session,
                 gateway_client=None,
@@ -159,6 +156,15 @@ def create_webhook_blueprint(
             )
             session.commit()
             return jsonify({"id": notification.id, "status": notification.status, "tenant_id": tenant_id}), 202
+        except RuntimeError:
+            session.rollback()
+            current_app.logger.warning("Email provider configuration is unavailable")
+            return jsonify({
+                "error": {
+                    "code": "EMAIL_PROVIDER_NOT_CONFIGURED",
+                    "message": "Email delivery is not configured.",
+                },
+            }), 503
         except (TypeError, ValueError) as exc:
             session.rollback()
             return jsonify({"error": {"code": "INVALID_REQUEST", "message": str(exc)}}), 400

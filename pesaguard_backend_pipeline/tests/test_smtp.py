@@ -17,7 +17,7 @@ def create_service():
     if backend not in sys.path:
         sys.path.insert(0, backend)
     from email_service import EmailService
-    return EmailService()
+    return EmailService(provider="smtp")
 
 
 def main(argv=None) -> int:
@@ -62,4 +62,3 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

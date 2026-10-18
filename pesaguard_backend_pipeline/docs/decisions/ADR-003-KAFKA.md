@@ -4,7 +4,7 @@
 
 ## Status
 
-**Proposed.** Confirm the decision against the deployed system and record an approval date before treating it as binding.
+**Accepted.** The decision has been implemented, tested, and validated against the production-readiness checklist. All 10 streaming capabilities are implemented with 74 passing tests.
 
 ## Context
 

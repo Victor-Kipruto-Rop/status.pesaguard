@@ -44,6 +44,32 @@ def test_all_source_adapters_share_one_envelope_contract():
         "csv": {"transaction_id": "csv-1", "amount": "3.00", "account_id": "file-1"},
         "external-api": {"transaction_id": "api-1", "amount": "5.00", "account_id": "api-1"},
         "webhook": {"transaction_id": "hook-1", "amount": "6.00", "account_id": "hook-1"},
+        "visa": {
+            "transaction_id": "visa-1",
+            "amount": "12.50",
+            "currency": "USD",
+            "merchant_id": "merchant-visa",
+            "terminal_id": "terminal-visa",
+            "card_last4": "1234",
+            "card_bin": "411111",
+            "timestamp": "2026-09-23T18:29:54Z",
+            "transaction_type": "purchase",
+            "status": "COMPLETED",
+            "authorization_code": "AUTH123",
+        },
+        "mastercard": {
+            "transaction_id": "mc-1",
+            "amount": "7.75",
+            "currency": "KES",
+            "merchant_id": "merchant-mc",
+            "terminal_id": "terminal-mc",
+            "card_last4": "5678",
+            "card_bin": "512345",
+            "timestamp": "2026-09-23T18:30:00Z",
+            "transaction_type": "purchase",
+            "status": "COMPLETED",
+            "authorization_code": "AUTH456",
+        },
     }
     for provider, payload in records.items():
         result = service.ingest(provider, payload, tenant_id="tenant-a")
@@ -247,3 +273,120 @@ def test_connector_emit_rejects_inconsistent_generated_timestamp():
     else:
         raise AssertionError("inconsistent envelope timestamps must not be persisted")
     assert store.calls == []
+
+
+def test_visa_adapter_normalizes_card_fields_and_preserves_authorization():
+    service = IngestionService(FakeEventStore())
+    result = service.ingest(
+        "visa",
+        {
+            "transaction_id": "V-999",
+            "amount": "42.50",
+            "currency": "USD",
+            "merchant_id": "merch-visa",
+            "terminal_id": "term-visa",
+            "card_last4": "1234",
+            "card_bin": "411111",
+            "timestamp": "2026-09-23T18:29:54Z",
+            "transaction_type": "purchase",
+            "status": "COMPLETED",
+            "authorization_code": "AUTH999",
+        },
+        tenant_id="tenant-a",
+    )
+    canonical = result.envelope.canonical
+    assert result.result is ProcessResult.STORED
+    assert canonical.provider == "visa"
+    assert canonical.provider_transaction_id == "V-999"
+    assert canonical.amount == "42.50"
+    assert canonical.currency == "USD"
+    assert canonical.merchant_id == "merch-visa"
+    assert canonical.transaction_time == "2026-09-23T18:29:54Z"
+    assert canonical.metadata["card_last4"] == "1234"
+    assert canonical.metadata["card_bin"] == "411111"
+    assert canonical.metadata["authorization_code"] == "AUTH999"
+    assert canonical.account_reference == ""
+
+
+def test_mastercard_adapter_normalizes_card_fields():
+    service = IngestionService(FakeEventStore())
+    result = service.ingest(
+        "mastercard",
+        {
+            "transaction_id": "MC-888",
+            "amount": "15.00",
+            "currency": "KES",
+            "merchant_id": "merch-mc",
+            "terminal_id": "term-mc",
+            "card_last4": "5678",
+            "card_bin": "512345",
+            "timestamp": "2026-09-23T18:30:00Z",
+            "transaction_type": "refund",
+            "status": "REVERSED",
+        },
+        tenant_id="tenant-a",
+    )
+    canonical = result.envelope.canonical
+    assert result.result is ProcessResult.STORED
+    assert canonical.provider == "mastercard"
+    assert canonical.provider_transaction_id == "MC-888"
+    assert canonical.amount == "15.00"
+    assert canonical.currency == "KES"
+    assert canonical.transaction_type == "REFUND"
+    assert canonical.status == "REVERSED"
+    assert canonical.metadata["card_last4"] == "5678"
+    assert canonical.metadata["card_bin"] == "512345"
+
+
+def test_card_network_connectors_share_lifecycle():
+    store = FakeEventStore()
+    service = IngestionService(store)
+    for source in ("visa", "mastercard"):
+        connector = get_connector(source, service)
+        assert connector.source == source
+        results = connector.ingest(
+            {
+                "transaction_id": f"{source}-txn",
+                "amount": "10.00",
+                "currency": "KES",
+                "merchant_id": "merch",
+                "terminal_id": "term",
+            },
+            tenant_id="tenant-a",
+        )
+        assert len(results) == 1
+        assert results[0].result is ProcessResult.STORED
+        assert results[0].envelope.provider == source
+
+
+def test_card_network_invalid_amount_is_rejected():
+    service = IngestionService(FakeEventStore())
+    try:
+        service.ingest(
+            "visa",
+            {
+                "transaction_id": "visa-bad",
+                "amount": "not-a-number",
+                "merchant_id": "merch",
+                "terminal_id": "term",
+            },
+            tenant_id="tenant-a",
+        )
+    except IngestionError as error:
+        assert "amount" in str(error).lower()
+    else:
+        raise AssertionError("invalid card amounts must be rejected")
+
+
+def test_card_network_missing_required_fields_are_rejected():
+    service = IngestionService(FakeEventStore())
+    try:
+        service.ingest(
+            "mastercard",
+            {"transaction_id": "mc-bad"},
+            tenant_id="tenant-a",
+        )
+    except IngestionError as error:
+        assert "amount" in str(error).lower()
+    else:
+        raise AssertionError("card records missing amount must be rejected")

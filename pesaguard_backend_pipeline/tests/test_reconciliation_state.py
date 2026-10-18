@@ -371,3 +371,69 @@ def test_high_risk_match_is_persisted_and_published_as_a_discrepancy(tmp_path, m
     assert alerts[0][0]["severity"] == "critical"
     assert alerts[0][0]["anomalies"] == ["amount_threshold"]
     engine.dispose()
+
+
+def test_failed_notification_enqueue_keeps_reconciliation_outbox_retryable(tmp_path, monkeypatch):
+    import hashlib
+    from datetime import datetime, timezone
+
+    database_url = f"sqlite:///{tmp_path / 'notification_enqueue_failure.db'}"
+    engine = create_engine(database_url)
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(
+        reconciliation_job,
+        "AuditSession",
+        sessionmaker(bind=engine, expire_on_commit=False),
+    )
+    monkeypatch.setattr(reconciliation_job, "provider_account_id", lambda _event: "provider-a")
+    trans_id = "TX-NOTIFICATION-RETRY"
+    tenant_id = "tenant-a"
+    event_key = hashlib.sha256(f"{tenant_id}:provider-a:{trans_id}".encode("utf-8")).hexdigest()
+    with sessionmaker(bind=engine)() as session:
+        session.add(ReconciliationOutbox(
+            id="notification-outbox-retry",
+            tenant_id=tenant_id,
+            event_key=event_key,
+            topic=reconciliation_job.TOPIC_DISCREPANCIES,
+            payload={
+                "tenant_id": tenant_id,
+                "trans_id": trans_id,
+                "status": "needs_review",
+                "severity": "critical",
+                "anomalies": ["amount_mismatch"],
+            },
+            status="processing",
+            available_at=datetime.now(timezone.utc),
+        ))
+        session.commit()
+
+    monkeypatch.setattr(
+        reconciliation_job,
+        "dispatch_discrepancy_alert",
+        lambda payload, tenant_id: {"status": "failed", "error": "notification_queue_unavailable"},
+    )
+
+    class Future:
+        def get(self, timeout=None):
+            return None
+
+    class Producer:
+        def send(self, topic, key=None, value=None):
+            return Future()
+
+        def flush(self, timeout=None):
+            return None
+
+    reconciliation_job._publish_downstream(
+        {"event": {"TransID": trans_id}},
+        trans_id,
+        Producer(),
+        tenant_id,
+    )
+
+    with sessionmaker(bind=engine)() as session:
+        outbox = session.query(ReconciliationOutbox).filter_by(id="notification-outbox-retry").one()
+        assert outbox.status == "failed"
+        assert outbox.last_error == "notification event enqueue did not succeed: failed"
+        assert outbox.published_at is None
+    engine.dispose()

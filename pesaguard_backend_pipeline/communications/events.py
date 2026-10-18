@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import uuid
 from typing import Any, Mapping
 
 from topics import TOPIC_COMMUNICATION_AUDIT, TOPIC_NOTIFICATION_EVENTS, TOPIC_NOTIFICATION_STATUS
@@ -33,6 +34,7 @@ def build_notification_event(
     event: str,
     *,
     tenant_id: str,
+    event_id: str | None = None,
     recipient: str | None = None,
     context: Mapping[str, Any] | None = None,
     correlation_id: str | None = None,
@@ -42,8 +44,11 @@ def build_notification_event(
         raise ValueError(f"unsupported notification event: {event}")
     if not isinstance(tenant_id, str) or not tenant_id.strip():
         raise ValueError("tenant_id must be a non-empty string")
+    if event_id is not None and (not isinstance(event_id, str) or not event_id.strip() or len(event_id) > 255):
+        raise ValueError("event_id must contain 1 to 255 characters")
     payload = {
         "event": event,
+        "event_id": event_id.strip() if event_id else uuid.uuid4().hex,
         "tenant_id": tenant_id.strip(),
         "recipient": recipient.strip() if isinstance(recipient, str) and recipient.strip() else None,
         "context": dict(context or {}),
@@ -61,6 +66,7 @@ def discrepancy_notification_event(evaluation: Mapping[str, Any], tenant_id: str
     return build_notification_event(
         event,
         tenant_id=tenant_id,
+        event_id=str(evaluation.get("event_id")) if evaluation.get("event_id") else None,
         context=dict(evaluation),
         correlation_id=str(evaluation.get("trans_id") or ""),
     )

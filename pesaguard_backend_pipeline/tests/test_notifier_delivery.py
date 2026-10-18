@@ -1,7 +1,9 @@
 import smtplib
+from unittest.mock import Mock
 
 import notifier
 import pytest
+from email_addresses import EMAIL_ADDRESSES
 
 
 ALERT = {
@@ -91,6 +93,7 @@ def test_sms_delivery_reports_missing_configuration_or_client(monkeypatch):
 
 
 def test_email_delivery_sends_message_and_uses_configured_smtp_authentication(monkeypatch):
+    monkeypatch.setenv("PESAGUARD_EMAIL_PROVIDER", "smtp")
     sent_messages = []
     smtp_calls = []
 
@@ -130,10 +133,13 @@ def test_email_delivery_sends_message_and_uses_configured_smtp_authentication(mo
     assert len(sent_messages) == 1
     assert sent_messages[0]["To"] == "finance@test.invalid"
     assert sent_messages[0]["From"] == "alerts@test.invalid"
-    assert "TX-9281" in sent_messages[0].get_content()
+    message_parts = list(sent_messages[0].iter_parts())
+    assert "TX-9281" in message_parts[0].get_content()
+    assert "https://pesaguard.co.ke/logo/logo.svg" in message_parts[1].get_content()
 
 
 def test_email_delivery_sends_without_authentication_when_credentials_are_absent(monkeypatch):
+    monkeypatch.setenv("PESAGUARD_EMAIL_PROVIDER", "smtp")
     sent_messages = []
 
     class FakeSMTP:
@@ -166,6 +172,7 @@ def test_email_delivery_sends_without_authentication_when_credentials_are_absent
 
 
 def test_email_delivery_retries_smtp_failures_and_stops_after_success(monkeypatch):
+    monkeypatch.setenv("PESAGUARD_EMAIL_PROVIDER", "smtp")
     attempts = []
     sleeps = []
 
@@ -198,6 +205,7 @@ def test_email_delivery_retries_smtp_failures_and_stops_after_success(monkeypatc
 
 
 def test_email_delivery_reports_failure_after_retry_budget_is_exhausted(monkeypatch):
+    monkeypatch.setenv("PESAGUARD_EMAIL_PROVIDER", "smtp")
     attempts = []
     sleeps = []
 
@@ -229,6 +237,7 @@ def test_email_delivery_reports_failure_after_retry_budget_is_exhausted(monkeypa
 
 
 def test_email_delivery_skips_missing_configuration_and_stops_on_unexpected_errors(monkeypatch):
+    monkeypatch.setenv("PESAGUARD_EMAIL_PROVIDER", "smtp")
     monkeypatch.setattr(notifier, "SMTP_HOST", None)
     monkeypatch.setenv("ALERT_EMAIL_RECIPIENTS", "finance@test.invalid")
     assert notifier.send_email_alert(ALERT, max_retries=0) is False
@@ -243,6 +252,23 @@ def test_email_delivery_skips_missing_configuration_and_stops_on_unexpected_erro
     monkeypatch.setattr(notifier.smtplib, "SMTP", fail_to_connect)
     monkeypatch.setenv("ALERT_EMAIL_RECIPIENTS", "finance@test.invalid")
     assert notifier.send_email_alert(ALERT, max_retries=3) is False
+
+
+def test_resend_alert_sends_to_each_recipient_with_stable_keys(monkeypatch):
+    client = Mock()
+    monkeypatch.setenv("PESAGUARD_EMAIL_PROVIDER", "resend")
+    monkeypatch.setenv("ALERT_EMAIL_RECIPIENTS", " ops@example.test, finance@example.test ")
+    monkeypatch.setattr(notifier, "ResendEmailClient", lambda: client)
+
+    assert notifier.send_email_alert(ALERT, max_retries=0) is True
+
+    messages = [call.args[0] for call in client.send_message.call_args_list]
+    assert [message["to"] for message in messages] == ["ops@example.test", "finance@example.test"]
+    assert all(message["from_email"] == EMAIL_ADDRESSES.alerts for message in messages)
+    assert all(message["reply_to"] == EMAIL_ADDRESSES.incidents for message in messages)
+    assert messages[0]["idempotency_key"] != messages[1]["idempotency_key"]
+    assert messages[0]["preheader"] == "Review the discrepancy alert and its current status."
+    assert "TX-9281" in messages[0]["text"]
 
 
 def test_slack_delivery_reports_missing_configuration_and_rejects_negative_retry_count(monkeypatch):

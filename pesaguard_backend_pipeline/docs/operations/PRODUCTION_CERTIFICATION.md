@@ -247,7 +247,7 @@ engineering remediation, **not** as certification evidence.
 | 2.1 | Integrity | `CERTIFIED` | Alembic migrations with FK/unique/check/NOT-NULL constraints, transaction-scoped writes (`phase1` integrity suites), **32 passed** in the Data chunk (`test_action_audit`, `test_phase1_integrity`, `test_phase1_full_integrity`, `test_lifecycle_integrity`, `test_ground_truth_certification`) | — |
 | 2.2 | Idempotency | `CERTIFIED` | `IdempotencyRecord` + `ProcessedTransaction` unique constraints, `derive_idempotency_key`, `tests/test_api_idempotency_contract.py`, load-test gate `idempotency: duplicate_count > 0`; live smoke test proved `STORED` → `DUPLICATE` | — |
 | 2.3 | Data quality | `PARTIALLY CERTIFIED` | `data_quality.py`, `dq_rules.py`, `provenance.py`, transactional quarantine, remediation history, and focused quality/route tests; **77 passed, 1 Redis-dependent test deselected** in the latest focused selection | Evidence is local Windows/SQLite. PostgreSQL migration execution, production concurrency, calibrated outlier baselines, target capacity, and live alerting remain unverified |
-| 2.4 | Lineage | `PARTIALLY CERTIFIED` | `data_lineage.py` (immutable stage snapshots, schema/pipeline version keys), `action_audit` correlation/trace IDs | `tests/test_live_traceability.py` and `tests/test_phase6_e2e_traceability.py` are skip-gated (`PESAGUARD_LIVE_E2E=1`) and CI never sets it; one traceability test fails outright |
+| 2.4 | Lineage | `PARTIALLY CERTIFIED` | `data_lineage.py` (immutable stage snapshots, schema/pipeline version keys), `action_audit` correlation/trace IDs | `tests/test_live_traceability.py` and `tests/test_phase6_e2e_traceability.py` remain gated on an approved gateway and evidence stack; Kafka lag integration is tested separately against disposable Redpanda |
 | 2.5 | Immutable audit | `CERTIFIED` | PostgreSQL **append-only triggers** (`action_audit.py:481-495`, `BEFORE UPDATE`/`BEFORE DELETE`), Ed25519 cryptographic signatures, hash-chain verification, audit-key lifecycle (`active`/`revoked`), WORM export (`FileImmutableAuditStore.put_immutable` with content hash), 32 Data-chunk tests pass | Retention of the WORM export target is configuration-dependent |
 
 ## 3. Financial correctness
@@ -336,7 +336,7 @@ engineering remediation, **not** as certification evidence.
 | **B9** | **Resolved locally (2026-10-14).** Data-quality/provenance integration is covered by the focused test suites, including remediation migration and transaction-route quarantine. | Current focused run: 77 passed, 1 deselected. PostgreSQL migration, concurrency, and live recovery verification remain blocked |
 | **B10** | **No longer present in the current metrics implementation (checked 2026-10-14).** The current module defines the data-quality metrics without the reported source-tree write or marker string. | Current source inspection and marker search; re-run the complete static/security scan before closing the release gate |
 | **B11** | **PostgreSQL / Redis / Kafka behavior is unverified in this environment.** Docker CLI is present, but the Linux engine is unavailable; no live dependency or deployment checks were run. | Local Docker API probe failed; `psql` is unavailable; target-like verification remains required |
-| **B12** | **Live integration E2E remains unverified.** CI now enables the PostgreSQL integration flag and sets the non-bypass application-role URL, but no GitHub Actions result after that change exists. `PESAGUARD_LIVE_E2E` remains disabled because no approved gateway, broker, or Alertmanager sandbox is configured | Current workflow source; no post-change Actions run |
+| **B12** | **Full gateway-to-notification integration E2E remains unverified.** The root release gate now configures PostgreSQL integration, shared Redis rate-limit checks, and broker-backed Kafka lag checks against disposable Redpanda. The gateway traceability test still needs an approved gateway and evidence database; the Alertmanager live test remains gated. No GitHub Actions result after these workflow changes exists | Root release workflow source; focused local tests; no post-change Actions run |
 
 ## Required human actions before re-certification
 
@@ -367,10 +367,10 @@ engineering remediation, **not** as certification evidence.
 7. **Reconcile the RPO/RTO targets** (B6) into one authoritative pair of numbers
    before any drill can be judged.
 8. **Select and integrate a real secret store with a rotation procedure** (B7).
-9. **Run the updated CI workflow** (B11/B12) with PostgreSQL and Redis, verify
-    the PostgreSQL race/RLS tests pass, and preserve the Actions result. Keep
-    `PESAGUARD_LIVE_E2E` gated until approved provider, broker, and monitoring
-    sandboxes and credentials are available.
+9. **Run the updated CI workflow** (B11/B12) with PostgreSQL, Redis, and
+    Redpanda; verify the database race/RLS and shared rate-limit tests pass, and
+    preserve the Actions result. Keep the gateway traceability and Alertmanager
+    live tests gated until approved test endpoints and credentials are available.
 
 ## Sign-off
 
@@ -383,3 +383,35 @@ engineering remediation, **not** as certification evidence.
 > **This document certifies nothing by itself.** Production readiness may only be
 > claimed when every row above is `CERTIFIED`, the blocker register is empty, and the
 > sign-off table is completed by a named human owner for each domain.
+
+## Working-tree evidence update — 2026-10-16
+
+- The root release verification workflow now provisions the required least-privilege
+  PostgreSQL roles before migration, runs PostgreSQL integration tests against the
+  migrated database, enables the shared Redis rate-limit test, and starts pinned
+  Redpanda for broker-backed Kafka lag tests. A CI contract test protects these
+  requirements. No GitHub Actions run has exercised this workflow update yet.
+- The Kafka lag tests now use a dedicated `PESAGUARD_RUN_KAFKA_INTEGRATION` guard.
+  The broad `PESAGUARD_LIVE_E2E` flag remains unset so CI cannot accidentally enable
+  gateway or Alertmanager probes against non-test endpoints.
+- The experimental lakehouse now persists Parquet objects atomically under its
+  configured filesystem root, prevents unsafe object-key paths, and routes Bronze,
+  Silver, and Gold to separate layers with tenant checks. Iceberg creation now
+  fails closed unless a catalog-backed handler is registered. It is still not a
+  production data platform: it has no cloud object-store adapter or durable catalog
+  for schema, snapshot, and partition metadata, and deployment storage persistence
+  has not been configured. Do not use this module for production financial data.
+- Removed always-true assertions from the notification metrics and Kafka replay
+  readiness tests. Kafka replay now validates topic/offset/filter arguments before
+  connecting and closes a consumer if producer setup fails. The local focused
+  readiness selection passed **126 tests, 4 skipped** on Windows/SQLite;
+  the changed Kafka and Redis service integration tests require the configured CI services.
+- The full suite is not certified by this run. The local full-suite attempt stopped
+  at an authentication test that correctly returns `503 rate_limiter_unavailable`
+  when Redis is absent; the new CI workflow provisions Redis, but it must run and
+  pass before that gate can close.
+- The production decision remains **NOT CERTIFIED — DO NOT SHIP**. Human-owned
+  reconciliation approval, production-shaped load evidence, measured production
+  RPO/RTO and restore drills, secret-store ownership, staging smoke checks, and
+  engineering/security/finance sign-off remain open. The Resend credential shared
+  in chat must be revoked and replaced before production use.

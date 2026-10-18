@@ -55,6 +55,15 @@ tenant-aware foreign keys to the notification. The API-key lifecycle
 idempotency table is protected by a policy that derives its tenant through its
 referenced API key.
 
+The follow-up migration `20261018_complete_tenant_rls` reapplies forced RLS
+and the tenant guard to every current public table containing `tenant_id`,
+including tables introduced after the baseline migration. It grants the
+runtime application role only the required read/write operations for device
+sessions and mutable alert state; alert history remains append-only. It also
+adds the scheduler's persisted JSON payload column when upgrading an existing
+database. Apply it with the three role variables documented below; the
+migration deliberately does not create roles or credentials.
+
 The API-key bootstrap path is a narrow exception to ordinary tenant lookup:
 `api_key_records` is protected by RLS, while authentication uses the
 `pesaguard_authenticate_api_key(text)` SECURITY DEFINER function. Its owner is a
@@ -169,12 +178,21 @@ and that these tested export paths reject tenant spoofing; it does not prove
 that every route, query, asynchronous path, cache key, or deployed policy is
 tenant-safe.
 
-The RLS migration upgraded, downgraded one revision, and upgraded again on the
-disposable database. The migration graph resolved to one base and one head
-(`20261014_tenant_row_level_security`). Python compilation and scoped
-`git diff --check` passed. The test database's regular application-table grants
-were provisioned manually for the integration run; this verifies RLS behavior,
-not the deployment's application-role provisioning procedure.
+The original RLS migration upgraded, downgraded one revision, and upgraded
+again on the disposable database. At that time the migration graph resolved to
+one base and one head (`20261014_tenant_row_level_security`). The test
+database's regular application-table grants were provisioned manually for that
+integration run; this verifies RLS behavior, not the deployment's
+application-role provisioning procedure.
+
+On 2026-10-17, the follow-up migration upgraded the disposable PostgreSQL 16
+database through the single head `20261018_complete_tenant_rls`. The focused
+PostgreSQL checks for ledger isolation, concurrency, scheduler isolation,
+tenant RLS, and alert isolation completed with **11 passed, 2 skipped**; the
+release-workflow and ledger-currency checks in the same run also passed. The
+skipped cases remain opt-in checks requiring separate integrations. Python
+compilation and `git diff --check` passed. These results apply to the local
+disposable database, not a deployed staging database.
 
 These results are local integration evidence, not deployment evidence. The
 complete route/query/cache/file-download/webhook audit, production role and
@@ -182,8 +200,9 @@ grant verification, deployed connection-pool behavior, Kafka ACLs, and Redis
 tenant-key audit remain outstanding. This is not a claim of complete tenant
 isolation or production readiness.
 
-Rollback disables the RLS policies and removes the communication tenant
-column/FKs that were introduced by this revision; the attempt tenant is
-re-derived from its notification during upgrade. A rollback also removes the
-API-key lookup function and role grants. Downgrade must be exercised against a
-disposable PostgreSQL database before operational use.
+The baseline RLS migration's downgrade disables its policies and reverses its
+communication tenant columns/FKs and API-key lookup function/grants. The
+follow-up migration intentionally has a no-op downgrade: forced RLS, least
+privilege grants, and the scheduler payload column remain in place during an
+application rollback. Roll forward with compatible code; do not assume an
+Alembic downgrade removes these safeguards or schema additions.
